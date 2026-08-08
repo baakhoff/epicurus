@@ -157,11 +157,15 @@ class Memory:
         )
 
     async def forget(self, *, tenant: str, session_id: str) -> int:
-        """Erase a conversation's history rows.
+        """Erase a conversation's history rows — the messages-only primitive.
 
-        Facts the user is remembered by are deliberately left intact — they belong to the
-        user across chats, not to the conversation that happened to surface them. Forget a
-        single fact through the memory view instead.
+        The full chat delete is the
+        :class:`~epicurus_core_app.agent.session_delete.SessionDeleteCascade` (#771), which
+        also removes the session's attachments, queued extractions, model override, and paused
+        runs; the route prefers it and only falls back here. Facts the user is remembered by
+        are deliberately left intact either way — they belong to the user across chats, not to
+        the conversation that happened to surface them. Forget a single fact through the
+        memory view instead.
         """
         return await self._store.delete_session(tenant=tenant, session_id=session_id)
 

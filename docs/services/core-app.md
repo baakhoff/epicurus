@@ -39,13 +39,14 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
 | `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
-| `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. |
+| `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. **Invisible sessions are excluded** (#772), and every list read also runs the **orphan sweep**: any flagged session not named by the optional `?active=<session_id>` query param (the invisible chat the requesting client is currently *in*) and with no turn in flight is fully erased via the #771 cascade — so a crash never strands an invisible chat on disk. The sweep is best-effort; a hiccup never fails the list. |
 | `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
+| `PUT /platform/v1/agent/sessions/{id}/ephemeral` | Flag a session **invisible** (#772) — see *Invisible chats* below. Idempotent (a mid-chat reload re-marks so the flag is server truth, not client memory); **503** if no flag store is wired. Returns `{ephemeral: true}`. There is deliberately **no un-mark**: toggling invisibility off *is* an exit, and every exit deletes (`DELETE /sessions/{id}`). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. Each message carries its **`id`** — the stable anchor a client names to edit that turn (`/edit`, #552) — alongside `role`, `content`, `created_at`, `entity_refs`, `attachments`, and (assistant turns) `activity`. |
 | `GET /platform/v1/agent/sessions/{id}/active-run` | The session's in-flight run to re-attach to — `{run_id, last_seq}` or `null` if none is live (ADR-0055). How a client rediscovers a turn after a reload/reconnect. |
 | `DELETE /platform/v1/agent/sessions/{id}/active-run` | Cancel the session's in-flight turn — the explicit **Stop** (a decoupled turn outlives the connection, so Stop must say so). Returns `{cancelled}` (ADR-0055). |
 | `GET /platform/v1/agent/active-runs` | Session ids with an in-flight turn right now — `{session_ids}`. Drives the conversations-list running indicator (#396) in one request rather than polling each row; tenant-scoped, best-effort/point-in-time (the live-run buffer is a disposable cache). |
-| `DELETE /platform/v1/agent/sessions/{id}` | Forget a conversation — its history rows. Facts the user is remembered by are kept (ADR-0045). |
+| `DELETE /platform/v1/agent/sessions/{id}` | Delete a conversation — **everything it produced, everywhere** (#771): its messages, its uploaded attachments' bytes (`agent_attachments`), its **still-queued extraction exchanges** (so the nightly drain can never distil a deleted chat), its model override (`session_models`), any suspended/pending paused runs (`agent_suspended_runs` / `agent_pending_drafts` / `agent_pending_approvals`), its automation badge mapping (`automation_sessions` — a rolling automation's next run simply re-records it), and any in-flight run's buffered state (the live turn is cancelled first). One tenant-scoped cascade; messages are deleted **last**, so a failure partway leaves the session visible and the whole operation retriable. Returns `{deleted}` (the message count — the pre-#771 field) plus additive per-store counts. **The boundary, stated honestly:** facts extracted on *previous* nights are curated memory, managed in the Memory view — deleting a chat stops all future derivation from it but does not un-learn them (ADR-0045); tool effects (a task created, a mail sent) and uploads already persisted to the storage sink's Files page belong to the modules that own them. The web confirm dialog says exactly this. |
 | `POST /platform/v1/agent/sessions/{id}/regenerate` | Re-answer the session's last user turn, dropping the previous answer. Body `{model?}`. Truncates everything after the last user message, then streams a fresh turn — same SSE protocol as `/chat/stream`; an `error` event if there's no user turn (#302). |
 | `POST /platform/v1/agent/sessions/{id}/edit` | Replace a user message with `{content}` (and `{model?}`, `{message_id?}`) and re-answer it in place — revises the message, truncates everything after it, then streams. **`message_id`** names the turn to revise (#552); omitted, it defaults to the session's **last** user message, so pre-#552 callers are unchanged. Editing further back discards the real turns behind it (the web shell confirms with the count first). Edits in place, never branching (#302). Every check runs **before** any write, so a rejected edit leaves history untouched — an `error` event on empty content, no user turn, a `message_id` that isn't a **user** message of **this** session, or a turn already running for the session (a live run's history isn't ours to cut; the `/chat/stream` **409** remains the backstop for one starting mid-flight). |
 | `POST /platform/v1/agent/runs/{run_id}/resume` | Resume a turn paused by `ask_user`, supplying `{answer}` (ADR-0053). Consumes the suspended run, appends the answer as the pending tool call's result, and continues the same turn — same SSE protocol as `/chat/stream`. An `error` event if the run is unknown / expired / already answered. |
@@ -168,6 +169,38 @@ one *running* run exists per `(tenant, session)` — a second start gets `409` (
 Multi-instance re-attach (a shared event log over Valkey/NATS, or sticky routing) is a named
 follow-up; v1 is single-instance.
 
+### Invisible chats (#772)
+
+A session flagged via `PUT /sessions/{id}/ephemeral` is an **invisible chat**: everything works
+normally while you're in it, and when you leave it is **deleted — not archived, deleted** (the
+full #771 cascade). The design is *persist-flagged, then hard-delete*: the session writes
+normally (so an accidental reload mid-conversation keeps the thread), and the flag row
+(`ephemeral_sessions`) is what makes it different:
+
+- **Hidden from every listing and learner while live.** Excluded from `GET /sessions` (and so
+  from the web's sessions sheet), **never enqueued for fact extraction** — the agent checks the
+  flag at learn time, in both `nightly` and `immediate` modes, failing *closed* (a flag-store
+  hiccup skips learning rather than leaking; #771's session-stamped queue purge is the exit's
+  backstop) — filtered out of the nightly reflection pass's transcript scan (transitively: the
+  scan reads the store's `sessions()`, whose default now excludes flagged sessions), and out of
+  `memory_search`'s past-conversation half, so an invisible chat can't surface inside another
+  conversation. Profile synthesis reads facts, so it is covered transitively once extraction
+  never sees the chat.
+- **Every exit deletes.** Toggling off, switching sessions, starting a new chat, and closing
+  the app all run `DELETE /sessions/{id}` from the client; the **orphan sweep** is the safety
+  net — at startup (nothing can be live across a restart) and on every session-list read, any
+  flagged session not named by the client's `?active=` and with no turn in flight is erased.
+  One consequence, stated plainly: invisible chats are effectively **per-client** — another
+  client's list read treats your idle invisible chat as stranded (an in-flight turn is spared).
+  A core-app restart mid-invisible-chat likewise sweeps it (conservative by design: a crash
+  must never strand one).
+- **Honest semantics.** Invisible means the *transcript* evaporates — tool effects do not. A
+  task created or a mail sent from an invisible chat persists, exactly like downloads from a
+  private browser window; a file uploaded during it remains in Files (the storage-sink copy).
+  Usage metering still records tokens — the core meters all inference (constraint #8) and the
+  events carry no content. The per-session model picker works as usual; its `session_models`
+  row dies with the session. Normal chats are byte-identically unaffected.
+
 ### Governed playbooks (ADR-0093)
 
 The agent's behaviour used to improve only when the operator hand-edited the base prompt.
@@ -191,12 +224,36 @@ best-effort: if the playbook read fails the turn proceeds on the base prompt alo
 breaking. Token budget follows ADR-0083's precedent — an informal, UI-side soft-size warning over
 the *combined* length, not a hard server-side cap.
 
+**The base system prompt is off-limits (#762, amending ADR-0093 §1–§3).** Reflection originally
+offered two targets — a named playbook, or the base instructions themselves. The second target
+no longer exists, for three reasons the feature's own shape makes acute: **(1) the pass reads
+tainted input** — transcripts contain external content the agent quoted (mail bodies, web
+results, document text), so planted "operator preferences" in something the agent merely *read*
+could surface as a plausible edit to the very document the agent's rules live in; **(2) the
+approval gate is weakest exactly where the stakes are highest** — an instructions proposal was a
+full-document replacement, the largest possible diff, presented nightly, indefinitely, and
+approval fatigue makes a one-line planted change in an otherwise-reasonable edit realistic to
+wave through, after which it persists in the system prompt of every future turn; **(3)
+governance asymmetry** — the governed system drafting revisions to its own governing document is
+a conflict of interest even with review. Playbooks carry the same harvesting value with a
+categorically smaller blast radius: additive, named, rendered under a visible `## Playbook:`
+heading, individually disable-able, never rewriting operator-authored text. Enforced at **three
+layers**: the reflection prompt no longer offers the target (the base prompt stays in its
+context **read-only**, so proposals don't duplicate base rules, with an explicit "you may not
+propose changes to it"); `_resolve` drops any `"instructions"` target the model returns anyway
+(logged); and — defense in depth — the review sink refuses to stage a proposal whose path is the
+instructions path **for every origin**, with the instructions apply-path removed outright, so no
+future proposal source can quietly reintroduce the target. A pending instructions proposal that
+exists at upgrade time still renders (diffed against the live base) and is cleanly
+**rejectable**; Approve refuses it with a clear message. Operator editing of the base prompt via
+**Settings** is unchanged — humans edit freely; this bounds the *agent's* proposal surface.
+
 **The approval surface.** A proposal is an ordinary `ReviewSuggestion`
 ([`epicurus_core.review`](../reference/platform-api.md), ADR-0090) — `operation: "update"`
-against the base instructions or an existing playbook, `"create"` for a new one — so the existing
+against an existing playbook, `"create"` for a new one — so the existing
 `ReviewView` / `SuggestionReviewModal` render it with the same diff, editable draft, and audit
 trail every module's queue gets. Approve applies the (possibly hand-edited) content through the
-stores below; reject discards. Both record a durable decision row.
+playbook store below; reject discards. Both record a durable decision row.
 
 **The reserved `core` pseudo-module.** Every other `review`-page implementer is an external
 module the registry reaches over HTTP; the core hosts no page of its own. Rather than bend the
@@ -207,10 +264,15 @@ discovers its page like any module's, with no new endpoint and no new frontend c
 
 **Where proposals come from.** A `playbook-reflection` job on the nightly maintenance batch (see
 *Maintenance orchestrator* below — registered `nightly=True`, so it rides the orchestrator's one
-schedule rather than a knob of its own). Per tenant it scans the sessions active since its last
-run and makes **one** gateway call over them, asking for candidate edits; each is staged for
-review. It is metered under **the tenant whose sessions it scanned** — never a synthetic
-background tenant (constraints #1/#8, the ADR-0051 drain's precedent). Details that matter:
+schedule rather than an *hour* knob of its own). Per tenant it scans the sessions active since
+its last run — **invisible sessions excluded** (#772) — and makes **one** gateway call over
+them, asking for candidate playbook edits; each is staged for review. It is metered under **the
+tenant whose sessions it scanned** — never a synthetic background tenant (constraints #1/#8,
+the ADR-0051 drain's precedent). Since #762 the pass has its **own off-switch**,
+`PLAYBOOK_REFLECTION_ENABLED` (default on, now that it is playbook-only): disabled, the nightly
+job reports `skipped — disabled (PLAYBOOK_REFLECTION_ENABLED=false)` **without spending a
+gateway call** — previously the only way to stop reflection was disabling all nightly
+maintenance (fact extraction, profile synthesis, re-index included). Details that matter:
 
 - **It cannot apply anything.** It is handed a proposal sink and a *read-only* playbook lookup,
   never the stores that own the documents — the ADR's hard rule is enforced by construction, not
@@ -231,13 +293,13 @@ background tenant (constraints #1/#8, the ADR-0051 drain's precedent). Details t
   generation stages nothing rather than raising. Nothing new since the last pass? No gateway call
   at all.
 
-**Storage and undo.** An approved edit to the *base* prompt writes through the **existing**
-`AgentInstructionsStore` — the same path the operator's own Settings edit uses, so an approved
-edit is indistinguishable from a hand-typed one. Both halves version ADR-0046-style
-(snapshot-on-save, capped at the same `MAX_VERSIONS = 50`, oldest pruned). One deliberate
-departure from the editor's version store: it snapshots the content *being saved*; these
-snapshot the content being **replaced**. The editor accumulates many operator saves, so the prior
-body is always somewhere in its history; here the very first write may be an approved
+**Storage and undo.** An approved playbook edit writes through the playbook store; the base
+prompt is written **only** by the operator's own Settings edit (`instructions_routes.py`) —
+since #762 no proposal path reaches `AgentInstructionsStore` at all. Both stores version
+ADR-0046-style (snapshot-on-save, capped at the same `MAX_VERSIONS = 50`, oldest pruned). One
+deliberate departure from the editor's version store: it snapshots the content *being saved*;
+these snapshot the content being **replaced**. The editor accumulates many operator saves, so
+the prior body is always somewhere in its history; here the very first write may be an approved
 agent-authored edit against a body never saved through this path, and recording only the new
 content would leave the original unrecoverable — exactly the undo the ADR says an agent-proposed
 edit needs. A save that changes nothing records no version.
@@ -1017,15 +1079,22 @@ windows) and firing schedule triggers; it **replaces** the scheduled-turns loop.
 `AutomationRunner` runs one automation: an agent turn, then a deterministic sink fan-out,
 then a ledger entry — always a ledger entry.
 
-**The sinks (#672).** The **chat** sink is *turn-time*: the run persists into a session — so a
+**The sinks (#672, #723).** The **chat** sink is *turn-time*: the run persists into a session — so a
 rolling chat is reply-able and the next run sees the reply — **only** when chat is configured,
 never otherwise (the owner rule: an unchecked chat sink makes zero sessions). Its session→automation
 mapping (`automation_sessions`) is what badges and groups automation chats in the list; the post-run
 dispatcher therefore **skips** chat and the runner records it fired. The **notes**/**kb** sinks route
 a run's output into a module document through the *existing* `ModuleRegistry.save_page_doc` (the #541
 no-second-write-path rule), at a per-automation `DocumentTarget` (`{path_pattern, mode}`), recording
-an `EntityRef` on the run's `artifacts` so the runs feed links what was written. **push** stays its
-own issue.
+an `EntityRef` on the run's `artifacts` so the runs feed links what was written. The **push** sink
+(`automations/push_sink.py`, #723) closes the last gap the seam left open: it calls
+[`PushService.notify`](#push-notifications-adr-0102) under the `"automation"` category (with
+`automation_id`, so a per-automation override can silence just one), title the automation's own
+name, body the run's raw output — quiet hours, the rate cap, and the push/center toggles all apply
+exactly as for any other caller. When `notify()`'s `center` toggle wrote a notification-center row,
+the sink records its id as an `EntityRef` (`module="core"`, `kind="notification"`) on the run's
+`artifacts`, the same field notes/kb already populate — so a `sinks=["push"]` template (all ten
+#717 shipped with) now delivers something visible instead of silently completing.
 
 **Agent-gated delivery (#706).** The sink fan-out above is deterministic by default — but a
 per-automation toggle (`agent_gated_delivery`, off by default) lets the run's own turn decide.
@@ -1079,22 +1148,26 @@ path but new work creates an automation.
 ### Push notifications (ADR-0102)
 
 `PushService.notify(tenant, category=..., title=..., body=...)` (`push/service.py`) is the
-core-internal send path a future caller — the automations engine's push sink, a
-core-originated system notice — calls in-process (#670). Every call first records a
-notification-center row (`notifications.py`) if the category/automation's `center` toggle is
-on, regardless of what push delivery does below (#671, ADR-0102 §4). Push delivery then
-resolves, in order: the effective push toggle (off skips delivery entirely), quiet hours in the
-tenant's timezone (ADR-0039 — queues for a digest instead of sending), and an in-memory
-per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`, single-instance v1 — the same disposable-cache
-trade the live-run registry makes, ADR-0055). Delivery fans out to every device via
-VAPID-signed webpush (RFC 8291/8292), pruning any subscription the push service reports Gone
-(404/410) as expected churn (uninstalled PWA, cleared site data), not an error.
+core-internal send path a category-based caller uses in-process (#670) — today, the settings
+UI's test button and the [automations engine's push sink](#automations-engine-adr-0105)
+(#723). Every call first records a notification-center row (`notifications.py`) if the
+category/automation's `center` toggle is on, regardless of what push delivery does below
+(#671, ADR-0102 §4); `NotifyResult.notification_id` carries that row's id back to the caller
+(`None` when `center` was off), so a caller like the push sink can build an `EntityRef`
+without a second lookup. Push delivery then resolves, in order: the effective push toggle (off
+skips delivery entirely), quiet hours in the tenant's timezone (ADR-0039 — queues for a digest
+instead of sending), and an in-memory per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`,
+single-instance v1 — the same disposable-cache trade the live-run registry makes, ADR-0055).
+Delivery fans out to every device via VAPID-signed webpush (RFC 8291/8292) — the outgoing
+payload's `body` is capped at 500 characters (an automation's full report should not be able
+to blow a push service's own size ceiling), independent of the untruncated text already
+written to the notification-center row above — pruning any subscription the push service
+reports Gone (404/410) as expected churn (uninstalled PWA, cleared site data), not an error.
 
 `/platform/v1/push/*` (`push/routes.py`) is the subscription/preference surface the PWA's
 service worker and Settings page drive: `GET /vapid-public-key`, `GET`/`POST`/`DELETE
 /subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, `GET`/`PUT /event-subscriptions` (below), and
-`POST /test` (the settings UI's "send test notification" button — the only caller of
-category-based `notify` today; the automations engine's push sink is still deferred).
+`POST /test` (the settings UI's "send test notification" button, category `"system"`).
 `/platform/v1/notifications/*` (`notifications_routes.py`) is the notification-center half:
 `GET ""` (list), `GET /unread-count`, `POST /{id}/read`, `POST /read-all`. See
 [the reference page](../reference/notifications.md) for the full contract and the web-side
@@ -1230,7 +1303,11 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `content` (raw bytes), `created_at`. Written by `POST /agent/attachments`; read back once per
   turn by the attachment expander (`AttachmentStore.get`), scoped to the requesting tenant.
   `kind.startswith("image/")` is what routes a `file` attachment to the vision path instead of
-  text expansion (#633) — see **Agent** above.
+  text expansion (#633) — see **Agent** above. There is deliberately no session column: the
+  chat↔attachment link lives in `agent_messages.attachments` (JSON), which is why the delete
+  cascade (#771) collects a session's `att_id`s from its messages *before* deleting them, then
+  drops the byte rows here (the best-effort copy pushed to the storage sink's Files page is a
+  separate durable artifact and is kept).
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `context_window` (global `num_ctx`),
   `kv_cache_type` (Ollama KV-cache, ADR-0046), `agent_max_steps` (agent loop bound, #297),
@@ -1353,6 +1430,14 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   because there is no other "session row": a session is derived from `agent_messages` via
   `GROUP BY` (`ConversationStore.sessions`), the same reason `automation_sessions` (above)
   needed its own table for the chat-list badge.
+- **Postgres `ephemeral_sessions`** — the invisible-chat flag rows (#772): `session_id`
+  (primary key — session ids are client-minted uuids, so a cross-tenant collision is
+  unrepresentable, the `session_models` precedent), `tenant`, `created_at`. A flagged session
+  writes normally but is excluded from the sessions list, the extraction enqueue, reflection's
+  transcript scan, and `memory_search`'s conversation half; every exit path deletes it via the
+  #771 cascade (which drops this row **last**, so a failed erase stays sweepable), and the
+  orphan sweep erases any flagged session a crashed client left behind. A new table created by
+  `create_all` — no migration.
 - **Postgres `scheduled_turns`** — recurring prompts that run unattended (ADR-0092): `id`,
   `tenant`, `prompt`, `cadence` (`daily`/`weekly`), `hour`, `weekday` (nullable, weekly-only,
   0=Monday..6=Sunday), `delivery_target` (the session id the turn delivers into), `enabled`,
@@ -1379,11 +1464,16 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   Qdrant's scroll offset) until every point has been visited, so it never drops facts beyond
   a bounded scan window regardless of corpus size (#450, ADR-0076).
 - **Postgres `memory_extraction_queue`** — finished exchanges awaiting background fact
-  extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`. In the
-  default **nightly** mode the agent enqueues each exchange here instead of distilling it inline;
-  the `ExtractionRunner` drains it once a day (at `MEMORY_EXTRACTION_HOUR` in the operator's
-  timezone), serially, so extraction never competes with a live turn for the GPU. Drained rows
-  are deleted; because the queue is durable, a restart never loses a pending exchange.
+  extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`, and a
+  nullable `session_id` (#771) stamping each exchange with the conversation it came from — the
+  handle that lets the chat delete cascade purge a deleted session's still-queued exchanges
+  before the drain distils them. Reconciled additively at init (ADR-0067): rows enqueued before
+  the column existed stay `NULL` and drain exactly as before (they simply can't be targeted by
+  a delete). In the default **nightly** mode the agent enqueues each exchange here instead of
+  distilling it inline; the `ExtractionRunner` drains it once a day (at
+  `MEMORY_EXTRACTION_HOUR` in the operator's timezone), serially, so extraction never competes
+  with a live turn for the GPU. Drained rows are deleted; because the queue is durable, a
+  restart never loses a pending exchange.
 - **Postgres `standing_profiles`** — the compact per-tenant **standing profile** the agent injects
   each turn (#527, ADR-0094): `id`, `tenant`, `content`, `source` (`auto` | `edited`), `created_at`.
   Append-only and **versioned** — each write keeps the last `MEMORY_PROFILE_MAX_VERSIONS` (5) per

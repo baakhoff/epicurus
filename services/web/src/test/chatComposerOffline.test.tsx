@@ -61,7 +61,9 @@ describe("composer while unreachable (#494)", () => {
 
     act(() => {
       useChat.setState({ draft: "hello there" });
-      useConnection.getState().reportUnreachable();
+      useConnection
+        .getState()
+        .reportUnreachable({ method: "GET", path: "/platform/v1/power", kind: "502" });
     });
 
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();

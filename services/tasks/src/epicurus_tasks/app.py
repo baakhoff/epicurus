@@ -29,15 +29,18 @@ from epicurus_tasks.providers import TasksProvider
 from epicurus_tasks.router import TasksRouter, operator_clock
 from epicurus_tasks.scheduler import FiredMarkerStore, run_periodic
 from epicurus_tasks.service import (
+    CAN_PAGE_ID,
     MODULE_NAME,
     TASK_KIND,
     TASKS_PAGE_ID,
     TaskNotFound,
     build_module,
     build_tasks_board,
+    build_tasks_can,
     calendar_feed_items,
     coerce_group,
     coerce_scope,
+    coerce_view,
     enabled_write_lists,
     fetch_task,
     task_attachment,
@@ -179,21 +182,27 @@ def create_app() -> FastAPI:
 
     @app.get("/pages/{page_id}")
     async def page(page_id: str, request: Request) -> dict[str, Any]:
-        """Serve the Tasks page's `board` data (ADR-0018/0036/0047); the core proxies this.
+        """Serve the Tasks / Can pages' `board` data (ADR-0018/0036/0047/#766); core-proxied.
 
-        Tasks from every enabled list are aggregated and grouped into columns by
-        ``build_tasks_board``, each card tagged with its list (category). The board's
-        **view controls** drive two forwarded query params (ADR-0049): ``group`` picks the
-        column layout (due / status / priority / list / none) and ``show`` the task scope
-        (open / completed / all) fetched from the providers; both are clamped to known
-        values. A single failing list is skipped inside the router (#209), so the page
-        degrades rather than blanking; the ``(GoogleTasksError, ValueError) → 502`` is a
-        backstop. The Add form offers a picker of the operator's enabled writable lists.
+        Tasks from every enabled list are aggregated, then **partitioned by due date**
+        (#766): the ``board`` page groups the dated ones into columns via
+        ``build_tasks_board`` (no "No date" bucket any more) and the ``can`` page holds
+        the undated backlog via ``build_tasks_can`` — same fetch, two read views. Each
+        card is tagged with its list (category). The **view controls** drive forwarded
+        query params (ADR-0049): ``group`` picks the board's column layout (due / status
+        / priority / list / none; the Can is a single flat column and ignores it),
+        ``view`` the board's client-side representation (board / list / calendar, #767 —
+        echoed so the *View* switcher shows the active choice and *Group by* hides off
+        the Board view), and ``show`` the task scope (open / completed / all) fetched
+        from the providers; all are clamped to known values. A single failing list is
+        skipped inside the router (#209), so the page degrades rather than blanking; the
+        ``(GoogleTasksError,
+        ValueError) → 502`` is a backstop. The Add forms offer a picker of the operator's
+        enabled writable lists.
         """
-        if page_id != TASKS_PAGE_ID:
+        if page_id not in (TASKS_PAGE_ID, CAN_PAGE_ID):
             raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
         tenant = settings.default_tenant_id
-        group_by = coerce_group(request.query_params.get("group"))
         scope = coerce_scope(request.query_params.get("show"))
         try:
             tasks = await provider.list_tasks(tenant, scope=scope)
@@ -211,10 +220,19 @@ def create_app() -> FastAPI:
         # request (#555). Core unreachable → this degrades to UTC exactly like the sweep's own
         # fallback (`operator_clock` → `_resolve_timezone`), so the two never disagree.
         today = await operator_today()
+        if page_id == CAN_PAGE_ID:
+            return build_tasks_can(
+                tasks,
+                today=today,
+                scope=scope,
+                lists=lists,
+                default_list_id=default_list_id,
+            )
         return build_tasks_board(
             tasks,
             today=today,
-            group_by=group_by,
+            view=coerce_view(request.query_params.get("view")),
+            group_by=coerce_group(request.query_params.get("group")),
             scope=scope,
             lists=lists,
             default_list_id=default_list_id,

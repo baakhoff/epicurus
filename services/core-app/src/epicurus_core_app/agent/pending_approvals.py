@@ -29,9 +29,9 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import JSON, DateTime, String, Text, delete, func, select
+from sqlalchemy import JSON, CursorResult, DateTime, String, Text, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -152,3 +152,19 @@ class PendingApprovalStore:
             await session.delete(row)
             await session.commit()
             return data
+
+    async def delete_for_session(self, *, tenant: str, session_id: str) -> int:
+        """Drop every pending approval of one conversation (#771); returns rows removed.
+
+        The delete-cascade's step for this store: a "deleted" chat must not leave a paused
+        approval — which carries the conversation text verbatim in ``conversation`` —
+        resolvable after the transcript is gone. Tenant-scoped (constraint #1).
+        """
+        async with self._session() as session:
+            result = await session.execute(
+                delete(_PendingApproval).where(
+                    _PendingApproval.tenant == tenant, _PendingApproval.session_id == session_id
+                )
+            )
+            await session.commit()
+            return cast("CursorResult[Any]", result).rowcount or 0

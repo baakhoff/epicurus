@@ -166,7 +166,11 @@ describe("ApprovalPrompt — the ask_approval card (#745, ADR-0117)", () => {
     render(<ChatScreen />, { wrapper });
     await screen.findByRole("button", { name: /approve/i });
 
-    act(() => useConnection.getState().reportUnreachable());
+    act(() =>
+      useConnection
+        .getState()
+        .reportUnreachable({ method: "GET", path: "/platform/v1/power", kind: "502" }),
+    );
 
     expect(screen.getByRole("button", { name: /approve/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /reject/i })).toBeDisabled();

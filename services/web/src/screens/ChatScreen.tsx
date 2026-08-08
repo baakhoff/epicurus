@@ -14,6 +14,7 @@ import {
   CloudMoon,
   Copy,
   Eye,
+  Ghost,
   History,
   Paperclip,
   Pencil,
@@ -85,7 +86,12 @@ import {
 } from "@/lib/format";
 import { SHARE_CACHE, SHARE_FILE_KEY, SHARE_FILE_NAME_HEADER, SHARE_META_KEY, type ShareMeta } from "@/lib/shareTarget";
 import { SUGGESTION_VERB, suggestionTarget } from "@/lib/suggestions";
-import { useChat, type ActivityItem } from "@/stores/chat";
+import {
+  fetchSessions,
+  useChat,
+  useInvisibleLaunchGuard,
+  type ActivityItem,
+} from "@/stores/chat";
 import { useConnection } from "@/stores/connection";
 import { useDownloads } from "@/stores/downloads";
 import { usePanel } from "@/stores/panel";
@@ -431,7 +437,9 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
   // Deleting a whole conversation from a hover-revealed icon is one misclick away from the
   // row's open-target, so it always confirms first (#480).
   const [confirming, setConfirming] = useState<SessionSummary | null>(null);
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions, enabled: open });
+  // fetchSessions (not api.sessions): it names the live invisible session so the server's
+  // list-read sweep spares it while erasing crash-stranded ones (#772).
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: fetchSessions, enabled: open });
   // Which conversations are generating right now (#396): poll while the list is open so a turn
   // finishing in another session updates here too. The current session also reflects its own
   // live `streaming` immediately (union below), without waiting for the next poll.
@@ -558,9 +566,13 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
           ))}
         </>
       )}
+      {/* What delete actually removes (#771): the conversation and everything it produced —
+          messages, its uploaded attachments, and anything queued but not yet learned from it.
+          Facts distilled on previous nights are curated memory, managed in Settings → Memory —
+          deleting the chat stops future derivation but does not un-learn those. */}
       <Confirm
         open={confirming !== null}
-        message={`Delete “${confirming?.title || "this conversation"}”? The whole conversation is removed.`}
+        message={`Delete “${confirming?.title || "this conversation"}”? Its messages, uploaded attachments, and anything queued to be learned from it are removed. Memory already saved from it stays — manage that under Settings → Memory.`}
         confirmLabel="Delete"
         danger
         onConfirm={() => {
@@ -587,7 +599,7 @@ function ModelPicker() {
   // dedupes it, so this doesn't add a request. This session's own persisted model (#707,
   // set by set_chat_model or a prior explicit pick here) takes priority over the
   // device-wide default; null means no override.
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions, staleTime: 15_000 });
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: fetchSessions, staleTime: 15_000 });
   const sessionModel = sessions.data?.find((s) => s.id === sessionId)?.model ?? null;
   const effectiveModel = sessionModel ?? model;
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled: open });
@@ -963,6 +975,10 @@ export function SuggestionBubble() {
 export function ChatScreen() {
   const queryClient = useQueryClient();
   const chat = useChat();
+  // Reconcile a rehydrated invisible chat with how this page came to exist (#772): a
+  // same-tab reload resumes it (re-marking, idempotently); a fresh launch after the app
+  // closed treats that close as the exit it was and deletes the stranded chat.
+  useInvisibleLaunchGuard();
   const model = usePrefs((s) => s.model);
   // Share target deep-link (#493): ?share=1 after the SW's POST-redirect (src/sw.ts).
   const [searchParams, setSearchParams] = useSearchParams();
@@ -1018,7 +1034,7 @@ export function ChatScreen() {
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   // The open conversation's title for the header (#480) — same cache key the sessions
   // sheet uses, and the send/turn-done invalidations keep it fresh once a title lands.
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions, staleTime: 15_000 });
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: fetchSessions, staleTime: 15_000 });
   const sessionTitle = sessions.data?.find((s) => s.id === chat.sessionId)?.title || null;
   // Module-aware starter prompts on the empty state (#480); the Shell already holds
   // this query, so the cache is warm.
@@ -1409,14 +1425,46 @@ export function ChatScreen() {
             </button>
           </Tooltip>
         </div>
-        <h1
-          className={cn(
-            "min-w-0 flex-1 truncate text-center font-serif text-sm",
-            sessionTitle ? "text-ink" : "italic text-ink-faint",
-          )}
+        {/* While invisible (#772) the header states the deal plainly instead of a title —
+            the active state must be unmistakable, not a subtle icon tint. */}
+        {chat.invisible ? (
+          <h1 className="flex min-w-0 flex-1 items-center justify-center gap-1.5 truncate text-center font-serif text-sm text-accent-strong">
+            <Ghost size={14} className="shrink-0" aria-hidden="true" />
+            <span className="min-w-0 truncate">Invisible — deleted when you leave</span>
+          </h1>
+        ) : (
+          <h1
+            className={cn(
+              "min-w-0 flex-1 truncate text-center font-serif text-sm",
+              sessionTitle ? "text-ink" : "italic text-ink-faint",
+            )}
+          >
+            {sessionTitle ?? "New conversation"}
+          </h1>
+        )}
+        {/* Invisible-chat toggle (#772), left of the model chooser. On: a FRESH invisible
+            session starts (never converting the open chat — it was already remembered).
+            Off is an exit: the invisible chat is deleted and a fresh normal one starts. */}
+        <Tooltip
+          label={chat.invisible ? "Leave invisible chat (deletes it)" : "New invisible chat"}
+          side="bottom"
         >
-          {sessionTitle ?? "New conversation"}
-        </h1>
+          <button
+            onClick={() => chat.toggleInvisible()}
+            aria-label={
+              chat.invisible ? "Leave invisible chat (deletes it)" : "New invisible chat"
+            }
+            aria-pressed={chat.invisible}
+            className={cn(
+              "rounded-md p-1.5",
+              chat.invisible
+                ? "bg-accent-dim text-accent-strong"
+                : "text-ink-dim hover:bg-surface-2 hover:text-ink",
+            )}
+          >
+            <Ghost size={18} />
+          </button>
+        </Tooltip>
         <ModelPicker />
       </div>
 
@@ -1426,7 +1474,11 @@ export function ChatScreen() {
           {firstRun && <Welcome />}
           {!firstRun && messages.length === 0 && !chat.pendingUser && (
             <EmptyState quote={dayQuote()}>
-              <p className="text-xs text-ink-faint">a new conversation — it will remember</p>
+              <p className="text-xs text-ink-faint">
+                {chat.invisible
+                  ? "an invisible conversation — deleted when you leave, nothing learned"
+                  : "a new conversation — it will remember"}
+              </p>
               <StarterPrompts modules={modules.data ?? []} onPick={pickStarter} />
             </EmptyState>
           )}
@@ -1710,10 +1762,21 @@ export function ChatScreen() {
             </Button>
           )}
         </div>
-        <p className="mx-auto mt-1.5 max-w-2xl text-center text-[10px] text-ink-faint sm:text-left">
-          <Dot tone={chat.streaming ? "accent" : "dim"} /> memory on — this conversation is
-          remembered across chats
-        </p>
+        {/* Honest semantics both ways (#772): a normal chat is remembered; an invisible one
+            evaporates on exit — though tool effects (a task created, a mail sent) persist,
+            exactly like downloads from a private browser window. */}
+        {chat.invisible ? (
+          <p className="mx-auto mt-1.5 max-w-2xl text-center text-[10px] text-accent-strong sm:text-left">
+            <Ghost size={10} className="mr-1 inline-block" aria-hidden="true" />
+            invisible — this conversation is deleted when you leave and nothing is learned
+            from it; things it does (tasks, mail, files) still persist
+          </p>
+        ) : (
+          <p className="mx-auto mt-1.5 max-w-2xl text-center text-[10px] text-ink-faint sm:text-left">
+            <Dot tone={chat.streaming ? "accent" : "dim"} /> memory on — this conversation is
+            remembered across chats
+          </p>
+        )}
       </div>
 
       <SessionsSheet open={sessionsOpen} onClose={() => setSessionsOpen(false)} />

@@ -174,6 +174,12 @@ class CoreAppSettings(CoreSettings):
     # nightly pass cheap. There is deliberately no reflection *hour* knob: the pass rides the
     # maintenance orchestrator's single schedule (ADR-0093 §1, ADR-0098), never one of its own.
     playbook_reflection_model: str = ""
+    # The reflection pass's own off-switch (#762). Before this, the only way to stop reflection
+    # was disabling ALL nightly maintenance (fact extraction, profile synthesis, re-index
+    # included). Default on — now that the pass is playbook-only (it can no longer propose
+    # base-instructions edits), its blast radius is small enough to run by default. When false,
+    # the nightly job reports "skipped (disabled)" without spending a gateway call.
+    playbook_reflection_enabled: bool = True
     # Default IANA timezone the agent's `now` tool reports when the operator hasn't set one
     # in Settings (e.g. "Europe/Belgrade"). UTC keeps the OSS default neutral; each
     # deployment sets its own in the Settings screen (persisted) or via this env.

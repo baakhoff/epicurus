@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, cast
+from urllib.parse import unquote
 
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -24,6 +25,8 @@ from epicurus_core_app.agent.agent import (
     FINISH_QUIET_TOOL,
     Agent,
     _canonical_calls,
+    _entity_refs_for_model,
+    _entity_url,
     _LoopGuard,
 )
 from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
@@ -800,6 +803,98 @@ async def test_agent_persists_entity_refs_with_the_answer() -> None:
         [ChatMessage(role="user", content="go")], session_id="s1"
     )
     assert memory.remembered_refs == [_ref().model_dump()]
+
+
+# ── entity-link syntax taught to the model (#794) ─────────────────────────────────
+
+
+def test_entity_url_is_well_formed() -> None:
+    url = _entity_url(EntityRef(ref_id="19f2", module="mail", kind="message", title="Hi"))
+    assert url == "epicurus://entity/mail/message/19f2"
+
+
+def test_entity_url_encodes_a_ref_id_containing_a_closing_paren() -> None:
+    # Unencoded, a `)` would prematurely close the markdown link `[text](url)` — and since
+    # the result is just plain markdown, the break is silent, not an error (#794).
+    ref = EntityRef(ref_id="abc)def", module="mail", kind="message", title="Hi")
+    assert _entity_url(ref) == "epicurus://entity/mail/message/abc%29def"
+
+
+def test_entity_url_encodes_a_ref_id_containing_a_space() -> None:
+    # The web's inline-link regex stops at the first whitespace too.
+    ref = EntityRef(ref_id="abc def", module="mail", kind="message", title="Hi")
+    assert _entity_url(ref) == "epicurus://entity/mail/message/abc%20def"
+
+
+def test_entity_url_encodes_a_ref_id_containing_a_slash() -> None:
+    ref = EntityRef(ref_id="abc/def", module="mail", kind="message", title="Hi")
+    assert _entity_url(ref) == "epicurus://entity/mail/message/abc%2Fdef"
+
+
+def test_entity_url_round_trips_through_percent_decoding() -> None:
+    # What the model emits must decode back to exactly the original id — the web side
+    # applies `decodeURIComponent` to the captured segment (`EntityRef.tsx`).
+    for raw in ["abc)def", "abc def", "abc/def", "has both ) and space"]:
+        ref = EntityRef(ref_id=raw, module="mail", kind="message", title="Hi")
+        encoded = _entity_url(ref).rsplit("/", 1)[-1]
+        assert unquote(encoded) == raw
+
+
+@pytest.mark.parametrize(
+    ("module", "kind"),
+    [("mail", "message"), ("calendar", "event"), ("tasks", "task")],
+)
+def test_entity_refs_for_model_produces_a_linkable_url_for_every_module(
+    module: str, kind: str
+) -> None:
+    # This must not become a mail-only fix — the same block feeds every module with refs.
+    ref = EntityRef(ref_id="id1", module=module, kind=kind, title="Item")
+    block = _entity_refs_for_model([ref])
+    assert f"epicurus://entity/{module}/{kind}/id1" in block
+
+
+def test_entity_refs_for_model_teaches_the_link_syntax() -> None:
+    block = _entity_refs_for_model([_ref()])
+    # The id is still there for tool calls (#449, unchanged)...
+    assert "id: e1" in block
+    # ...and the model is now told it can link a mention with `[text](link)` using the
+    # ready-made URL shown per ref, rather than only ever getting ids for tool calls.
+    assert "[text](link)" in block
+    assert "epicurus://entity/calendar/event/e1" in block
+
+
+def test_entity_refs_for_model_truncated_intro_also_teaches_the_link_syntax() -> None:
+    # The capped branch (#468) is a separate f-string from the uncapped one — make sure the
+    # link instruction wasn't only added to one of the two.
+    total = LIST_CAP + 3
+    refs = [
+        EntityRef(ref_id=f"e{i}", module="mail", kind="message", title=f"Item {i}")
+        for i in range(total)
+    ]
+    block = _entity_refs_for_model(refs)
+    assert "[text](link)" in block
+    assert f"showing {LIST_CAP} of {total}" in block  # unchanged wording other tests key off
+
+
+async def test_agent_feeds_the_model_a_clickable_link_for_a_mentioned_entity() -> None:
+    # End-to-end through the loop (not just the pure function): a tool envelope's ref reaches
+    # the model with the ready-made link alongside its id.
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("make_event", "{}")]),
+            ChatResult(model="m", content="done"),
+        ]
+    )
+    mcp = _FakeMcp(
+        specs=[_echo_spec()],
+        route={"make_event": "u"},
+        outputs={"make_event": tool_envelope("Created the event.", [_ref()])},
+    )
+    await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="schedule it")])
+
+    tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
+    assert tool_msg.content is not None
+    assert "epicurus://entity/calendar/event/e1" in tool_msg.content
 
 
 # ── attachments expanded into context (ADR-0019) ─────────────────────────────────

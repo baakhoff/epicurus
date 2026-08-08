@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -31,10 +31,16 @@ NOW_SPEC: dict[str, Any] = {
         "description": (
             "Get the current date and time. Call this whenever a request involves the "
             "current date or a relative time (today, tomorrow, next week, 'at 19:00', "
-            "'in 2 hours') so dates and times are correct. Returns the time in the "
-            "operator's configured timezone; if a connected calendar uses a different "
-            "timezone that is reported too. Pass `timezone` to get the time in a specific "
-            "IANA zone instead."
+            "'in 2 hours', a bare weekday name like 'monday') so dates and times are "
+            "correct. Returns the time in the operator's configured timezone; if a "
+            "connected calendar uses a different timezone that is reported too. Pass "
+            "`timezone` to get the time in a specific IANA zone instead. The result also "
+            "includes `today`, `tomorrow`, and an `upcoming` map from each weekday name to "
+            "its next date, strictly in the future (e.g. asked on a Friday, "
+            "`upcoming.Friday` is next Friday, not today) — for a bare weekday name, use "
+            "`upcoming` verbatim; never compute the date yourself by counting days. If "
+            "phrasing like 'next Monday' is genuinely ambiguous and the difference matters, "
+            "ask the user rather than guess."
         ),
         "parameters": {
             "type": "object",
@@ -69,6 +75,25 @@ def _resolve_zone(name: str) -> tuple[ZoneInfo, str]:
         return _UTC, "UTC"
 
 
+def _upcoming_weekdays(today: date) -> dict[str, str]:
+    """Map each weekday name to its next date, strictly in the future, relative to *today*.
+
+    "Strictly future" means *today's own weekday* resolves 7 days out, not today (#793) —
+    asked on a Friday for "Friday" means next Friday, not this one. This is the two-line
+    calculation the model was previously left to do in its head (counting forward from the
+    current weekday, carrying month/year boundaries as needed) with nothing to check the
+    result against; resolving it here turns it into something that's either right or a test
+    failure, instead of silent, self-confident date arithmetic gone wrong.
+    """
+    result: dict[str, str] = {}
+    for offset, name in enumerate(_WEEKDAYS):
+        delta = (offset - today.weekday()) % 7
+        if delta == 0:
+            delta = 7
+        result[name] = (today + timedelta(days=delta)).isoformat()
+    return result
+
+
 def make_now_handler(
     tz_provider: TimezoneProvider,
     calendar_tz_provider: CalendarTzProvider,
@@ -80,6 +105,12 @@ def make_now_handler(
     a note when it differs from the configured one, so the agent creates events at the
     intended local time. The calendar lookup is best-effort — any failure is omitted, never
     raised. ``now`` is tenant- and session-agnostic, so both are accepted and ignored.
+
+    It also resolves bare weekday names to dates (#793): ``today``, ``tomorrow``, and
+    ``upcoming`` (:func:`_upcoming_weekdays`) are all computed from the *same* zone-resolved
+    instant the rest of the payload uses, so an operator timezone that puts "now" on a
+    different calendar date than UTC (or the connected calendar's zone) can't shift them —
+    the same trap #559 fixed for calendar read paths.
     """
 
     async def handler(
@@ -90,11 +121,15 @@ def make_now_handler(
         wanted = requested if isinstance(requested, str) and requested.strip() else configured
         zone, zone_name = _resolve_zone(wanted)
         now = datetime.now(tz=zone)
+        today = now.date()
         payload: dict[str, Any] = {
             "datetime": now.isoformat(timespec="seconds"),
             "timezone": zone_name,
             "utc": now.astimezone(_UTC).isoformat(timespec="seconds"),
             "weekday": _WEEKDAYS[now.weekday()],
+            "today": today.isoformat(),
+            "tomorrow": (today + timedelta(days=1)).isoformat(),
+            "upcoming": _upcoming_weekdays(today),
         }
         # Best-effort: surface the calendar's tz when it differs, so the model knows which
         # zone new events land in. A calendar hiccup must never break `now`.

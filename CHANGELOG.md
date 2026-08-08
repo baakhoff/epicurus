@@ -12,6 +12,27 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Deleting a chat now deletes the chat — everything it produced, everywhere** (#771) —
+  `DELETE /agent/sessions/{id}` removed only the `agent_messages` rows, so a "deleted"
+  conversation lived on across every sidecar it had touched. Worst: the fact-extraction queue
+  (ADR-0051) carried the exchange *text* with no `session_id`, so a deleted chat's queued
+  exchanges could not even be targeted — the nightly drain still distilled the "deleted"
+  conversation into memory facts that night. Also surviving: the uploaded attachments' bytes
+  (`agent_attachments`), the per-session model override (`session_models`, #707), and any
+  paused runs (`agent_suspended_runs` / `agent_pending_drafts` / `agent_pending_approvals`) —
+  each carrying the conversation verbatim — while an in-flight turn kept generating into the
+  deleted session. Now: the queue is **stamped** with a nullable `session_id` at enqueue
+  (reconciled additively, ADR-0067; legacy rows drain as before), and the route runs a
+  tenant-scoped **cascade** (`SessionDeleteCascade`) — cancel + evict the live run, purge
+  queued extractions, clear the model override, drop the paused runs and the automation badge
+  mapping, delete the attachment bytes, then the messages last (a failure partway leaves the
+  session visible and retriable). The audited referencing stores keep deliberate exceptions:
+  `scheduled_turns` rows are operator-authored standing config (kept — the next delivery
+  starts the session afresh), `notifications` carry no session linkage (kept), and facts
+  distilled on *previous* nights are curated memory managed in the Memory view — the web
+  confirm dialog now states that boundary honestly instead of implying total erasure.
+  `core-app` 0.104.0→0.105.0 (MINOR), `web` 0.132.0→0.132.1 (PATCH — confirm-dialog copy).
+
 - **Tags become a first-class part of the tasks board: group by them, and pick them as
   chips** (#763) — the model and tools carried `tags` all along, but the UX was half-wired:
   a bare comma-separated text input and no grouping. **Group by → Tags** joins the board's

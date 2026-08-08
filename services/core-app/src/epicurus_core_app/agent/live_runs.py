@@ -255,6 +255,45 @@ class LiveRunRegistry:
             task.cancel()
         run.finish("the turn was cancelled")
 
+    async def discard_session(self, *, tenant: str, session_id: str) -> bool:
+        """Cancel and evict every buffered run of one session — the delete cascade's step (#771).
+
+        Deleting a chat must also drop its in-memory turn state: a live driver task would
+        otherwise keep generating (and then persist an answer into the just-deleted session,
+        resurrecting it), and a finished run's buffer would keep the "deleted" conversation's
+        text replayable until the grace reap. Cancels the driver (subscribers unblock on the
+        terminal frame), **awaits it** so its writes have settled before the caller deletes
+        rows, then evicts the buffers. Returns whether a still-running turn was cancelled.
+
+        One residual race is accepted: a cancel landing exactly inside the driver's shielded
+        ``_persist_answer`` lets that inner task finish detached, so a single assistant row can
+        in principle land after the cascade's delete. The window is one INSERT wide; the
+        alternative (tracking every shield) isn't worth it for a human-driven delete.
+        """
+        cancelled = False
+        async with self._lock:
+            mine = [
+                run
+                for run in self._runs.values()
+                if run.tenant == tenant and run.session_id == session_id
+            ]
+        for run in mine:
+            task = run._task
+            if task is not None and not task.done():
+                cancelled = True
+                task.cancel()
+            run.finish("the conversation was deleted")
+            if task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        async with self._lock:
+            for run in mine:
+                self._runs.pop(run.run_id, None)
+            key = (tenant, session_id)
+            if self._by_session.get(key) in {run.run_id for run in mine}:
+                self._by_session.pop(key, None)
+        return cancelled
+
     def _reap_locked(self) -> None:
         """Evict terminal runs whose grace window has elapsed (the answer is durable anyway)."""
         now = time.monotonic()

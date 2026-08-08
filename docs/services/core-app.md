@@ -45,7 +45,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/sessions/{id}/active-run` | The session's in-flight run to re-attach to — `{run_id, last_seq}` or `null` if none is live (ADR-0055). How a client rediscovers a turn after a reload/reconnect. |
 | `DELETE /platform/v1/agent/sessions/{id}/active-run` | Cancel the session's in-flight turn — the explicit **Stop** (a decoupled turn outlives the connection, so Stop must say so). Returns `{cancelled}` (ADR-0055). |
 | `GET /platform/v1/agent/active-runs` | Session ids with an in-flight turn right now — `{session_ids}`. Drives the conversations-list running indicator (#396) in one request rather than polling each row; tenant-scoped, best-effort/point-in-time (the live-run buffer is a disposable cache). |
-| `DELETE /platform/v1/agent/sessions/{id}` | Forget a conversation — its history rows. Facts the user is remembered by are kept (ADR-0045). |
+| `DELETE /platform/v1/agent/sessions/{id}` | Delete a conversation — **everything it produced, everywhere** (#771): its messages, its uploaded attachments' bytes (`agent_attachments`), its **still-queued extraction exchanges** (so the nightly drain can never distil a deleted chat), its model override (`session_models`), any suspended/pending paused runs (`agent_suspended_runs` / `agent_pending_drafts` / `agent_pending_approvals`), its automation badge mapping (`automation_sessions` — a rolling automation's next run simply re-records it), and any in-flight run's buffered state (the live turn is cancelled first). One tenant-scoped cascade; messages are deleted **last**, so a failure partway leaves the session visible and the whole operation retriable. Returns `{deleted}` (the message count — the pre-#771 field) plus additive per-store counts. **The boundary, stated honestly:** facts extracted on *previous* nights are curated memory, managed in the Memory view — deleting a chat stops all future derivation from it but does not un-learn them (ADR-0045); tool effects (a task created, a mail sent) and uploads already persisted to the storage sink's Files page belong to the modules that own them. The web confirm dialog says exactly this. |
 | `POST /platform/v1/agent/sessions/{id}/regenerate` | Re-answer the session's last user turn, dropping the previous answer. Body `{model?}`. Truncates everything after the last user message, then streams a fresh turn — same SSE protocol as `/chat/stream`; an `error` event if there's no user turn (#302). |
 | `POST /platform/v1/agent/sessions/{id}/edit` | Replace a user message with `{content}` (and `{model?}`, `{message_id?}`) and re-answer it in place — revises the message, truncates everything after it, then streams. **`message_id`** names the turn to revise (#552); omitted, it defaults to the session's **last** user message, so pre-#552 callers are unchanged. Editing further back discards the real turns behind it (the web shell confirms with the count first). Edits in place, never branching (#302). Every check runs **before** any write, so a rejected edit leaves history untouched — an `error` event on empty content, no user turn, a `message_id` that isn't a **user** message of **this** session, or a turn already running for the session (a live run's history isn't ours to cut; the `/chat/stream` **409** remains the backstop for one starting mid-flight). |
 | `POST /platform/v1/agent/runs/{run_id}/resume` | Resume a turn paused by `ask_user`, supplying `{answer}` (ADR-0053). Consumes the suspended run, appends the answer as the pending tool call's result, and continues the same turn — same SSE protocol as `/chat/stream`. An `error` event if the run is unknown / expired / already answered. |
@@ -1230,7 +1230,11 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `content` (raw bytes), `created_at`. Written by `POST /agent/attachments`; read back once per
   turn by the attachment expander (`AttachmentStore.get`), scoped to the requesting tenant.
   `kind.startswith("image/")` is what routes a `file` attachment to the vision path instead of
-  text expansion (#633) — see **Agent** above.
+  text expansion (#633) — see **Agent** above. There is deliberately no session column: the
+  chat↔attachment link lives in `agent_messages.attachments` (JSON), which is why the delete
+  cascade (#771) collects a session's `att_id`s from its messages *before* deleting them, then
+  drops the byte rows here (the best-effort copy pushed to the storage sink's Files page is a
+  separate durable artifact and is kept).
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `context_window` (global `num_ctx`),
   `kv_cache_type` (Ollama KV-cache, ADR-0046), `agent_max_steps` (agent loop bound, #297),
@@ -1379,11 +1383,16 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   Qdrant's scroll offset) until every point has been visited, so it never drops facts beyond
   a bounded scan window regardless of corpus size (#450, ADR-0076).
 - **Postgres `memory_extraction_queue`** — finished exchanges awaiting background fact
-  extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`. In the
-  default **nightly** mode the agent enqueues each exchange here instead of distilling it inline;
-  the `ExtractionRunner` drains it once a day (at `MEMORY_EXTRACTION_HOUR` in the operator's
-  timezone), serially, so extraction never competes with a live turn for the GPU. Drained rows
-  are deleted; because the queue is durable, a restart never loses a pending exchange.
+  extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`, and a
+  nullable `session_id` (#771) stamping each exchange with the conversation it came from — the
+  handle that lets the chat delete cascade purge a deleted session's still-queued exchanges
+  before the drain distils them. Reconciled additively at init (ADR-0067): rows enqueued before
+  the column existed stay `NULL` and drain exactly as before (they simply can't be targeted by
+  a delete). In the default **nightly** mode the agent enqueues each exchange here instead of
+  distilling it inline; the `ExtractionRunner` drains it once a day (at
+  `MEMORY_EXTRACTION_HOUR` in the operator's timezone), serially, so extraction never competes
+  with a live turn for the GPU. Drained rows are deleted; because the queue is durable, a
+  restart never loses a pending exchange.
 - **Postgres `standing_profiles`** — the compact per-tenant **standing profile** the agent injects
   each turn (#527, ADR-0094): `id`, `tenant`, `content`, `source` (`auto` | `edited`), `created_at`.
   Append-only and **versioned** — each write keeps the last `MEMORY_PROFILE_MAX_VERSIONS` (5) per

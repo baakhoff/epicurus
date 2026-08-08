@@ -20,10 +20,18 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 from sqlalchemy import CursorResult, DateTime, String, Text, delete, func, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
+from epicurus_core.db import ensure_columns
 from epicurus_core_app.memory.store import Base
+
+# Columns added to memory_extraction_queue after the table's first release, reconciled in place
+# at init (the store has no migration framework — ADR-0067). ``session_id`` (#771) stamps each
+# exchange with the conversation it came from, so deleting a chat can purge its still-queued
+# exchanges; legacy rows stay NULL and drain exactly as before.
+_ADDED_COLUMNS = ("session_id",)
 
 
 class ExtractionTask(Base):
@@ -36,16 +44,25 @@ class ExtractionTask(Base):
     user_text: Mapped[str] = mapped_column(Text)
     assistant_text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The session the exchange came from (#771), so a deleted chat's queued exchanges can be
+    # purged before the nightly drain distils them. Nullable: rows enqueued before this column
+    # existed (or by a caller with no session) drain as before — they just can't be targeted.
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
 
 class QueuedExchange(BaseModel):
-    """A pending exchange handed to the extractor: the text plus its queue id."""
+    """A pending exchange handed to the extractor: the text plus its queue id.
+
+    ``session_id`` is ``None`` for rows enqueued before #771 stamped the queue (they drain
+    exactly as before) and for callers with no session.
+    """
 
     id: int
     tenant: str
     user_text: str
     assistant_text: str
     created_at: datetime | None = None
+    session_id: str | None = None
 
 
 class ExtractionQueue:
@@ -56,20 +73,35 @@ class ExtractionQueue:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the queue table if it does not exist (idempotent; shares the store's Base)."""
+        """Create the queue table if it does not exist (idempotent; shares the store's Base),
+        then reconcile columns added after first release (``session_id``, #771)."""
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._ensure_columns)
 
-    async def enqueue(self, *, tenant: str, user_text: str, assistant_text: str) -> int | None:
+    @staticmethod
+    def _ensure_columns(sync_conn: Connection) -> None:
+        """Add post-release columns to an already-provisioned table (ADR-0067)."""
+        ensure_columns(sync_conn, ExtractionTask.__table__, _ADDED_COLUMNS)
+
+    async def enqueue(
+        self, *, tenant: str, user_text: str, assistant_text: str, session_id: str | None = None
+    ) -> int | None:
         """Append an exchange to the queue; returns its id (None if there's nothing to learn).
 
         An empty user message carries no durable fact, so it is dropped here rather than
-        queued for an extraction that the extractor would skip anyway.
+        queued for an extraction that the extractor would skip anyway. ``session_id`` stamps
+        the exchange with its conversation (#771) so a deleted chat can purge what it queued.
         """
         if not user_text.strip():
             return None
         async with self._session() as session:
-            task = ExtractionTask(tenant=tenant, user_text=user_text, assistant_text=assistant_text)
+            task = ExtractionTask(
+                tenant=tenant,
+                user_text=user_text,
+                assistant_text=assistant_text,
+                session_id=session_id,
+            )
             session.add(task)
             await session.commit()
             return task.id
@@ -91,9 +123,28 @@ class ExtractionQueue:
                     user_text=row.user_text,
                     assistant_text=row.assistant_text,
                     created_at=row.created_at,
+                    session_id=row.session_id,
                 )
                 for row in rows
             ]
+
+    async def delete_for_session(self, *, tenant: str, session_id: str) -> int:
+        """Purge every still-queued exchange of one conversation (#771); returns rows removed.
+
+        The delete-cascade's queue step: without it, a "deleted" chat's exchanges — which carry
+        the conversation *text* — would still be distilled into memory facts that night. Only
+        stamped rows can match; legacy NULL-``session_id`` rows are untouched (they cannot be
+        attributed to a session and drain as before). Tenant-scoped (constraint #1).
+        """
+        async with self._session() as session:
+            result = await session.execute(
+                delete(ExtractionTask).where(
+                    ExtractionTask.tenant == tenant,
+                    ExtractionTask.session_id == session_id,
+                )
+            )
+            await session.commit()
+            return cast("CursorResult[Any]", result).rowcount or 0
 
     async def delete(self, ids: list[int]) -> int:
         """Remove processed exchanges from the queue; returns how many rows were removed."""

@@ -212,6 +212,55 @@ async def test_attachment_store_save_and_get_is_tenant_scoped() -> None:
     assert await blobs.get(tenant="t1", att_id="missing") is None
 
 
+async def test_attachment_ids_collects_file_attachments_for_one_session() -> None:
+    """#771: the cascade reads a chat's uploaded att_ids from its messages' JSON — the only
+    place the link lives — before those messages drop. Only ``source == "file"`` counts."""
+    store, _ = await _fresh_store()
+    await store.append(
+        tenant="t",
+        session_id="s",
+        role="user",
+        content="see these",
+        attachments=[
+            {"att_id": "up1", "source": "file", "kind": "text/plain", "title": "a.txt"},
+            {"att_id": "chat1", "source": "chat", "title": "another chat"},
+            {"att_id": "mod1", "source": "module", "module": "mail", "title": "a thread"},
+        ],
+    )
+    await store.append(
+        tenant="t",
+        session_id="s",
+        role="user",
+        content="and this",
+        attachments=[
+            {"att_id": "up2", "source": "file", "kind": "image/png", "title": "b.png"},
+            {"att_id": "up1", "source": "file", "kind": "text/plain", "title": "a.txt"},  # dupe
+        ],
+    )
+    await store.append(tenant="t", session_id="s", role="assistant", content="ok")  # none
+    await store.append(
+        tenant="t",
+        session_id="other",
+        role="user",
+        content="different chat",
+        attachments=[{"att_id": "up3", "source": "file", "title": "c.txt"}],
+    )
+    assert await store.attachment_ids(tenant="t", session_id="s") == ["up1", "up2"]
+    assert await store.attachment_ids(tenant="other-tenant", session_id="s") == []
+
+
+async def test_attachment_store_delete_many_is_tenant_scoped() -> None:
+    _, engine = await _fresh_store()
+    blobs = AttachmentStore(engine)
+    mine = await blobs.save(tenant="t1", kind="text/plain", title="mine.txt", content=b"x")
+    other = await blobs.save(tenant="t2", kind="text/plain", title="other.txt", content=b"y")
+    # Naming another tenant's id must not delete it; unknown ids are skipped, not an error.
+    assert await blobs.delete_many(tenant="t1", att_ids=[mine, other, "missing"]) == 1
+    assert await blobs.get(tenant="t1", att_id=mine) is None
+    assert await blobs.get(tenant="t2", att_id=other) is not None
+    assert await blobs.delete_many(tenant="t1", att_ids=[]) == 0
+
+
 async def test_init_adds_entity_refs_column_to_a_legacy_table() -> None:
     # A pre-v0.3 deployment: agent_messages exists without the entity_refs column.
     engine = create_async_engine(

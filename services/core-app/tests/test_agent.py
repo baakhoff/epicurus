@@ -936,7 +936,14 @@ async def test_agent_blocked_vision_turn_is_persisted_but_skips_fact_extraction(
         def __init__(self) -> None:
             self.enqueued: list[tuple[str, str]] = []
 
-        async def enqueue(self, *, tenant: str, user_text: str, assistant_text: str) -> None:
+        async def enqueue(
+            self,
+            *,
+            tenant: str,
+            user_text: str,
+            assistant_text: str,
+            session_id: str | None = None,
+        ) -> None:
             self.enqueued.append((user_text, assistant_text))
 
     queue = _RecordingQueue()
@@ -1016,9 +1023,13 @@ async def test_agent_skips_extraction_without_an_answer() -> None:
 class _FakeQueue:
     def __init__(self) -> None:
         self.enqueued: list[tuple[str, str, str]] = []  # tenant, user_text, assistant_text
+        self.sessions: list[str | None] = []  # the #771 session stamp, aligned with enqueued
 
-    async def enqueue(self, *, tenant: str, user_text: str, assistant_text: str) -> int:
+    async def enqueue(
+        self, *, tenant: str, user_text: str, assistant_text: str, session_id: str | None = None
+    ) -> int:
         self.enqueued.append((tenant, user_text, assistant_text))
+        self.sessions.append(session_id)
         return len(self.enqueued)
 
 
@@ -1037,7 +1048,20 @@ async def test_agent_defers_extraction_by_enqueuing_the_exchange() -> None:
     await agent.run([ChatMessage(role="user", content="My name is Sam.")])
     await _settle()
     assert queue.enqueued == [("local", "My name is Sam.", "Nice to meet you, Sam.")]
+    assert queue.sessions == [None]  # no session on this turn → nothing to stamp
     assert extractor.calls == []  # the extractor is NOT called on the response path
+
+
+async def test_agent_stamps_the_queued_exchange_with_its_session() -> None:
+    """#771: the enqueued exchange carries its conversation, so deleting the chat can purge it
+    before the nightly drain distils it."""
+    gw = _FakeGateway([ChatResult(model="m", content="Noted.")])
+    queue = _FakeQueue()
+    memory = _FakeMemory()
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory, queue=queue)  # type: ignore[arg-type]
+    await agent.run([ChatMessage(role="user", content="Remember my dog is Rex.")], session_id="s1")
+    await _settle()
+    assert queue.sessions == ["s1"]
 
 
 async def test_agent_immediate_mode_extracts_even_with_a_queue() -> None:

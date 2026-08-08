@@ -23,6 +23,7 @@ from epicurus_core_app.agent.live_runs import (
 )
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraft, PendingDraftStore
+from epicurus_core_app.agent.session_delete import DeletedSession, SessionDeleteCascade
 from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.store import AutomationSessionStore, SessionMeta
@@ -234,6 +235,7 @@ def create_agent_router(
     profile: StandingProfileStore | None = None,
     automation_sessions: AutomationSessionStore | None = None,
     session_models: SessionModelStore | None = None,
+    session_delete: SessionDeleteCascade | None = None,
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES,
     allowed_upload_types: Sequence[str] = DEFAULT_ALLOWED_UPLOAD_TYPES,
 ) -> APIRouter:
@@ -390,10 +392,22 @@ def create_agent_router(
     async def session_messages(session_id: str) -> list[MessageRecord]:
         return await memory.messages(tenant=tenant, session_id=session_id)
 
-    @router.delete("/sessions/{session_id}")
-    async def delete_session(session_id: str) -> dict[str, int]:
-        removed = await memory.forget(tenant=tenant, session_id=session_id)
-        return {"deleted": removed}
+    @router.delete("/sessions/{session_id}", response_model=DeletedSession)
+    async def delete_session(session_id: str) -> DeletedSession:
+        """Delete a conversation — everything it produced, everywhere (#771).
+
+        A full cascade, not just the message rows: attachments, still-queued extraction
+        exchanges (so the nightly drain can't distil a deleted chat), the session-model row,
+        suspended/pending paused runs, the automation badge mapping, and any in-flight run's
+        buffered state. Facts already extracted on *previous* nights are curated memory,
+        managed in the Memory view — deleting a chat stops all future derivation but does not
+        un-learn them. Falls back to a messages-only delete when no cascade is wired (bare
+        test routers); the response's ``deleted`` field is the message count either way.
+        """
+        if session_delete is None:
+            removed = await memory.forget(tenant=tenant, session_id=session_id)
+            return DeletedSession(deleted=removed)
+        return await session_delete.delete(tenant=tenant, session_id=session_id)
 
     @router.put("/sessions/{session_id}/model")
     async def set_session_model(

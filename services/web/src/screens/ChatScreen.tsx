@@ -558,9 +558,13 @@ function SessionsSheet({ open, onClose }: { open: boolean; onClose: () => void }
           ))}
         </>
       )}
+      {/* What delete actually removes (#771): the conversation and everything it produced —
+          messages, its uploaded attachments, and anything queued but not yet learned from it.
+          Facts distilled on previous nights are curated memory, managed in Settings → Memory —
+          deleting the chat stops future derivation but does not un-learn those. */}
       <Confirm
         open={confirming !== null}
-        message={`Delete “${confirming?.title || "this conversation"}”? The whole conversation is removed.`}
+        message={`Delete “${confirming?.title || "this conversation"}”? Its messages, uploaded attachments, and anything queued to be learned from it are removed. Memory already saved from it stays — manage that under Settings → Memory.`}
         confirmLabel="Delete"
         danger
         onConfirm={() => {

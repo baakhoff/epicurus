@@ -12,6 +12,41 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Cold-switching documents in the editor could save the outgoing note's content over the
+  newly-opened one — data loss** (#781) — every `EditorView` host (Notes, Knowledge, the chat
+  document pane) shares the same Preview surface: Milkdown's Crepe (#377), deliberately
+  *uncontrolled* after mount — it reads its markdown once and, by design, ignores later prop
+  updates, so a live cursor never fights a reset; the parent instead re-keys the component on
+  the document path to reseed it with fresh content, per its own doc comment. That contract
+  broke on a **cold** switch — opening a document whose content hasn't reached the browser yet.
+  `openDoc` flushed and re-pointed `selectedPath` to the new document immediately, remounting
+  the WYSIWYG under its new key, but the seed that hands it real content only runs once the
+  fetch resolves and the placeholder-data guard (#712) lets it through — so the remount picked
+  up whatever the buffer still held: the *outgoing* document's markdown. Crepe mounted on it
+  while `selectedPath`/`seededPath` had already both moved on to the new document, and the next
+  transaction in that live-but-foreign surface — a click, a keystroke, Crepe's own post-init
+  normalization — reported it back through `onChange` as if it were a genuine edit of the new
+  document. Every save guard then passed honestly: the idle timer, the re-click flush, and the
+  leave/refresh flush each wrote the *old* note's content to the *new* note's path. A warm
+  switch (the document already cached this session) never showed it — the seed lands during the
+  same render, before the remount commits — which is why "click over and back" looked fine and
+  made the bug easy to miss in practice.
+
+  Fixed with two independent layers. The editor pane now gates on `selectedPath ===
+  seededPath`: neither the WYSIWYG nor the raw-source view mounts until the newly-selected
+  document's own content has actually seeded the buffer — a cold switch shows a brief loading
+  state instead of a frozen, still-editable snapshot of the old note; a warm switch stays
+  instant, since the seed already resolves before the gate is checked. As defense in depth, the
+  WYSIWYG now reports the identity of the document it was mounted for (`docKey`) with every
+  change, captured once at mount and never re-read; the parent drops any report whose `docKey`
+  no longer names the live `seededPath`, so a stray write can never land on the wrong document
+  however it arises. The vitest mock for the WYSIWYG was itself part of why this stayed
+  invisible to the suite: it was fully *controlled* (`value={value}`, re-rendering on every prop
+  change), so it could never reproduce a stale mount — it is now `defaultValue`-based and
+  mount-faithful, like the real Crepe. Every save already snapshots a version (ADR-0046); a note
+  clobbered by this bug can be recovered from the previous entry in its History dropdown.
+  `web` 0.134.0→0.134.1 (PATCH).
+
 - **The "can't reach epicurus" banner no longer flaps on a single dropped request**
   (#791) — the banner (`ConnectionBanner`, `src/App.tsx`) used to be one single-strike
   fetch failure away from covering the shell: any one `TypeError` or gateway 502/504,

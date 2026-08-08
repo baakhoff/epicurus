@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { type ReactNode } from "react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useRef, type ReactNode } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -34,18 +34,45 @@ vi.mock("@/components/Markdown", () => ({
   Markdown: ({ children }: { children: string }) => <div data-testid="preview">{children}</div>,
 }));
 
+// The mock's most-recently-rendered onChange/docKey — lets a test invoke a report "from" a
+// surface that is no longer the current one (a stale-surface echo), to exercise the buffer-
+// ownership guard (#781) directly rather than trying to out-race React's own (already correct)
+// unmount timing, which the guard is deliberately independent of anyway.
+let lastWysiwygOnChange: ((docKey: string, markdown: string) => void) | null = null;
+let lastWysiwygDocKey: string | null = null;
+
 // The editable Preview (#377) is the heavy Milkdown WYSIWYG — stub it so this stays a focused
-// unit test (no ProseMirror in jsdom). The stub mirrors the contract: it shows `value` and
-// reports edits via `onChange`, so the buffer/save wiring can be exercised.
+// unit test (no ProseMirror in jsdom). Mount-faithful (#781): the real Crepe is *uncontrolled*
+// after mount — `new Crepe({ defaultValue: value })` reads `value` once and never again, so a
+// genuine remount (a new `key`) is the only way its content ever changes. A stub that stayed
+// *controlled* (plain `value={value}`, re-rendering on every prop change) would faithfully track
+// whatever `draft` becomes later and could never reproduce a stale-mount bug — exactly how this
+// one first slipped past the suite undetected. `defaultValue` (React's own "read once at mount"
+// idiom for inputs) and a `useRef`-captured `docKey` replicate both halves of that contract.
 vi.mock("@/components/archetypes/WysiwygEditor", () => ({
-  default: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
-    <textarea
-      data-testid="wysiwyg"
-      aria-label="wysiwyg editor"
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-    />
-  ),
+  // A named function, not an arrow, so eslint's react-hooks/rules-of-hooks recognizes it as a
+  // component (by its capitalized name) and allows the `useRef` below.
+  default: function MockWysiwygEditor({
+    docKey,
+    value,
+    onChange,
+  }: {
+    docKey: string;
+    value: string;
+    onChange: (docKey: string, markdown: string) => void;
+  }) {
+    const mountDocKey = useRef(docKey).current; // captured once, like the real mount effect
+    lastWysiwygOnChange = onChange;
+    lastWysiwygDocKey = mountDocKey;
+    return (
+      <textarea
+        data-testid="wysiwyg"
+        aria-label="wysiwyg editor"
+        defaultValue={value}
+        onChange={(e) => onChange(mountDocKey, e.target.value)}
+      />
+    );
+  },
 }));
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -79,6 +106,8 @@ beforeEach(() => {
   // (#730, #743) — jsdom's `localStorage` is shared across every test in this file, so a
   // clean slate here is what keeps them independent.
   localStorage.clear();
+  lastWysiwygOnChange = null;
+  lastWysiwygDocKey = null;
 });
 
 describe("EditorView", () => {
@@ -166,6 +195,10 @@ describe("EditorView", () => {
   });
 
   it("saves the open document when you switch away — to its own path, never the new one", async () => {
+    // A mid-switch leave must still persist the OLD document via the `openDoc` flush (#781):
+    // `flush()` reads and saves against the pre-switch `selectedPath`/`draft` before
+    // `setSelectedPath` moves on, entirely independent of the new seed gate below, which only
+    // governs what the *incoming* document is allowed to render.
     mockModulePage.mockResolvedValue({
       docs: [
         { id: "a.md", title: "a", path: "a.md" },
@@ -196,7 +229,7 @@ describe("EditorView", () => {
     expect(mockSave).not.toHaveBeenCalledWith("knowledge", "vault", "b.md", "AAA-edited");
   });
 
-  it("keeps the previous document on screen while the next one loads, without ever seeding its stale content into the new path (#712)", async () => {
+  it("gates the editable surface behind the seed on a cold switch — never mounts it on the outgoing document's content (#712, #781)", async () => {
     mockModulePage.mockResolvedValue({
       docs: [
         { id: "a.md", title: "a", path: "a.md" },
@@ -218,14 +251,124 @@ describe("EditorView", () => {
     expect(await screen.findByTestId("wysiwyg")).toHaveValue("AAA");
 
     fireEvent.click(screen.getByText("b"));
-    // While B's fetch is in flight, the pane still shows A's content — never a blank
-    // spinner flash (#712) — but the placeholder guard must stop it from being seeded as
-    // if it were B's real content, which would strand B's actual content unread once it
-    // arrives (and could even save A's text onto B's path).
-    expect(screen.getByTestId("wysiwyg")).toHaveValue("AAA");
+    // While B's fetch is in flight, `doc` still carries A's data as placeholder data (#712) —
+    // but no editable surface may render on it under B's selection (#781): not the WYSIWYG,
+    // and not the rest of the toolbar (the Save button lives in the same gated fragment). This
+    // is what removes the original bug's "stays on the same note" symptom: a frozen, fully-
+    // interactive A no longer sits behind B's label waiting to be typed into and saved as B.
+    expect(screen.queryByTestId("wysiwyg")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
 
     resolveB({ path: "b.md", title: "b", content: "BBB" });
+    // A fresh mount (never seen A's content) shows B's real content once it seeds.
     await waitFor(() => expect(screen.getByTestId("wysiwyg")).toHaveValue("BBB"));
+    expect(lastWysiwygDocKey).toBe("b.md");
+    expect(mockSave).not.toHaveBeenCalledWith("knowledge", "vault", "b.md", "AAA");
+  });
+
+  it("a warm switch (already cached this session) renders instantly — no gating spinner (#781)", async () => {
+    mockModulePage.mockResolvedValue({
+      docs: [
+        { id: "a.md", title: "a", path: "a.md" },
+        { id: "b.md", title: "b", path: "b.md" },
+      ],
+    });
+    mockModulePageDoc.mockImplementation((_m: string, _p: string, path: string) =>
+      Promise.resolve({ path, title: path, content: `# ${path}` }),
+    );
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    await waitFor(() => expect(screen.getByTestId("wysiwyg")).toHaveValue("# a.md"));
+    fireEvent.click(screen.getByText("b"));
+    await waitFor(() => expect(screen.getByTestId("wysiwyg")).toHaveValue("# b.md"));
+
+    // Switching back to "a" is now warm — react-query already holds its data, so the seed
+    // adjusts state during render, before the gate is ever checked, and the WYSIWYG mounts
+    // with the right content in the very same commit as the click. A synchronous assertion
+    // (no findBy/waitFor) is the point: there must be no intermediate gated frame to wait out.
+    fireEvent.click(screen.getByText("a"));
+    expect(screen.getByTestId("wysiwyg")).toHaveValue("# a.md");
+  });
+
+  it("a genuine edit still saves normally once a cold switch resolves (idle, #781)", async () => {
+    mockModulePage.mockResolvedValue({
+      docs: [
+        { id: "a.md", title: "a", path: "a.md" },
+        { id: "b.md", title: "b", path: "b.md" },
+      ],
+    });
+    let resolveB: (value: unknown) => void = () => {};
+    const bPromise = new Promise((resolve) => {
+      resolveB = resolve;
+    });
+    mockModulePageDoc.mockImplementation((_m: string, _p: string, path: string) =>
+      path === "a.md"
+        ? Promise.resolve({ path: "a.md", title: "a", content: "AAA" })
+        : bPromise,
+    );
+    mockSave.mockResolvedValue({ path: "b.md", indexed: true, chunk_count: 1 });
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    await screen.findByTestId("wysiwyg");
+    fireEvent.click(screen.getByText("b")); // cold switch — gated until B resolves
+    resolveB({ path: "b.md", title: "b", content: "BBB" });
+    const wys = await screen.findByTestId("wysiwyg");
+    expect(wys).toHaveValue("BBB");
+
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(wys, { target: { value: "BBB edited" } });
+      await vi.advanceTimersByTimeAsync(4500); // > IDLE_SAVE_MS
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() =>
+      expect(mockSave).toHaveBeenCalledWith("knowledge", "vault", "b.md", "BBB edited"),
+    );
+  });
+
+  it("drops a WYSIWYG report for a document that is no longer the seeded one (#781 buffer-ownership guard)", async () => {
+    mockModulePage.mockResolvedValue({
+      docs: [
+        { id: "a.md", title: "a", path: "a.md" },
+        { id: "b.md", title: "b", path: "b.md" },
+      ],
+    });
+    mockModulePageDoc.mockImplementation((_m: string, _p: string, path: string) =>
+      Promise.resolve({ path, title: path, content: `# ${path}` }),
+    );
+    render(<EditorView module="knowledge" pageId="vault" />, { wrapper });
+
+    fireEvent.click(await screen.findByText("a"));
+    await screen.findByTestId("wysiwyg"); // seeded + mounted for a.md
+    expect(lastWysiwygDocKey).toBe("a.md");
+    const staleOnChange = lastWysiwygOnChange; // "the surface mounted for a.md", captured
+
+    fireEvent.click(screen.getByText("b"));
+    await waitFor(() => expect(screen.getByTestId("wysiwyg")).toHaveValue("# b.md"));
+
+    // A report still naming "a.md" — e.g. an echo from a surface mounted for the now-abandoned
+    // document, however it arose — must never land in the live buffer for "b.md". The guard
+    // compares against the *current* `seededPath`, not a value closed over when the surface
+    // mounted, so it catches this even though the report itself is "fresh" from the parent's
+    // own point of view.
+    act(() => staleOnChange?.("a.md", "FORGED — must never be saved"));
+    expect(screen.getByTestId("wysiwyg")).toHaveValue("# b.md"); // untouched by the forged report
+
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(4500); // > IDLE_SAVE_MS — would flush a genuine edit
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(mockSave).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      "FORGED — must never be saved",
+    );
   });
 
   it("saves the open document on unmount (leaving the editor)", async () => {

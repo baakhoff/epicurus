@@ -12,6 +12,28 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Tags become a first-class part of the tasks board: group by them, and pick them as
+  chips** (#763) — the model and tools carried `tags` all along, but the UX was half-wired:
+  a bare comma-separated text input and no grouping. **Group by → Tags** joins the board's
+  dimensions, offered (like *List*) only when a visible task actually has a tag — the first
+  **multi-membership** grouping: a task appears under **each** of its tags, untagged tasks
+  land in an **Untagged** column, and columns sort alphabetically (case-insensitive,
+  Untagged last, stable across reloads). The add/edit forms' tags field becomes a **chips
+  input** — "a box inside a box": removable chips inside the field, Enter/comma commits,
+  backspace erases into the chips — via a new `format: "tags"` hint (the ADR-0082 seam),
+  with a typeahead over the module's distinct tags supplied as **`field_suggestions`** (a
+  new open-valued `field_choices` sibling: suggestions are offered, never enforced, so a
+  new tag is created by typing it). Serialization stays the tool's comma-separated string —
+  the MCP contract is unchanged. **Google honesty**: tags are local-only (Google Tasks has
+  no such field; the provider ignores them on write), so the field is hidden wherever the
+  write would land on Google — a Google task's Edit form, and Add forms whenever the
+  (external-only) list picker shows — never a silent no-op; Google tasks group under
+  Untagged. Drag-and-drop stays honest too: list-grouped columns now carry their
+  **`list_id`** and the shell matches drop targets by id — never by a display title a tag
+  column might share — and with no list columns on screen, cards don't offer a grab that
+  could only dead-end (drag-to-retag deliberately not implemented in v1). `tasks`
+  0.20.0→0.21.0 (MINOR) · `web` 0.131.0→0.132.0 (MINOR).
+
 - **The Tasks page gets three representations of the same data — Board, List, and
   Calendar — switchable in place** (#767). The `board` archetype gains a **reserved `view`
   control** (an extension of ADR-0049's declarative controls): a board page declaring

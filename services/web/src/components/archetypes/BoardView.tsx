@@ -72,10 +72,11 @@ import {
  * Dropping a card on another column moves the task by reusing the *existing* move action
  * (`tasks_update` with `to_list_id`, #257) — no new backend contract. A card's move action is
  * the one whose `field_choices.to_list_id` lists the writable lists as `{value: list_id, label:
- * list_title}`. A list-grouped column's title *is* the list title, so the drop target is the
- * choice whose label matches the column's title. Columns that aren't lists (grouped by due /
- * status / priority) match nothing, so a drop there is a no-op — the move action can only change
- * the list, not those dimensions.
+ * list_title}`. A drop target is a column the module marked as a real list — its `list_id`
+ * matches a choice *value* (#763; matching by display title would misfire on a tag/status
+ * column that coincidentally shares a list's name). Columns without a `list_id` (grouped by
+ * due / status / priority / tags) are never targets, and when no column is one, cards aren't
+ * draggable at all — no grab affordance that could only end in a dead drop.
  */
 
 /** The card's move action — the one carrying a `to_list_id` list picker — or undefined. */
@@ -83,10 +84,11 @@ function moveActionOf(card: BoardCard): BoardAction | undefined {
   return card.actions.find((a) => (a.field_choices?.to_list_id?.length ?? 0) > 0);
 }
 
-/** The `to_list_id` value for dropping a card on the column titled *columnTitle*, or undefined
- *  when that column isn't one of the move action's target lists. */
-function moveTargetFor(action: BoardAction, columnTitle: string): string | undefined {
-  return action.field_choices?.to_list_id?.find((c) => c.label === columnTitle)?.value;
+/** The `to_list_id` value for dropping a card on *column*, or undefined when that column
+ *  isn't one of the move action's target lists (matched by the column's `list_id`). */
+function moveTargetFor(action: BoardAction, column: BoardColumn): string | undefined {
+  if (column.list_id == null) return undefined;
+  return action.field_choices?.to_list_id?.find((c) => c.value === column.list_id)?.value;
 }
 
 /* ── view persistence (#767, the #743 localStorage pattern) ──────────────────── */
@@ -643,13 +645,17 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
     );
   };
 
+  // Dragging is offered only when a drop could ever land (#763): some column must be a
+  // genuine list target (`list_id`), else the grab cursor would promise a move that no
+  // drop can honor (e.g. the board grouped by tags / due / status / priority).
+  const hasDropTargets = data.columns.some((column) => column.list_id != null);
   // The dragged card's move action (if any) and whether it can land on a given column.
   const dragMoveAction = drag ? moveActionOf(drag.card) : undefined;
   const canDropOn = (column: BoardColumn): boolean =>
     drag !== null &&
     dragMoveAction !== undefined &&
     column.id !== drag.from &&
-    moveTargetFor(dragMoveAction, column.title) !== undefined;
+    moveTargetFor(dragMoveAction, column) !== undefined;
 
   const handleDrop = (column: BoardColumn) => {
     const dragged = drag;
@@ -658,7 +664,7 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
     if (!dragged) return;
     const action = moveActionOf(dragged.card);
     if (!action || column.id === dragged.from) return;
-    const toListId = moveTargetFor(action, column.title);
+    const toListId = moveTargetFor(action, column);
     if (!toListId) return;
     move.mutate({ action, toListId });
   };
@@ -755,7 +761,7 @@ export function BoardView({ module, pageId }: { module: string; pageId: string }
                     module={module}
                     pageId={pageId}
                     card={card}
-                    draggable={moveActionOf(card) !== undefined}
+                    draggable={hasDropTargets && moveActionOf(card) !== undefined}
                     dragging={drag?.card.id === card.id}
                     onDragStart={() => setDrag({ card, from: column.id })}
                     onDragEnd={() => {

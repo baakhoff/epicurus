@@ -300,4 +300,108 @@ describe("SchemaForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(onSubmit).toHaveBeenCalledWith({ notes: "" });
   });
+
+  // ── the `format: "tags"` chips input (#763) ─────────────────────────────────
+
+  const tagsSchema = (suggestions?: string[]) => ({
+    type: "object" as const,
+    properties: {
+      tags: { type: "string", title: "Tags", format: "tags", suggestions },
+    },
+  });
+
+  it("renders an existing tags value as removable chips inside the box (#763)", () => {
+    const onSubmit = vi.fn();
+    render(
+      <SchemaForm schema={tagsSchema()} initial={{ tags: "work, q3" }} onSubmit={onSubmit} />,
+    );
+    expect(screen.getByText("work")).toBeInTheDocument();
+    expect(screen.getByText("q3")).toBeInTheDocument();
+    // Removing a chip drops just that tag from the serialized value.
+    fireEvent.click(screen.getByRole("button", { name: "Remove tag work" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({ tags: "q3" });
+  });
+
+  it("commits a typed tag on Enter and keeps the comma-separated serialization", () => {
+    const onSubmit = vi.fn();
+    render(
+      <SchemaForm schema={tagsSchema()} initial={{ tags: "work" }} onSubmit={onSubmit} />,
+    );
+    const input = screen.getByRole("textbox", { name: "Tags" });
+    fireEvent.change(input, { target: { value: "urgent" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(screen.getByText("urgent")).toBeInTheDocument(); // now a chip
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    // The tool's contract is unchanged: one comma-separated string.
+    expect(onSubmit).toHaveBeenCalledWith({ tags: "work, urgent" });
+  });
+
+  it("commits on comma and dedupes case-insensitively", () => {
+    const onSubmit = vi.fn();
+    render(<SchemaForm schema={tagsSchema()} onSubmit={onSubmit} />);
+    const input = screen.getByRole("textbox", { name: "Tags" });
+    fireEvent.change(input, { target: { value: "home," } });
+    expect(screen.getByText("home")).toBeInTheDocument();
+    // A duplicate (any casing) is not added twice.
+    fireEvent.change(input, { target: { value: "Home," } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({ tags: "home" });
+  });
+
+  it("offers module-supplied suggestions as a typeahead and adds one on pick", () => {
+    const onSubmit = vi.fn();
+    render(
+      <SchemaForm
+        schema={tagsSchema(["errand", "work", "q3"])}
+        initial={{ tags: "work" }}
+        onSubmit={onSubmit}
+      />,
+    );
+    const input = screen.getByRole("textbox", { name: "Tags" });
+    fireEvent.focus(input);
+    const menu = screen.getByRole("listbox", { name: "Tags suggestions" });
+    // Already-chosen tags aren't re-suggested.
+    expect(menu).toHaveTextContent("errand");
+    expect(menu).toHaveTextContent("q3");
+    expect(menu).not.toHaveTextContent("work");
+    // Typing narrows the matches.
+    fireEvent.change(input, { target: { value: "err" } });
+    expect(screen.getByRole("listbox", { name: "Tags suggestions" })).not.toHaveTextContent("q3");
+    fireEvent.mouseDown(screen.getByRole("option", { name: "errand" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({ tags: "work, errand" });
+  });
+
+  it("creates a brand-new tag inline — suggestions are offered, never enforced", () => {
+    const onSubmit = vi.fn();
+    render(<SchemaForm schema={tagsSchema(["errand"])} onSubmit={onSubmit} />);
+    const input = screen.getByRole("textbox", { name: "Tags" });
+    fireEvent.change(input, { target: { value: "brand-new" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onSubmit).toHaveBeenCalledWith({ tags: "brand-new" });
+  });
+
+  it("keeps the suggestions overlay through an anyOf (optional param) collapse", () => {
+    // A module tool's optional `tags: str | None` arrives as anyOf; the action's
+    // field_suggestions land on the outer prop — resolveProp must not drop them.
+    render(
+      <SchemaForm
+        schema={{
+          type: "object",
+          properties: {
+            tags: {
+              anyOf: [{ type: "string", format: "tags" }, { type: "null" }],
+              title: "Tags",
+              suggestions: ["errand"],
+            },
+          },
+        }}
+        onSubmit={() => {}}
+      />,
+    );
+    fireEvent.focus(screen.getByRole("textbox", { name: "Tags" }));
+    expect(screen.getByRole("option", { name: "errand" })).toBeInTheDocument();
+  });
 });

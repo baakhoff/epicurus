@@ -299,7 +299,10 @@ message as `detail`; the shell renders it inline and keeps the form open (ADR-00
 when the action supplies options for it: `field_options` (`{field: [value, …]}`) for plain
 string enums, or `field_choices` (`{field: [{value, label}, …]}`) when the submitted value
 isn't human-friendly and needs a separate label — e.g. a list picker whose value is a list
-id and label its title (ADR-0036).
+id and label its title (ADR-0036). A third sibling, **`field_suggestions`**
+(`{field: [value, …]}`, #763), carries *open* typeahead values — offered, never enforced,
+unlike an enum: today the `format: "tags"` chips field reads them (tasks supplies its known
+tags; the shell renders the picker, and anything typed is still accepted as a new value).
 
 A form field renders as a `<select>` when the action supplies options for it:
 `field_options` (`{field: [value, …]}`) for plain string enums, or `field_choices`
@@ -361,6 +364,18 @@ by them and shows them as columns/chips; the Calendar view places by `due`. All 
 optional and additive — a module that sets none renders exactly as before (the kanban
 never reads them). Badges stay the presentation channel for the board rendering; the
 structured fields are never re-derived from badge strings.
+
+**Multi-membership columns + honest drop targets (#763).** Nothing requires a grouping to
+be a partition: a module may place **one card under several columns** (the same card
+object repeated — tasks' *Group by → Tags* puts a task under each of its tags, with a
+trailing "Untagged" catch-all). The shell's flat representations dedupe by card id, so a
+multi-membership board lists/places each card once. A column may also carry **`list_id`** —
+the collection it genuinely represents, set by tasks on list-grouped columns — and the
+shell's drag-move matches drop targets **by that id** against the move action's
+`to_list_id` choice *values*, never by display title (a tag or status column that happens
+to share a list's name must not accept a list-move drop). When no column carries a
+`list_id`, cards are not draggable at all — no grab affordance that could only dead-end,
+which keeps a drop from ever silently doing nothing.
 
 ```jsonc
 {
@@ -610,11 +625,15 @@ proxy, refetching on success and surfacing a failed tool's message as a 400 `det
 ```
 
 A tool field whose JSON-Schema declares `format: "date-time"` (or `"date"`) is rendered by
-the shared form as a native datetime/date picker, `format: "multiline"` as a textarea, and
+the shared form as a native datetime/date picker, `format: "multiline"` as a textarea,
 `format: "rrule"` as a **friendly repeat picker** (None / Daily / Weekdays / Weekly / Monthly
 / Yearly / Custom…) that submits a bare RFC 5545 RRULE string (#471) — so the tasks `repeat`
 field and the calendar `recurrence` field get a human-friendly control while the agent tool
-still accepts a raw RRULE. The module declares the format once on its tool parameter (via
+still accepts a raw RRULE — and `format: "tags"` as a **chips input** (#763): the current
+tags as removable chips inside the box, a typeahead over the action's `field_suggestions`
+(existing tags offered, a new one creatable by typing it), Enter/comma committing an entry,
+while the submitted value stays the comma-separated string the tool already accepts — the
+MCP contract is unchanged. The module declares the format once on its tool parameter (via
 `Field(json_schema_extra={"format": "rrule"})`); no markup leaves the module. The same
 `actions` vocabulary works for any archetype that wants core-rendered mutations.
 

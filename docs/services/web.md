@@ -500,6 +500,17 @@ action (its `to_list_id` picker), matched to the drop column by title, so the co
 unchanged — it takes effect only where a column maps to a list (a drop on a due/status/priority
 column is a no-op), with the action/form path as the pointer-free fallback.
 
+A `format: "tags"` tool field renders as the **chips input** (#763): current tags as
+removable chips inside the field box, Enter/comma committing a typed entry, backspace
+erasing into the chips, and a typeahead over the action's `field_suggestions` (a
+`field_choices` sibling for *open* values — offered, never enforced, so a brand-new tag is
+created by typing it). The serialized value stays the tool's comma-separated string.
+Drag-move drop targets now match a column's **`list_id`** against the move action's
+`to_list_id` choice values instead of comparing display titles (#763) — a tag/status
+column that shares a list's name can't misfire a move — and when no column carries a
+`list_id` (the board grouped by tags/due/status/priority), cards don't offer the grab
+affordance at all, so a drag can never end in a silent nothing.
+
 A board page declaring the **reserved `view` control** (#767) gets three client-side
 **representations of the same payload**, switchable in place via the standard segmented
 view switcher (the calendar page's affordance): **Board** (the kanban above), **List** —

@@ -302,14 +302,17 @@ describe("BoardView", () => {
 
   // ── drag-and-drop move (#380) ──────────────────────────────────────────────
 
-  // A list-grouped board: two list columns, the card's Edit action carries the `to_list_id`
-  // picker (the move action), so dragging a card to another column moves it to that list.
+  // A list-grouped board: two list columns — each carrying its `list_id`, the module's
+  // "this column IS a list" marker the drop matching keys on (#763) — and the card's Edit
+  // action carries the `to_list_id` picker (the move action), so dragging a card to
+  // another column moves it to that list.
   const LIST_BOARD = {
     title: "Tasks",
     columns: [
       {
         id: "work",
         title: "Work",
+        list_id: "L-work",
         cards: [
           {
             id: "t1",
@@ -334,7 +337,7 @@ describe("BoardView", () => {
           },
         ],
       },
-      { id: "personal", title: "Personal", cards: [] },
+      { id: "personal", title: "Personal", list_id: "L-personal", cards: [] },
     ],
     actions: [],
   };
@@ -378,6 +381,27 @@ describe("BoardView", () => {
     fireEvent.drop(workCol, { dataTransfer: dt });
 
     expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it("offers no drag at all when no column is a list — even if titles collide (#763)", async () => {
+    // A tags-grouped board: a column may share a *title* with a real list ("Personal"),
+    // but without a module-declared `list_id` it is not a drop target — and with no
+    // target anywhere, the card must not offer a grab it can only dead-end.
+    mockModulePage.mockResolvedValue({
+      title: "Tasks",
+      columns: [
+        {
+          id: "personal",
+          title: "Personal", // same display title as the L-personal list — not a list
+          cards: LIST_BOARD.columns[0].cards,
+        },
+      ],
+      actions: [],
+    });
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    const card = await screen.findByText("Buy milk");
+    expect(card.closest('[draggable="true"]')).toBeNull();
   });
 });
 

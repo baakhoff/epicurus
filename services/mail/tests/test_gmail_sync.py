@@ -190,6 +190,37 @@ async def test_changed_threads_since_cold_cursor_is_none() -> None:
     assert await provider.changed_threads_since(MailCursor()) is None
 
 
+# ── messages_since (the resume-backlog capability, #796) ──────────────────────
+
+
+async def test_messages_since_asks_for_the_window_in_epoch_seconds() -> None:
+    """One ``messages.list`` bounded by an ``after:`` term — no per-message probing."""
+    provider = _provider()
+    client = _client(_resp({"messages": [{"id": "m1"}, {"id": "m2"}]}))
+    _install(provider, client)
+
+    assert await provider.messages_since(since_ms=1_700_000_123_456, limit=25) == ["m1", "m2"]
+
+    # Gmail's query grammar takes epoch **seconds**; the cache keeps milliseconds.
+    params = client.get.await_args.kwargs["params"]
+    assert params["q"] == "after:1700000123"
+    assert params["maxResults"] == 25
+
+
+async def test_messages_since_is_empty_when_nothing_arrived() -> None:
+    provider = _provider()
+    _install(provider, _client(_resp({})))  # Gmail omits `messages` entirely
+    assert await provider.messages_since(since_ms=1_700_000_000_000, limit=25) == []
+
+
+async def test_messages_since_propagates_a_provider_error() -> None:
+    """The orchestrator decides what a failed replay means — the provider does not swallow it."""
+    provider = _provider()
+    _install(provider, _client(_resp({}, status=403, error=True)))
+    with pytest.raises(httpx.HTTPStatusError):
+        await provider.messages_since(since_ms=1_700_000_000_000, limit=25)
+
+
 # ── get_thread_summary ────────────────────────────────────────────────────────
 
 

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from typing import Any
@@ -27,6 +28,7 @@ from epicurus_core import (
 from epicurus_mail.cache import CachedMailbox
 from epicurus_mail.db import MailCache
 from epicurus_mail.gmail import GmailProvider
+from epicurus_mail.poller import run_periodic
 from epicurus_mail.provider import ComposedMessage
 from epicurus_mail.service import (
     _SCOPE_HINT,
@@ -131,10 +133,26 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         async with module.mcp.session_manager.run():
             await cache.init()
             await bus.connect()
+            # The background reconcile (#796) — mail's first periodic job, the same pattern
+            # calendar and tasks already use. Without it `mail.received` only ever fired while
+            # someone had the Mail page open, so no automation or push alert on new mail could
+            # run unattended. Started/cancelled around the app lifetime; `MAIL_POLL_INTERVAL_S=0`
+            # returns immediately, leaving a task that is already done.
+            poller_task = asyncio.create_task(
+                run_periodic(
+                    mailbox=mailbox,
+                    provider=provider,
+                    tenant=settings.default_tenant_id,
+                    poll_interval_s=settings.mail_poll_interval_s,
+                )
+            )
             log.info("mail service ready", tenant=settings.default_tenant_id)
             try:
                 yield
             finally:
+                poller_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await poller_task
                 await bus.close()
                 await engine.dispose()
 

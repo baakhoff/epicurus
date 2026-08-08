@@ -158,6 +158,21 @@ shell-rendered from module *data* (ADR-0018) — no markup leaves the module —
 local-first seam: a future local provider can back the same tab ids by classifying through the
 core's LLM gateway (constraint #8) with zero shell change.
 
+**v0.18.0** (#796): **`mail.received` no longer depends on anyone looking at the Mail page.** The
+event had exactly one emitter (`CachedMailbox.reconcile`) with exactly one caller — the page's
+`?reconcile=1` read, which only fires when an operator opens Mail — so an automation subscribed to
+new mail, and the push alert behind it, could only ever run *after* the human had already seen the
+message. Mail now ships a background reconcile (`epicurus_mail.poller`), the same shape calendar
+and tasks have had since #664: every `MAIL_POLL_INTERVAL_S` (default **300s**, `0` disables) it
+reconciles the Inbox and emits exactly the events the page path emits, so every downstream
+consumer works unmodified. With no account connected a tick is one token-presence check and a
+return — no provider call, no log line. Reconcile is now **single-flight per account**, so the
+poller and a page read can never both announce one message. And the no-firehose rule is split in
+two: a **first-ever** sync still emits nothing, while a sync that *resumes* a mailbox synced
+before (the cursor lapsed while the service was down) replays up to 50 missed messages rather
+than swallowing the whole outage — see
+[Background reconcile](#background-reconcile-796) below.
+
 ---
 
 ## Contract
@@ -400,7 +415,7 @@ the wire subject gains the spine's `events.` prefix and is tenant-scoped
 | Event | Emitted from | Condition |
 | --- | --- | --- |
 | `mail.sent` | `POST /send`, `POST /pages/mailbox/send` | After a confirmed send succeeds — best-effort, a spine hiccup never fails a completed send. `dedup_key` is the provider's sent message id. |
-| `mail.received` | `CachedMailbox.reconcile` | Once per genuinely-new message found during an incremental sync — **never** on an initial or full resync (no-firehose). `dedup_key` is the provider message id; payload carries `from`/`subject` (capped)/`folder`/`has_attachments`/`provider`, never the body. |
+| `mail.received` | `CachedMailbox.reconcile` — reached from the mailbox page **and** the background poller (#796) | Once per genuinely-new message found during an incremental sync. **Never** on a first-ever sync (no-firehose); a *resumed* sync replays what arrived since the last successful one, capped (#796). `dedup_key` is the provider message id; payload carries `from`/`subject` (capped)/`folder`/`has_attachments`/`provider`, never the body. |
 | `mail.sync_failed` | `CachedMailbox.reconcile` | A provider/auth error (`httpx.HTTPError` — surfaces this way via `PlatformClient.get_oauth_token`), or an expired sync cursor forcing a full resync. Rate-limited per running instance (`MAIL_SYNC_FAILED_COOLDOWN_S`, default 900s / 15 min) so a flapping connection can't storm the bus. |
 
 Before v0.9.0, `mail.sent` was declared but never actually published; before v0.14.0 it published
@@ -455,12 +470,18 @@ mailbox incrementally.
 - **On open — instant.** The plain landing view (default folder, no search, first page) serves
   the cached rows + rail with **no** provider call. The *first ever* open of a folder is a
   one-time cold sync that populates the cache; every open after renders in ~a second.
-- **In the background — the delta only.** The web fires a second read with `?reconcile=1`. The
+- **In the background — the delta only.** The web fires a second read with `?reconcile=1`, and
+  since #796 the module's own poller calls the same method on a timer. The
   orchestrator asks the provider what changed since the last sync (Gmail `historyId` via
   `users.history.list`) and rebuilds **only** the touched thread rows — a new message re-sorts to
   the top, a read/unread flip converges, an archived thread drops out, a deleted one is removed.
   When nothing changed it just advances the cursor (one cheap call). A cursor too old to replay
   (Gmail expires history after ~a week) or an IMAP `UIDVALIDITY` rotation triggers a full resync.
+- **Reconcile is single-flight per account (#796).** Both callers serialize on one lock around the
+  whole read-cursor → fetch-delta → emit → advance-cursor sequence, so an overlapping run re-reads
+  the cursor the other just advanced and finds nothing new. Per *process*, like the tasks
+  scheduler's `_claim_materialize` — modules are single-instance today, and the spine's
+  `dedup_key` is the backstop beyond that.
 - **Provider-neutral.** The change cursor is a neutral `MailCursor {history_id, uid_validity,
   uid_next}` and the delta a thread-granular `ThreadChanges`, both behind the `MailProvider` seam
   — so a future IMAP provider fills `uid_validity`/`uid_next` and reuses the same cache unchanged.
@@ -485,6 +506,61 @@ The orchestration lives in `epicurus_mail.cache.CachedMailbox`; the store in `ep
 
 ---
 
+## Background reconcile (#796)
+
+Until v0.18.0 the reconcile above had **one** caller: the mailbox page. `mail.received` therefore
+only ever fired while a human had Mail open, which inverts what "notify me when mail arrives"
+means — an automation on new mail, and the per-event push alert behind it, could only run after
+the operator had already read the message. Mail now runs the loop itself (`epicurus_mail.poller`,
+started and cancelled by the service lifespan), the same pattern calendar and tasks have carried
+since #664.
+
+**What a tick does.** `provider.is_available()` → `mailbox.reconcile("INBOX")`. Nothing else: it
+is deliberately only a *caller* of the existing path, so the events, payloads, dedup keys, and
+every consumer downstream are literally the same ones the page produces, and the two can never
+drift. The delta is mailbox-wide (a change cursor is not folder-scoped), so the Inbox label only
+picks which folder's cached rows stay warm; each `mail.received` still reports the message's own
+folder.
+
+**On by default, at 300s.** The interval is `MAIL_POLL_INTERVAL_S`; `0` disables the loop
+entirely (`run_periodic` returns rather than spins). It is on by default because an event
+contract that holds only while someone is watching the page is not a contract — and the cost of
+being on is genuinely small: a tick against a quiet mailbox is one history-delta call, ~288 a day,
+well inside Gmail's per-user quota. Five minutes rather than calendar's 60s because mail is not
+minute-critical the way a meeting reminder is, and it bounds worst-case notification latency at
+five minutes.
+
+**An idle deployment costs nothing and says nothing.** With no account connected, a tick is one
+token-presence check (the cheap credential probe, #209 — never a live provider API call) and a
+return: no reconcile, no provider traffic, and **no log line**. Only the one-line "started" /
+"disabled" message at boot. A failing tick logs one warning and then drops to debug until it
+recovers, so a broken account produces a warning and a recovery line rather than a warning every
+interval; the failure is separately announced on the spine as `mail.sync_failed`, itself
+rate-limited by `MAIL_SYNC_FAILED_COOLDOWN_S`.
+
+**A restart does not swallow the backlog.** The no-firehose rule (#663) suppressed
+`mail.received` on *any* full sync. With a poller that is wrong half the time, so the two cases
+are now distinguished by the cache's `synced_at` stamp:
+
+| Situation | `synced_at` | Behaviour |
+| --- | --- | --- |
+| This mailbox has never been synced | absent | **Silent.** Every row would look new; "every message you have ever received" is not news. |
+| A previous sync succeeded, and the cursor can no longer bridge the gap (Gmail retains history ~a week; the service was down longer, or the cache was wiped) | present | **Replay.** `mail.received` for what arrived after that instant, newest first, capped at **50** messages. |
+
+The replay uses a capability-gated seam, `MailProvider.messages_since(since_ms, limit)` (Gmail: a
+single `messages.list` with an epoch-second `after:` term). A provider that can't answer inherits
+the empty default and simply gets no replay — the full sync itself is never blocked or failed by
+it. The cap bounds the notification burst, not the sync: mailbox state is restored in full either
+way, and a truncated replay is logged. Repeats are harmless: `dedup_key` is the provider message
+id, so the core's intake stores one row and does not re-notify consumers (ADR-0103).
+
+**Why polling and not Gmail push.** `users.watch` + Pub/Sub would be lower-latency, but it needs a
+publicly reachable endpoint and a Google Cloud project — neither of which a local-first self-host
+can assume — and it is Gmail-specific, where this loop carries over to IMAP unchanged. Push
+remains a possible later addition *alongside* the poller, not instead of it.
+
+---
+
 ## Configuration
 
 | Variable | Default | Notes |
@@ -493,6 +569,7 @@ The orchestration lives in `epicurus_mail.cache.CachedMailbox`; the store in `ep
 | `DATABASE_URL` | `postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus` | Postgres DSN for the tenant-scoped local cache (ADR-0096, #623). The module owns its own `mail_*` tables in the shared Postgres — no shared database, just a shared server. |
 | `MAIL_SYNC_FAILED_COOLDOWN_S` | `900` | Minimum seconds between `mail.sync_failed` emissions (#663) — a reconcile fires on every mailbox page open, so an account stuck failing must not storm the event spine once per open. |
 | `MAIL_CATEGORY_TTL_S` | `60` | How long the Inbox's category tabs stay fresh in the local cache (#765). Assembling them is a provider fan-out, so they must not be rebuilt per render; a minute is short enough that newly arrived mail moves the badges on its own, and a mark-read drops the cache outright so a count never sits stale after the operator changed it. |
+| `MAIL_POLL_INTERVAL_S` | `300` | How often the [background reconcile](#background-reconcile-796) ticks (#796) — the loop that makes `mail.received` fire without the Mail page open. On by default; a tick with no connected account costs one token-presence check, a tick with one is a single history-delta call. `0` disables the loop entirely (no background task at all), which also disables unattended automations and push alerts on new mail. |
 | `DEFAULT_TENANT_ID` | `local` | Tenant this module acts on behalf of. |
 | `NATS_URL` | `nats://localhost:4222` | NATS event backbone. |
 | `LOG_LEVEL` | `info` | Logging verbosity. |

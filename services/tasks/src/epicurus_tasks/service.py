@@ -1,12 +1,19 @@
 """Tasks module — provider-agnostic MCP tool surface (ADR-0016).
 
-Also serves the **Tasks** left-nav page: a core-rendered ``board`` archetype
-(ADR-0018). The module supplies data only — :func:`build_tasks_board` groups tasks
-into columns by the operator's chosen dimension (due date / status / priority / list,
-or a flat list) and *Show* filter (open / completed / all), declares those choices as
-**view controls** (ADR-0049), and attaches per-card actions that invoke the module's
-own MCP tools through the core (complete / reopen / edit) plus a board-level add — and
-the shell renders it. No markup ever leaves this module.
+Also serves two left-nav pages, both core-rendered ``board`` archetypes (ADR-0018).
+The module supplies data only — no markup ever leaves this module:
+
+- **Tasks** (:func:`build_tasks_board`): the *scheduled* picture. Groups **dated** tasks
+  into columns by the operator's chosen dimension (due date / status / priority / list,
+  or a flat list) and *Show* filter (open / completed / all), declares those choices as
+  **view controls** (ADR-0049), and attaches per-card actions that invoke the module's
+  own MCP tools through the core (complete / reopen / edit) plus a board-level add.
+- **Can** (:func:`build_tasks_can`, #766): the backlog — every task **without** a due
+  date, in one flat column, partitioned out of the board entirely so the board is always
+  a clean picture of what's actually scheduled. Its Add creates undated tasks and each
+  card carries a one-tap **Schedule** action (a due-only form) that places the task on
+  the board; clearing a task's due date moves it back. A pure read-partition — no
+  provider contract change.
 """
 
 from __future__ import annotations
@@ -51,12 +58,15 @@ log = get_logger("epicurus_tasks.service")
 
 MODULE_NAME = "tasks"
 TASKS_PAGE_ID = "board"
+"""The id of the Tasks left-nav page; forms its nav route and data path."""
+
+CAN_PAGE_ID = "can"
+"""The id of the Can left-nav page (#766) — the undated-task backlog."""
 
 # An async hook returning the operator's enabled writable lists as ``(id, title)`` pairs.
 # Backs the ``tasks_lists`` tool so the chat agent can discover lists and pick one when
 # adding/moving (the web pickers get the same data via the page). ``None`` in unit tests.
 ListCategories = Callable[[], Awaitable[list[tuple[str, str]]]]
-"""The id of the Tasks left-nav page; forms its nav route and data path."""
 
 # The external providers the tasks module can connect (ADR-0030); ``local`` is the
 # implicit default and is never listed. Maps the account id to its shell display label.
@@ -95,6 +105,36 @@ _REPEAT_DESCRIPTION = (
 _Repeat = Annotated[
     str, Field(json_schema_extra={"format": "rrule"}, description=_REPEAT_DESCRIPTION)
 ]
+
+# The due date rides the same `format` seam (ADR-0082's precedent): ``format: "date"`` makes
+# the shell's SchemaForm render a native date picker emitting a floating ``YYYY-MM-DD``. The
+# descriptions double as the form's field hint and the agent's parameter doc — both say where
+# an undated task goes (the Can, #766), so nothing ever vanishes silently from the board.
+_ADD_DUE_DESCRIPTION = (
+    'Due date as an ISO date, e.g. "2026-01-15". A task without one is saved to the Can'
+    " — the undated backlog page — instead of the board, until it's scheduled."
+)
+_UPDATE_DUE_DESCRIPTION = (
+    'New due date as an ISO date, e.g. "2026-01-15". Pass "" to clear it — the task then'
+    " moves off the board into the Can (the undated backlog page)."
+)
+_AddDue = Annotated[
+    str, Field(json_schema_extra={"format": "date"}, description=_ADD_DUE_DESCRIPTION)
+]
+_UpdateDue = Annotated[
+    str, Field(json_schema_extra={"format": "date"}, description=_UPDATE_DUE_DESCRIPTION)
+]
+
+# Tags ride the same seam (#763): ``format: "tags"`` makes the shell's SchemaForm render a
+# **chips input** — existing tags as removable chips inside the box, typeahead over the
+# module-supplied suggestions (``field_suggestions``), Enter/comma committing a new tag —
+# instead of a bare text input. The submitted value is still the comma-separated string,
+# so the MCP contract is unchanged (agents keep sending ``"work, urgent"``).
+_TAGS_DESCRIPTION = (
+    'Comma-separated labels, e.g. "work, urgent". Tags are local-only — Google Tasks has'
+    " no equivalent field and ignores them."
+)
+_Tags = Annotated[str, Field(json_schema_extra={"format": "tags"}, description=_TAGS_DESCRIPTION)]
 
 # Short labels for a repeat rule, for the board badge / hover-card. Best-effort: an exotic
 # custom rule falls back to "Custom" (the picker still round-trips the exact RRULE).
@@ -153,7 +193,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.18.0",
+        version="0.21.0",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -176,7 +216,16 @@ def build_module(
                 archetype="board",
                 icon="check",
                 nav_order=40,
-            )
+            ),
+            # The Can (#766): the undated-task backlog, right under the board in the nav.
+            # Same `board` archetype — one flat column, its own Add / Schedule actions.
+            PageSpec(
+                id=CAN_PAGE_ID,
+                title="Can",
+                archetype="board",
+                icon="inbox",
+                nav_order=41,
+            ),
         ],
         resolver=True,
         attachable=True,
@@ -314,22 +363,27 @@ def build_module(
     async def tasks_add(
         title: str,
         notes: str | None = None,
-        due: str | None = None,
+        due: _AddDue | None = None,
         priority: str | None = None,
-        tags: str | None = None,
+        tags: _Tags | None = None,
         status: str = "open",
         list_id: str | None = None,
         repeat: _Repeat | None = None,
     ) -> Task:
         """Create a new task.
 
-        If more than one task list exists and the user hasn't said which to use, call
-        ``tasks_lists`` first and ask which list, then pass its id as ``list_id``.
+        A task **without a due date is filed into the Can** — the undated backlog page —
+        rather than the board, so "note down: buy a drill" lands there until it's
+        scheduled (#766). Mention that when confirming an undated add. If more than one
+        task list exists and the user hasn't said which to use, call ``tasks_lists``
+        first and ask which list, then pass its id as ``list_id``.
 
         Args:
             title: Task title (required).
             notes: Optional free-text notes or description.
             due: Optional due date as an ISO date string, e.g. ``"2025-01-15"``.
+                Omit it to file the task in the Can (the undated backlog) instead of
+                the board.
             priority: Optional priority level — ``"low"``, ``"medium"``, or ``"high"``.
                 Google Tasks ignores this field.
             tags: Optional comma-separated labels, e.g. ``"work, urgent"``.
@@ -396,9 +450,9 @@ def build_module(
         task_id: str,
         title: str | None = None,
         notes: str | None = None,
-        due: str | None = None,
+        due: _UpdateDue | None = None,
         priority: str | None = None,
-        tags: str | None = None,
+        tags: _Tags | None = None,
         status: str | None = None,
         list_id: str | None = None,
         to_list_id: str | None = None,
@@ -425,9 +479,11 @@ def build_module(
             title: New title.  Omit to leave it unchanged.
             notes: New free-text notes.  Omit to leave them unchanged; pass ``""`` to clear.
             due: New due date as an ISO date string, e.g. ``"2025-01-15"``.  Omit
-                to leave it unchanged; pass ``""`` to clear it — rejected if the task has a
-                live ``repeat`` rule and this call doesn't also touch ``repeat``, since
-                clearing the anchor would strand the recurrence (#534).
+                to leave it unchanged; pass ``""`` to clear it — the task then moves off
+                the board into the Can (the undated backlog, #766). Clearing is rejected
+                if the task has a live ``repeat`` rule and this call doesn't also touch
+                ``repeat``, since clearing the anchor would strand the recurrence (#534).
+                Setting a due date on a Can task schedules it onto the board.
             priority: New priority (``"low"``/``"medium"``/``"high"``).  Omit to
                 leave unchanged.  Google Tasks ignores this field.
             tags: New comma-separated tags, e.g. ``"work, urgent"``.  Omit to leave
@@ -613,15 +669,20 @@ async def enabled_write_lists(
     return lists, default
 
 
-# ── Tasks page: the `board` archetype data (ADR-0018 / ADR-0049) ─────────────────
+# ── Tasks + Can pages: the `board` archetype data (ADR-0018 / ADR-0049 / #766) ────
 #
 # The module supplies data only; the core shell renders it. The board groups tasks into
 # columns by the operator's chosen *group-by* dimension and *Show* filter — declared as
 # **view controls** the shell renders as a toolbar (ADR-0049) — and attaches per-card
 # actions that the shell turns into buttons, each invoking one of this module's MCP tools
 # through the core (validated against the manifest), so mutations never bypass the contract.
+#
+# The two pages partition every task by whether it has a due date (#766): the board shows
+# only *dated* tasks (under every grouping — there is no "No date" bucket any more) and the
+# Can holds the rest, so scheduling is exactly "give it a due date" and un-scheduling is
+# "clear it". The partition is read-side only; providers are untouched.
 
-_BUCKET_ORDER = ("Overdue", "Today", "Upcoming", "No date")
+_BUCKET_ORDER = ("Overdue", "Today", "Upcoming")
 _BUCKET_TONE = {"Overdue": "danger", "Today": "accent"}
 
 # Grouping dimensions (ADR-0049). Each is a board column layout the operator can switch to.
@@ -633,17 +694,21 @@ _STATUS_ORDER = ("Open", "In progress", "Completed")
 _FLAT_COLUMN = "All tasks"
 _LIST_FALLBACK = "Personal"  # category label for the silent local default (mirrors the router)
 
-# Group-by options the *Group by* control offers, in display order. The "List" option is
-# spliced in (before "None") only when the board has named lists to group by.
-_GROUP_OPTIONS: tuple[tuple[str, str], ...] = (
+# Group-by options the *Group by* control offers, in display order: the three fixed
+# dimensions, then the conditional ones — "List" only when the board has named lists to
+# group by and "Tags" (#763) only when a visible task actually carries a tag (a grouping
+# with nothing to group by would be a dead option) — then the flat "None".
+_GROUP_FIXED_OPTIONS: tuple[tuple[str, str], ...] = (
     ("due", "Due date"),
     ("status", "Status"),
     ("priority", "Priority"),
-    ("none", "None"),
 )
 _GROUP_LIST_OPTION = ("list", "List")
-_VALID_GROUPS: frozenset[str] = frozenset({"due", "status", "priority", "list", "none"})
+_GROUP_TAGS_OPTION = ("tags", "Tags")
+_GROUP_NONE_OPTION = ("none", "None")
+_VALID_GROUPS: frozenset[str] = frozenset({"due", "status", "priority", "list", "tags", "none"})
 _DEFAULT_GROUP = "due"
+_UNTAGGED_COLUMN = "Untagged"
 
 # Show-filter options the *Show* control offers (the task scope passed to the providers).
 _SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (
@@ -651,6 +716,22 @@ _SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("done", "Completed"),
     ("all", "All"),
 )
+
+# View-mode options the board's *View* switcher offers (#767): three client-side
+# representations of the same fetched payload. ``view`` is a **reserved control id** — a
+# board-archetype extension of ADR-0049: the shell recognizes it and renders the matching
+# representation (kanban columns / a sortable flat list / a month grid) itself, because
+# only the shell owns rendering. The module's part stays declarative: offer the options,
+# clamp + echo the choice, and omit the *Group by* control when columns aren't what's
+# shown. The card payload is identical across views — the alternate renderings read the
+# structured card fields (``due`` / ``priority`` / ``tags`` / ``list_title``).
+_VIEW_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("board", "Board"),
+    ("list", "List"),
+    ("calendar", "Calendar"),
+)
+_VALID_VIEWS: frozenset[str] = frozenset(value for value, _ in _VIEW_OPTIONS)
+_DEFAULT_VIEW = "board"
 
 # field_options teaches the shell's SchemaForm which values are valid for enum-like
 # string fields.  The shell overlays these onto the tool's raw JSON schema so it
@@ -669,6 +750,26 @@ def coerce_group(value: str | None) -> str:
 def coerce_scope(value: str | None) -> TaskScope:
     """Clamp a ``show`` query param to a known task scope, defaulting to open (ADR-0049)."""
     return cast(TaskScope, value) if value in VALID_TASK_SCOPES else "open"
+
+
+def coerce_view(value: str | None) -> str:
+    """Clamp a ``view`` query param to a known view mode, defaulting to the board (#767)."""
+    return value if value in _VALID_VIEWS else _DEFAULT_VIEW
+
+
+def _distinct_tags(tasks: list[Task]) -> list[str]:
+    """The distinct tags across *tasks*, alphabetical (case-insensitive), first casing wins.
+
+    The known-tags source for the add/edit forms' chips typeahead (#763,
+    ``field_suggestions``): the module supplies the data, the shell renders the picker
+    (ADR-0018/0019). Computed over the full fetched set — both pages suggest the union,
+    so a tag used only on a Can task still autocompletes on the board and vice versa.
+    """
+    seen: dict[str, str] = {}
+    for task in tasks:
+        for tag in task.tags:
+            seen.setdefault(tag.casefold(), tag)
+    return sorted(seen.values(), key=str.casefold)
 
 
 def _slug(title: str) -> str:
@@ -714,6 +815,9 @@ def _bucket_for(task: Task, today: str) -> str:
     """The due-date column a task belongs in, relative to *today* (ISO date).
 
     ISO date strings sort lexicographically, so the comparison needs no parsing.
+    "No date" is unreachable as a *column* now — the board holds dated tasks only
+    (#766) — but the card builder still calls this for an undated Can card's badge
+    tone (where no due badge is even added), so the branch stays for totality.
     """
     if not task.due:
         return "No date"
@@ -725,17 +829,24 @@ def _bucket_for(task: Task, today: str) -> str:
     return "Upcoming"
 
 
-def _column_of(task: Task, group_by: str, today: str) -> str:
-    """The column title *task* falls under for the active *group_by* (ADR-0049)."""
+def _columns_of(task: Task, group_by: str, today: str) -> list[str]:
+    """The column title(s) *task* falls under for the active *group_by* (ADR-0049).
+
+    Every dimension is one-column-per-task except **tags** (#763): a task appears under
+    **each** of its tags (multi-membership), and an untagged task lands in "Untagged" —
+    which is why this returns a list rather than a single title.
+    """
     if group_by == "status":
-        return _STATUS_COLUMN.get(task.status, task.status)
+        return [_STATUS_COLUMN.get(task.status, task.status)]
     if group_by == "priority":
-        return task.priority.capitalize() if task.priority else "No priority"
+        return [task.priority.capitalize() if task.priority else "No priority"]
     if group_by == "list":
-        return task.list_title or _LIST_FALLBACK
+        return [task.list_title or _LIST_FALLBACK]
+    if group_by == "tags":
+        return list(task.tags) or [_UNTAGGED_COLUMN]
     if group_by == "none":
-        return _FLAT_COLUMN
-    return _bucket_for(task, today)
+        return [_FLAT_COLUMN]
+    return [_bucket_for(task, today)]
 
 
 def _column_order(group_by: str, lists: list[tuple[str, str]] | None) -> list[str] | None:
@@ -744,6 +855,8 @@ def _column_order(group_by: str, lists: list[tuple[str, str]] | None) -> list[st
     Due / priority / status have a fixed, meaningful order; the flat "none" view is a single
     column. Grouping by **list** orders columns by the operator's *lists* (their enabled
     order), with any extra category (e.g. the local "Personal" column) appended as it appears.
+    Grouping by **tags** is ordered separately in :func:`_group_columns` — alphabetical with
+    "Untagged" last (#763) — since the tag set only exists once the tasks are grouped.
     """
     if group_by == "status":
         return list(_STATUS_ORDER)
@@ -751,8 +864,8 @@ def _column_order(group_by: str, lists: list[tuple[str, str]] | None) -> list[st
         return list(_PRIORITY_ORDER)
     if group_by == "none":
         return [_FLAT_COLUMN]
-    if group_by == "list":
-        seed = [title for _, title in (lists or [])]
+    if group_by in ("list", "tags"):
+        seed = [title for _, title in (lists or [])] if group_by == "list" else []
         return seed or None  # extras (Personal / untitled) are appended in _group_columns
     return list(_BUCKET_ORDER)
 
@@ -764,35 +877,63 @@ def _group_columns(
     today: str,
     move_lists: list[tuple[str, str]] | None,
     lists: list[tuple[str, str]] | None,
+    tag_suggestions: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Group *tasks* into ordered board columns by the active *group_by* (ADR-0049).
 
     Empty columns are dropped. Columns follow the dimension's canonical order; for the
     *list* grouping any category not in the operator's *lists* (e.g. "Personal") is appended
-    in first-seen order so nothing is lost.
+    in first-seen order so nothing is lost, and each list column carries its ``list_id`` so
+    the shell's drag-move matches drop targets **by id, not title** (#763 — a tag column
+    that happens to share a list's name must never accept a list-move drop). The *tags*
+    grouping (#763) is **multi-membership** — a task appears under each of its tags, with
+    untagged ones in "Untagged" — ordered alphabetically (case-insensitive), "Untagged"
+    last; the same card dict is shared across a task's columns, matching the one-task
+    reality behind them.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
     appeared: list[str] = []
     for task in tasks:
-        title = _column_of(task, group_by, today)
-        if title not in grouped:
-            grouped[title] = []
-            appeared.append(title)
-        grouped[title].append(_task_card(task, today=today, move_lists=move_lists))
+        card = _task_card(task, today=today, move_lists=move_lists, tag_suggestions=tag_suggestions)
+        for title in _columns_of(task, group_by, today):
+            if title not in grouped:
+                grouped[title] = []
+                appeared.append(title)
+            grouped[title].append(card)
 
-    base = _column_order(group_by, lists)
-    # Canonical order first; any category not in it (e.g. "Personal" for list grouping) is
-    # appended in first-seen order so nothing is dropped.
-    order = appeared if base is None else [*base, *(t for t in appeared if t not in base)]
-    return [
-        {"id": _slug(title), "title": title, "cards": grouped[title]}
-        for title in order
-        if grouped.get(title)
-    ]
+    if group_by == "tags":
+        # Alphabetical (case-insensitive, so "api" and "Zoo" don't split on case), stable
+        # across reloads; the catch-all Untagged column always closes the board.
+        order = sorted((t for t in appeared if t != _UNTAGGED_COLUMN), key=str.casefold)
+        if _UNTAGGED_COLUMN in grouped:
+            order.append(_UNTAGGED_COLUMN)
+    else:
+        base = _column_order(group_by, lists)
+        # Canonical order first; any category not in it (e.g. "Personal" for list grouping)
+        # is appended in first-seen order so nothing is dropped.
+        order = appeared if base is None else [*base, *(t for t in appeared if t not in base)]
+
+    # A list column is a real drop target for the shell's drag-move: name its list id so
+    # the match is by id (title collisions with tag/status columns can't misfire, #763).
+    list_id_of = {title: list_id for list_id, title in (lists or [])} if group_by == "list" else {}
+    columns: list[dict[str, Any]] = []
+    for title in order:
+        if not grouped.get(title):
+            continue
+        column: dict[str, Any] = {"id": _slug(title), "title": title, "cards": grouped[title]}
+        if title in list_id_of:
+            column["list_id"] = list_id_of[title]
+        columns.append(column)
+    return columns
 
 
 def _task_card(
-    task: Task, *, today: str, move_lists: list[tuple[str, str]] | None = None
+    task: Task,
+    *,
+    today: str,
+    move_lists: list[tuple[str, str]] | None = None,
+    schedule: bool = False,
+    tag_suggestions: list[str] | None = None,
 ) -> dict[str, Any]:
     """One board card: the task plus its primary (complete / reopen) and edit actions.
 
@@ -803,7 +944,22 @@ def _task_card(
     **completed** card offers *Reopen* in place of *Complete* (both one-tap) and is marked
     ``done`` so the shell strikes it through. When *move_lists* is given (more than one
     writable list exists) the Edit form gains a **List** picker, prefilled to the task's
-    current list, that moves the task when changed (ADR-0038).
+    current list, that moves the task when changed (ADR-0038). With *schedule* (Can cards,
+    #766) the card leads with a **Schedule** action — a due-only ``tasks_update`` form,
+    prefilled to *today* — which is how a Can task is placed on the board.
+
+    Besides the rendered badges, the card carries its **structured fields** — ``due`` (an
+    ISO date), ``priority``, ``tags``, ``list_title`` — as data (#767): the shell's List
+    and Calendar representations sort/place by them, which rendered badge strings can't
+    support. An additive, documented extension of the board card shape; badges stay for
+    the board rendering.
+
+    Tags honesty (#763): the Edit form offers the ``tags`` chips field only for **local**
+    tasks (``task.list_id is None``). A Google task's tags would be silently dropped by
+    the provider (Google Tasks has no such field) — a form field that pretends to save is
+    worse than no field, so it is hidden rather than allowed to no-op. When offered, the
+    field carries the board's known tags as *tag_suggestions* (``field_suggestions``) for
+    the shell's typeahead — module supplies data, shell renders (ADR-0018/0019).
     """
     due_bucket = _bucket_for(task, today)
     badges: list[dict[str, str]] = []
@@ -818,13 +974,20 @@ def _task_card(
     if task.repeat:  # recurring task (ADR-0082): e.g. "Repeats weekly"
         badges.append({"label": _repeat_summary(task.repeat), "tone": "accent"})
 
+    # Local tasks only: tags persist nowhere on Google (silent provider drop), so the
+    # field is honest only where the write actually lands (#763).
+    tags_editable = task.list_id is None
+    edit_fields = ["title", "notes", "due", "priority", "tags", "status", "repeat"]
+    if not tags_editable:
+        edit_fields.remove("tags")
+
     args = {"task_id": task.id, "list_id": task.list_id}
     edit_action: dict[str, Any] = {
         "tool": "tasks_update",
         "label": "Edit",
         "icon": "pencil",
         "form": True,
-        "fields": ["title", "notes", "due", "priority", "tags", "status", "repeat"],
+        "fields": edit_fields,
         "field_options": _TASK_FIELD_OPTIONS,
         "args": args,
         "form_values": {
@@ -832,23 +995,17 @@ def _task_card(
             "notes": task.notes or "",
             "due": task.due or "",
             "priority": task.priority or "",
-            "tags": ", ".join(task.tags),
             "status": task.status,
             "repeat": task.repeat or "",
         },
     }
+    if tags_editable:
+        edit_action["form_values"]["tags"] = ", ".join(task.tags)
+        if tag_suggestions:
+            edit_action["field_suggestions"] = {"tags": tag_suggestions}
     if move_lists:
         # The List picker is the move target (`to_list_id`); the source stays in `args`.
-        edit_action["fields"] = [
-            "title",
-            "to_list_id",
-            "notes",
-            "due",
-            "priority",
-            "tags",
-            "status",
-            "repeat",
-        ]
+        edit_action["fields"] = ["title", "to_list_id", *edit_fields[1:]]
         edit_action["field_choices"] = {
             "to_list_id": [{"value": list_id, "label": title} for list_id, title in move_lists],
         }
@@ -877,48 +1034,103 @@ def _task_card(
         "confirm": "Delete this task permanently? This cannot be undone.",
         "args": args,
     }
+    actions = [primary_action, edit_action, delete_action]
+    if schedule:
+        # The Can's headline verb (#766): a one-tap form with just the due picker
+        # (`format: "date"` renders the shell's native date field), prefilled to today so
+        # opening and submitting schedules for today; picking another date wins. Setting
+        # the due date is what moves the task onto the board.
+        actions.insert(
+            0,
+            {
+                "tool": "tasks_update",
+                "label": "Schedule",
+                "icon": "calendar",
+                "intent": "primary",
+                "form": True,
+                "fields": ["due"],
+                "args": args,
+                "form_values": {"due": today},
+            },
+        )
     return {
         "id": task.id,
         "title": task.title,
         "subtitle": task.notes or None,
         "badges": badges,
         "done": done,
-        "actions": [primary_action, edit_action, delete_action],
+        "actions": actions,
+        # Structured card fields (#767) — data, not presentation: the shell's List view
+        # sorts by them and the Calendar view places by `due`. `due` is the bare ISO date
+        # (a provider may store a full RFC 3339 timestamp; only the date places a card).
+        "due": task.due[:10] if task.due else None,
+        "priority": task.priority,
+        "tags": list(task.tags),
+        "list_title": task.list_title,
+    }
+
+
+def _show_control(scope: str) -> dict[str, Any]:
+    """The *Show* (task scope) view control — shared by the board and the Can (#766)."""
+    return {
+        "id": "show",
+        "label": "Show",
+        "value": scope,
+        "options": [{"value": value, "label": label} for value, label in _SCOPE_OPTIONS],
     }
 
 
 def _board_controls(
-    *, group_by: str, scope: str, lists: list[tuple[str, str]] | None
+    *,
+    view: str,
+    group_by: str,
+    scope: str,
+    lists: list[tuple[str, str]] | None,
+    has_tags: bool = False,
 ) -> list[dict[str, Any]]:
-    """The board's declarative view controls (ADR-0049): *Group by* and *Show*.
+    """The board's declarative view controls (ADR-0049 / #767): *View*, *Group by*, *Show*.
 
     The module declares the selectable options and the current value; the shell renders
-    each as a labeled selector and re-fetches the page with ``?<id>=<value>`` on change.
-    The *List* grouping is offered only when there are named lists to group by.
+    each as a labeled selector — except the reserved ``view`` control, which it renders as
+    its standard view switcher — and re-fetches the page with ``?<id>=<value>`` on change.
+    The *List* grouping is offered only when there are named lists to group by, and *Tags*
+    (#763) only when a visible task actually carries a tag (*has_tags*) — both would
+    otherwise be dead options. The *Group by* control shows only under the **Board**
+    view — grouping shapes kanban columns; the List and Calendar representations are
+    flat/date-keyed and would render it as a dead knob (#767). *Show* applies everywhere.
     """
-    group_options = list(_GROUP_OPTIONS)
-    if lists:
-        group_options.insert(len(group_options) - 1, _GROUP_LIST_OPTION)  # before "None"
-    return [
+    controls: list[dict[str, Any]] = [
         {
-            "id": "group",
-            "label": "Group by",
-            "value": group_by,
-            "options": [{"value": value, "label": label} for value, label in group_options],
-        },
-        {
-            "id": "show",
-            "label": "Show",
-            "value": scope,
-            "options": [{"value": value, "label": label} for value, label in _SCOPE_OPTIONS],
-        },
+            "id": "view",
+            "label": "View",
+            "value": view,
+            "options": [{"value": value, "label": label} for value, label in _VIEW_OPTIONS],
+        }
     ]
+    if view == _DEFAULT_VIEW:
+        group_options = list(_GROUP_FIXED_OPTIONS)
+        if lists:
+            group_options.append(_GROUP_LIST_OPTION)
+        if has_tags:
+            group_options.append(_GROUP_TAGS_OPTION)
+        group_options.append(_GROUP_NONE_OPTION)
+        controls.append(
+            {
+                "id": "group",
+                "label": "Group by",
+                "value": group_by,
+                "options": [{"value": value, "label": label} for value, label in group_options],
+            }
+        )
+    controls.append(_show_control(scope))
+    return controls
 
 
 def build_tasks_board(
     tasks: list[Task],
     *,
     today: str,
+    view: str = _DEFAULT_VIEW,
     group_by: str = _DEFAULT_GROUP,
     scope: str = "open",
     lists: list[tuple[str, str]] | None = None,
@@ -927,10 +1139,14 @@ def build_tasks_board(
     """Build the ``board`` archetype payload for the Tasks page (ADR-0018 / 0036 / 0047).
 
     Pure and deterministic given *today* (an ISO date, e.g. ``"2026-06-14"``) so the
-    grouping is unit-testable without a clock. *group_by* picks the column layout (``"due"``
-    default, ``"status"``, ``"priority"``, ``"list"``, or ``"none"`` for a flat list) and
-    *scope* the *Show* filter echoed into the controls (the caller has already fetched the
-    matching tasks). Empty columns are dropped; the board always declares its **view
+    grouping is unit-testable without a clock. *view* is the operator's chosen
+    representation (#767) — echoed into the *View* control and deciding whether *Group by*
+    is offered; the payload itself is identical across views (the shell renders the
+    switch, reading each card's structured fields). *group_by* picks the column layout
+    (``"due"`` default, ``"status"``, ``"priority"``, ``"list"``, ``"tags"`` — a task
+    under **each** of its tags, #763 — or ``"none"`` for a flat list) and *scope* the
+    *Show* filter echoed into the controls (the caller has already fetched the matching
+    tasks). Empty columns are dropped; the board always declares its **view
     controls** and a board-level **Add task** action. When *lists* (``(list_id, title)``
     pairs for the operator's enabled writable lists) is given, the Add form gains a list
     (category) picker preselecting *default_list_id*, the *Group by* control offers
@@ -944,16 +1160,36 @@ def build_tasks_board(
     it here would need the module to write the operator's collection prefs, which it has
     no path to do today. With two or more lists each task's Edit form also gains a List
     picker that moves it (ADR-0038).
+
+    The board shows **dated tasks only** (#766): undated ones are partitioned into the Can
+    (:func:`build_tasks_can`) under every grouping, so there is no "No date" bucket and the
+    board is always the picture of what's actually scheduled. Callers pass the full fetched
+    list; the partition happens here so no caller can accidentally leak backlog onto it.
+
+    Tags (#763): *Group by → Tags* is offered only when a visible (dated) task actually
+    carries one; the known tags across the **full** fetched set feed the add/edit chips
+    typeahead (``field_suggestions``). The Add form offers the ``tags`` field only when
+    the add targets the local store — with *lists* given, every add lands on a Google
+    list, where tags would be silently dropped (no such provider field), so the field is
+    hidden rather than allowed to pretend (the same honesty rule as the per-card Edit).
     """
-    # Grouping by list needs named lists; with none, fall back to the due-date layout so the
-    # control and the columns stay consistent.
-    if group_by == "list" and not lists:
+    tag_suggestions = _distinct_tags(tasks)  # full set (#763): board + Can suggest the union
+    tasks = [t for t in tasks if t.due]
+    has_tags = any(task.tags for task in tasks)
+    # Grouping by list needs named lists, and by tags needs a visible tag; with none, fall
+    # back to the due-date layout so the control and the columns stay consistent.
+    if (group_by == "list" and not lists) or (group_by == "tags" and not has_tags):
         group_by = _DEFAULT_GROUP
     # A move needs somewhere to move to, so the per-task List picker appears only with ≥2
     # writable lists. (Local-only tasks never reach here with a picker — see ADR-0038.)
     move_lists = lists if lists and len(lists) >= 2 else None
     columns = _group_columns(
-        tasks, group_by=group_by, today=today, move_lists=move_lists, lists=lists
+        tasks,
+        group_by=group_by,
+        today=today,
+        move_lists=move_lists,
+        lists=lists,
+        tag_suggestions=tag_suggestions,
     )
     add_action: dict[str, Any] = {
         "tool": "tasks_add",
@@ -966,12 +1202,17 @@ def build_tasks_board(
         "fields": ["title", "notes", "due", "priority", "tags", "repeat"],
         "field_options": _TASK_FIELD_OPTIONS,
     }
+    if tag_suggestions:
+        add_action["field_suggestions"] = {"tags": tag_suggestions}
     actions = [add_action]
     if lists:
         # Offer a list (category) picker: a labeled choice whose value is the list id and
         # label its title — the shell renders `field_choices` as a label≠value <select>
         # (ADR-0036), distinct from `field_options`' plain string enums (priority/status).
-        add_action["fields"] = ["title", "list_id", "notes", "due", "priority", "tags", "repeat"]
+        # The picker lists *external* writable lists only, so every add here lands on
+        # Google — drop the tags field rather than let it silently no-op (#763).
+        add_action["fields"] = ["title", "list_id", "notes", "due", "priority", "repeat"]
+        add_action.pop("field_suggestions", None)
         add_action["field_choices"] = {
             "list_id": [{"value": list_id, "label": title} for list_id, title in lists],
         }
@@ -993,8 +1234,81 @@ def build_tasks_board(
     return {
         "title": "Tasks",
         "columns": columns,
-        "controls": _board_controls(group_by=group_by, scope=scope, lists=lists),
+        "controls": _board_controls(
+            view=view, group_by=group_by, scope=scope, lists=lists, has_tags=has_tags
+        ),
         "actions": actions,
+    }
+
+
+_CAN_COLUMN = "Backlog"
+
+
+def build_tasks_can(
+    tasks: list[Task],
+    *,
+    today: str,
+    scope: str = "open",
+    lists: list[tuple[str, str]] | None = None,
+    default_list_id: str | None = None,
+) -> dict[str, Any]:
+    """Build the ``board`` archetype payload for the **Can** page (#766).
+
+    The Can is the backlog: every task **without** a due date, across the same enabled
+    lists the board aggregates (each card keeps its list/category badge), in one flat
+    column. It takes the same full fetched task list as :func:`build_tasks_board` and
+    keeps the complement — the two pages partition the tasks, so a task lives on exactly
+    one of them and moves between them purely by gaining or losing a due date.
+
+    Cards are the ordinary task cards plus a leading **Schedule** action (a due-only
+    ``tasks_update`` form, prefilled to *today*) that places the task on the board; the
+    board-level **Add** creates a task with *no* due field offered (and no ``repeat`` —
+    a rule needs a due date to anchor it), so new entries land here by construction.
+    The only view control is *Show* (open / completed / all — completed undated tasks
+    stay reachable, per the page's own filter); grouping would be noise in one column.
+    When *lists* is given the Add form gains the same list picker as the board, and with
+    two or more lists each card's Edit form gains the move picker (ADR-0038). Tags follow
+    the board's honesty rule (#763): the Add offers the chips field (with the known-tags
+    typeahead) only when the add targets the local store — with *lists* given every add
+    lands on Google, which silently drops tags — and each card's Edit offers it only for
+    local tasks.
+    """
+    tag_suggestions = _distinct_tags(tasks)  # full set (#763): board + Can suggest the union
+    undated = [t for t in tasks if not t.due]
+    move_lists = lists if lists and len(lists) >= 2 else None
+    cards = [
+        _task_card(
+            t, today=today, move_lists=move_lists, schedule=True, tag_suggestions=tag_suggestions
+        )
+        for t in undated
+    ]
+    columns = [{"id": _slug(_CAN_COLUMN), "title": _CAN_COLUMN, "cards": cards}] if cards else []
+    add_action: dict[str, Any] = {
+        "tool": "tasks_add",
+        "label": "Add task",
+        "intent": "primary",
+        "icon": "plus",
+        "icon_only": True,
+        "form": True,
+        "fields": ["title", "notes", "priority", "tags"],
+        "field_options": _TASK_FIELD_OPTIONS,
+    }
+    if tag_suggestions:
+        add_action["field_suggestions"] = {"tags": tag_suggestions}
+    if lists:
+        # External (Google) target — no tags field, same honesty rule as the board (#763).
+        add_action["fields"] = ["title", "list_id", "notes", "priority"]
+        add_action.pop("field_suggestions", None)
+        add_action["field_choices"] = {
+            "list_id": [{"value": list_id, "label": title} for list_id, title in lists],
+        }
+        if default_list_id is not None:
+            add_action["form_values"] = {"list_id": default_list_id}
+    return {
+        "title": "Can",
+        "columns": columns,
+        "controls": [_show_control(scope)],
+        "actions": [add_action],
     }
 
 
@@ -1049,6 +1363,10 @@ def task_hover_card(task: Task) -> dict[str, Any]:
         details.append(HoverCardDetail(label="Tags", value=", ".join(task.tags)))
     if task.repeat:
         details.append(HoverCardDetail(label="Repeat", value=_repeat_label(task.repeat)))
+    # The link leads to the page the task actually lives on (#766): the board for a dated
+    # task, the Can for an undated one — "appears in the Can and nowhere else" includes
+    # where we send the operator looking for it.
+    page_id = TASKS_PAGE_ID if task.due else CAN_PAGE_ID
     return HoverCard(
         title=task.title,
         description=task.notes or "",
@@ -1056,7 +1374,7 @@ def task_hover_card(task: Task) -> dict[str, Any]:
         # A calendar-feed chip's hover-card needs a way back to the task (#469's own
         # acceptance criteria); every task hover-card gains it, not just those reached
         # from the calendar — consistent regardless of where the chip was clicked.
-        href=HoverCardLink(label="Open in Tasks", url=f"/m/{MODULE_NAME}/{TASKS_PAGE_ID}"),
+        href=HoverCardLink(label="Open in Tasks", url=f"/m/{MODULE_NAME}/{page_id}"),
     ).model_dump()
 
 

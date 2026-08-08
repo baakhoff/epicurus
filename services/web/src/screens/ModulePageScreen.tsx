@@ -76,7 +76,11 @@ export function ModulePageScreen() {
         ) : page.archetype === "editor" ? (
           <EditorView module={moduleName} pageId={pageId} />
         ) : page.archetype === "board" ? (
-          <BoardView module={moduleName} pageId={pageId} />
+          // Keyed per page: two board pages from one module (tasks' board + can, #766)
+          // render at the same tree position, so without the key React would keep one
+          // component instance across the nav switch and leak its per-page state — the
+          // control param map and the persisted view choice (#767) — onto the other page.
+          <BoardView key={`${moduleName}/${pageId}`} module={moduleName} pageId={pageId} />
         ) : page.archetype === "review" ? (
           <ReviewView module={moduleName} pageId={pageId} />
         ) : page.archetype === "mailbox" ? (

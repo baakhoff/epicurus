@@ -299,7 +299,10 @@ message as `detail`; the shell renders it inline and keeps the form open (ADR-00
 when the action supplies options for it: `field_options` (`{field: [value, …]}`) for plain
 string enums, or `field_choices` (`{field: [{value, label}, …]}`) when the submitted value
 isn't human-friendly and needs a separate label — e.g. a list picker whose value is a list
-id and label its title (ADR-0036).
+id and label its title (ADR-0036). A third sibling, **`field_suggestions`**
+(`{field: [value, …]}`, #763), carries *open* typeahead values — offered, never enforced,
+unlike an enum: today the `format: "tags"` chips field reads them (tasks supplies its known
+tags; the shell renders the picker, and anything typed is still accepted as a new value).
 
 A form field renders as a `<select>` when the action supplies options for it:
 `field_options` (`{field: [value, …]}`) for plain string enums, or `field_choices`
@@ -320,10 +323,68 @@ Priority / List / None) and a **Show** filter (Open / Completed / All); the modu
 params, lays out the columns, and echoes the resolved selection back in each control's
 `value`. The vocabulary is archetype-generic, so any board module reuses it.
 
+A module may declare **several pages of the same archetype** — nothing about a `PageSpec` is
+one-per-archetype. Tasks declares two boards (#766): the **Tasks** board (dated tasks,
+grouped) and the **Can** (`id: "can"` — the undated backlog, one flat column, whose only
+control is its own *Show* filter and whose per-card **Schedule** action is an ordinary
+form action over `tasks_update` narrowed to the `due` field). Each page is a full, separate
+`GET /pages/{id}` payload; the shell renders each nav entry with the same `BoardView` and
+never knows they partition one underlying collection — that split lives module-side, where
+the domain does.
+
+**View modes — the reserved `view` control (#767).** One control id is reserved: a board
+page declaring a control with `id: "view"` (option values from `board` / `list` /
+`calendar`) opts into the shell's three client-side **representations of the same
+payload**, switchable in place:
+
+- **Board** — the kanban columns (the default rendering, exactly as above).
+- **List** — the columns flattened to one row set (**deduped by card id**, first
+  appearance winning — a grouping may place a card under several columns), rendered as a
+  table: title, due, priority, list, tag chips, plus the same per-card actions. Every
+  column is client-side sortable (stable; missing values always sort last).
+- **Calendar** — a month grid (Monday-start, the calendar archetype's geometry) placing
+  each card on its `due` date; prev/today/next navigation; a chip opens the ordinary card
+  (same badges, same actions) in a sheet. Cards without a `due` never appear.
+
+The shell renders the control as its standard segmented view switcher (not a labeled
+select), **persists the choice per page** in localStorage (`board-view:<module>/<page>`),
+and keeps the page URL's `?view=` param up to date — an explicit `?view=` deep-link wins
+over the stored choice, and junk values clamp to the board. The param still rides the
+normal control re-fetch, so the module echoes the resolved value and may adjust the other
+controls it declares — tasks omits *Group by* off the Board view (grouping shapes kanban
+columns; the flat/date-keyed views would render it as a dead knob) while *Show* applies
+everywhere. A board that declares no `view` control renders the kanban exactly as before,
+whatever the URL says. Switching views is a client-side re-render of the same fetched
+data; the re-fetch only refreshes it.
+
+**Structured card fields (#767).** To support those representations a `Card` may carry —
+besides its rendered `badges` — the same facts as **data**: `due` (a bare ISO date,
+`YYYY-MM-DD`), `priority`, `tags` (a string list), and `list_title`. The List view sorts
+by them and shows them as columns/chips; the Calendar view places by `due`. All are
+optional and additive — a module that sets none renders exactly as before (the kanban
+never reads them). Badges stay the presentation channel for the board rendering; the
+structured fields are never re-derived from badge strings.
+
+**Multi-membership columns + honest drop targets (#763).** Nothing requires a grouping to
+be a partition: a module may place **one card under several columns** (the same card
+object repeated — tasks' *Group by → Tags* puts a task under each of its tags, with a
+trailing "Untagged" catch-all). The shell's flat representations dedupe by card id, so a
+multi-membership board lists/places each card once. A column may also carry **`list_id`** —
+the collection it genuinely represents, set by tasks on list-grouped columns — and the
+shell's drag-move matches drop targets **by that id** against the move action's
+`to_list_id` choice *values*, never by display title (a tag or status column that happens
+to share a list's name must not accept a list-move drop). When no column carries a
+`list_id`, cards are not draggable at all — no grab affordance that could only dead-end,
+which keeps a drop from ever silently doing nothing.
+
 ```jsonc
 {
   "title": "Tasks",                                  // optional page heading
   "controls": [                                      // view controls (ADR-0049)
+    { "id": "view", "label": "View", "value": "board",   // reserved: representations (#767)
+      "options": [ { "value": "board", "label": "Board" },
+                   { "value": "list", "label": "List" },
+                   { "value": "calendar", "label": "Calendar" } ] },
     { "id": "group", "label": "Group by", "value": "due",
       "options": [ { "value": "due", "label": "Due date" },
                    { "value": "status", "label": "Status" } ] },
@@ -339,6 +400,8 @@ params, lays out the columns, and echoes the resolved selection back in each con
           "id": "t1", "title": "Buy milk", "subtitle": "2 litres",
           "badges": [{ "label": "2026-06-14", "tone": "accent" }],
           "done": false,
+          // structured card fields (#767): data for the List/Calendar representations
+          "due": "2026-06-14", "priority": "high", "tags": ["errand"], "list_title": "Personal",
           "actions": [
             { "tool": "tasks_complete", "label": "Complete", "icon": "check",
               "args": { "task_id": "t1" } },
@@ -562,11 +625,15 @@ proxy, refetching on success and surfacing a failed tool's message as a 400 `det
 ```
 
 A tool field whose JSON-Schema declares `format: "date-time"` (or `"date"`) is rendered by
-the shared form as a native datetime/date picker, `format: "multiline"` as a textarea, and
+the shared form as a native datetime/date picker, `format: "multiline"` as a textarea,
 `format: "rrule"` as a **friendly repeat picker** (None / Daily / Weekdays / Weekly / Monthly
 / Yearly / Custom…) that submits a bare RFC 5545 RRULE string (#471) — so the tasks `repeat`
 field and the calendar `recurrence` field get a human-friendly control while the agent tool
-still accepts a raw RRULE. The module declares the format once on its tool parameter (via
+still accepts a raw RRULE — and `format: "tags"` as a **chips input** (#763): the current
+tags as removable chips inside the box, a typeahead over the action's `field_suggestions`
+(existing tags offered, a new one creatable by typing it), Enter/comma committing an entry,
+while the submitted value stays the comma-separated string the tool already accepts — the
+MCP contract is unchanged. The module declares the format once on its tool parameter (via
 `Field(json_schema_extra={"format": "rrule"})`); no markup leaves the module. The same
 `actions` vocabulary works for any archetype that wants core-rendered mutations.
 

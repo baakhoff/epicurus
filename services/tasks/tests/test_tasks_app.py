@@ -93,7 +93,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.18.0"
+    assert data["version"] == "0.21.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {
         "tasks_list",
@@ -121,13 +121,15 @@ def test_app_exposes_accounts_route(client: TestClient) -> None:
     assert "/accounts" in route_paths(client.app)  # type: ignore[arg-type]
 
 
-def test_manifest_declares_tasks_board_page(client: TestClient) -> None:
-    """The Tasks left-nav page is declared as a core `board` archetype (ADR-0018)."""
+def test_manifest_declares_tasks_board_and_can_pages(client: TestClient) -> None:
+    """Both left-nav pages are core `board` archetypes (ADR-0018): Tasks + the Can (#766)."""
     data = client.get("/manifest").json()
     pages = {p["id"]: p for p in data["pages"]}
-    assert "board" in pages
+    assert set(pages) == {"board", "can"}
     assert pages["board"]["archetype"] == "board"
     assert pages["board"]["title"] == "Tasks"
+    assert pages["can"]["archetype"] == "board"
+    assert pages["can"]["title"] == "Can"
 
 
 def test_page_unknown_id_404s(client: TestClient) -> None:
@@ -163,7 +165,7 @@ def test_page_board_serves_board_data(
 def test_page_board_declares_view_controls(
     booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The board declares Group-by + Show controls the shell renders (ADR-0049)."""
+    """The board declares View + Group-by + Show controls the shell renders (ADR-0049/#767)."""
     from epicurus_core import CollectionPrefs, PlatformClient
 
     monkeypatch.setattr(
@@ -171,7 +173,8 @@ def test_page_board_declares_view_controls(
     )
     data = booted_client.get("/pages/board").json()
     controls = {c["id"]: c for c in data["controls"]}
-    assert set(controls) == {"group", "show"}
+    assert set(controls) == {"view", "group", "show"}
+    assert controls["view"]["value"] == "board"  # default representation (#767)
     assert controls["group"]["value"] == "due"  # default grouping
     assert controls["show"]["value"] == "open"  # default filter
     # No enabled lists → the "List" grouping option is omitted.
@@ -181,7 +184,7 @@ def test_page_board_declares_view_controls(
 def test_page_board_forwards_and_clamps_query_params(
     booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The core forwards ?group/?show verbatim; the module echoes valid ones and clamps junk."""
+    """The core forwards ?view/?group/?show verbatim; the module echoes valid ones, clamps junk."""
     from epicurus_core import CollectionPrefs, PlatformClient
 
     monkeypatch.setattr(
@@ -189,11 +192,142 @@ def test_page_board_forwards_and_clamps_query_params(
     )
     valid = booted_client.get("/pages/board?group=priority&show=all").json()
     valid_controls = {c["id"]: c["value"] for c in valid["controls"]}
-    assert valid_controls == {"group": "priority", "show": "all"}
+    assert valid_controls == {"view": "board", "group": "priority", "show": "all"}
 
-    junk = booted_client.get("/pages/board?group=nonsense&show=bogus").json()
+    junk = booted_client.get("/pages/board?view=hologram&group=nonsense&show=bogus").json()
     junk_controls = {c["id"]: c["value"] for c in junk["controls"]}
-    assert junk_controls == {"group": "due", "show": "open"}  # clamped to defaults
+    # clamped to defaults
+    assert junk_controls == {"view": "board", "group": "due", "show": "open"}
+
+
+def test_page_board_view_param_echoes_and_hides_grouping(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?view=list/calendar echoes in the View control and drops Group by (#767) — grouping
+    shapes kanban columns; the flat/date-keyed representations would render a dead knob."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    for view in ("list", "calendar"):
+        data = booted_client.get(f"/pages/board?view={view}&show=all").json()
+        controls = {c["id"]: c["value"] for c in data["controls"]}
+        assert controls == {"view": view, "show": "all"}  # Show still applies; no group
+
+
+# ── the Can page (#766) — the undated backlog behind GET /pages/can ─────────────────
+
+
+def test_page_can_serves_can_data(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /pages/can returns the Can payload (#766): empty store → no columns, an Add
+    form with no due (or repeat) field, and the Show filter as the only control."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    resp = booted_client.get("/pages/can")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["title"] == "Can"
+    assert data["columns"] == []  # fresh in-memory store has no tasks
+    add = data["actions"][0]
+    assert add["tool"] == "tasks_add"
+    assert "due" not in add["fields"]
+    assert "repeat" not in add["fields"]
+    assert [c["id"] for c in data["controls"]] == ["show"]
+
+
+def test_page_can_forwards_and_clamps_the_show_param(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completed undated tasks stay reachable via the Can's own Show filter (#766)."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    done = booted_client.get("/pages/can?show=done").json()
+    assert done["controls"][0]["value"] == "done"
+
+    junk = booted_client.get("/pages/can?show=bogus").json()
+    assert junk["controls"][0]["value"] == "open"  # clamped to the default
+
+
+def test_pages_partition_dated_and_undated_tasks(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One fetch, two read views (#766): an undated task appears on /pages/can and never
+    on /pages/board (under any grouping); a dated one, exactly the other way round."""
+    from typing import Any
+
+    from epicurus_core import CollectionPrefs, PlatformClient
+    from epicurus_tasks.models import Task
+    from epicurus_tasks.router import TasksRouter
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    monkeypatch.setattr(
+        TasksRouter,
+        "list_tasks",
+        AsyncMock(
+            return_value=[
+                Task(id="dated", title="Scheduled", due="2026-01-01"),
+                Task(id="undated", title="Someday"),
+            ]
+        ),
+    )
+
+    def ids(payload: dict[str, Any]) -> list[str]:
+        return [card["id"] for column in payload["columns"] for card in column["cards"]]
+
+    for group in ("due", "status", "priority", "none"):
+        board = booted_client.get(f"/pages/board?group={group}").json()
+        assert ids(board) == ["dated"]
+        assert "No date" not in [c["title"] for c in board["columns"]]
+
+    can = booted_client.get("/pages/can").json()
+    assert ids(can) == ["undated"]
+    # The Can card leads with the one-tap Schedule action (a due-only tasks_update form).
+    schedule = can["columns"][0]["cards"][0]["actions"][0]
+    assert schedule["label"] == "Schedule"
+    assert schedule["fields"] == ["due"]
+
+
+def test_page_board_groups_by_tags(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """?group=tags echoes and yields multi-membership tag columns + Untagged (#763)."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+    from epicurus_tasks.models import Task
+    from epicurus_tasks.router import TasksRouter
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    monkeypatch.setattr(
+        TasksRouter,
+        "list_tasks",
+        AsyncMock(
+            return_value=[
+                Task(id="both", title="Both", due="2026-01-01", tags=["home", "work"]),
+                Task(id="bare", title="Bare", due="2026-01-01"),
+            ]
+        ),
+    )
+    data = booted_client.get("/pages/board?group=tags").json()
+    group = next(c for c in data["controls"] if c["id"] == "group")
+    assert group["value"] == "tags"
+    assert "tags" in [o["value"] for o in group["options"]]
+    cols = {c["title"]: [card["id"] for card in c["cards"]] for c in data["columns"]}
+    assert list(cols.keys()) == ["home", "work", "Untagged"]
+    assert cols["home"] == ["both"]
+    assert cols["work"] == ["both"]
+    assert cols["Untagged"] == ["bare"]
 
 
 # ── calendar-feed endpoint wiring (#469) — filtering logic itself is unit-tested

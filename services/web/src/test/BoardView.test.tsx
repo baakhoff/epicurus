@@ -668,3 +668,267 @@ describe("BoardView representations (#767)", () => {
     expect(screen.queryByRole("group", { name: "View" })).toBeNull();
   });
 });
+
+// ── representations: Board / List / Calendar (#767) ─────────────────────────────
+
+const TODAY = ymd(new Date());
+
+/** A board declaring the reserved `view` control plus structured card fields (#767). */
+function viewBoard(view: string) {
+  return {
+    title: "Tasks",
+    controls: [
+      {
+        id: "view",
+        label: "View",
+        value: view,
+        options: [
+          { value: "board", label: "Board" },
+          { value: "list", label: "List" },
+          { value: "calendar", label: "Calendar" },
+        ],
+      },
+      {
+        id: "show",
+        label: "Show",
+        value: "open",
+        options: [
+          { value: "open", label: "Open" },
+          { value: "all", label: "All" },
+        ],
+      },
+    ],
+    columns: [
+      {
+        id: "today",
+        title: "Today",
+        cards: [
+          {
+            id: "t1",
+            title: "Buy milk",
+            badges: [],
+            due: TODAY,
+            priority: "high",
+            tags: ["errand"],
+            list_title: "Personal",
+            actions: [
+              { tool: "tasks_complete", label: "Complete", icon: "check", args: { task_id: "t1" } },
+            ],
+          },
+        ],
+      },
+      {
+        id: "upcoming",
+        title: "Upcoming",
+        cards: [
+          {
+            id: "t2",
+            title: "File taxes",
+            badges: [],
+            due: "2099-01-15",
+            priority: "low",
+            tags: [],
+            list_title: "Work",
+            actions: [],
+          },
+          // The same card under a second column (multi-membership, e.g. a future tags
+          // grouping) — the flat representations must show it exactly once.
+          {
+            id: "t1",
+            title: "Buy milk",
+            badges: [],
+            due: TODAY,
+            priority: "high",
+            tags: ["errand"],
+            list_title: "Personal",
+            actions: [],
+          },
+        ],
+      },
+    ],
+    actions: [],
+  };
+}
+
+describe("BoardView representations (#767)", () => {
+  it("renders the reserved view control as a segmented switcher, not a select", async () => {
+    mockModulePage.mockResolvedValue(viewBoard("board"));
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    await screen.findAllByText("Buy milk");
+    const switcher = screen.getByRole("group", { name: "View" });
+    expect(within(switcher).getByRole("button", { name: "Board" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(within(switcher).getByRole("button", { name: "List" })).toBeInTheDocument();
+    expect(within(switcher).getByRole("button", { name: "Calendar" })).toBeInTheDocument();
+    // The other controls keep their selector rendering; no "View" select exists.
+    expect(screen.getByLabelText("Show")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "View" })).toBeNull();
+  });
+
+  it("switches to the List view: one deduped row per card, structured columns, refetch with ?view=", async () => {
+    mockModulePage.mockResolvedValue(viewBoard("board"));
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    await screen.findAllByText("Buy milk");
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+
+    const table = await screen.findByRole("table");
+    // t1 appears under two columns in the payload but exactly once as a row.
+    expect(within(table).getAllByText("Buy milk")).toHaveLength(1);
+    // Structured fields render as columns: due, priority, list, tag chips.
+    expect(within(table).getByText(TODAY)).toBeInTheDocument();
+    expect(within(table).getByText("high")).toBeInTheDocument();
+    expect(within(table).getByText("Personal")).toBeInTheDocument();
+    expect(within(table).getByText("errand")).toBeInTheDocument();
+    // The switch re-fetches with the reserved param so the module can echo/adjust controls.
+    await waitFor(() =>
+      expect(mockModulePage).toHaveBeenCalledWith("tasks", "board", { view: "list" }),
+    );
+    // The Show filter keeps applying — its selector is still in the toolbar.
+    expect(screen.getByLabelText("Show")).toBeInTheDocument();
+  });
+
+  it("sorts the List view by column, stably, with a direction toggle", async () => {
+    mockModulePage.mockResolvedValue(viewBoard("list"));
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    const table = await screen.findByRole("table");
+    const titlesIn = () =>
+      within(table)
+        .getAllByRole("row")
+        .slice(1) // drop the header row
+        .map((row) => within(row).getAllByRole("cell")[0].textContent);
+
+    // Default sort: by due ascending — today (t1) before 2099 (t2).
+    expect(titlesIn()).toEqual(["Buy milk", "File taxes"]);
+    // Toggle the Due header → descending.
+    fireEvent.click(within(table).getByRole("button", { name: /due/i }));
+    expect(titlesIn()).toEqual(["File taxes", "Buy milk"]);
+    // Sort by title ascending.
+    fireEvent.click(within(table).getByRole("button", { name: /task/i }));
+    expect(titlesIn()).toEqual(["Buy milk", "File taxes"]);
+  });
+
+  it("invokes the same card actions from a List row (no new mutation path)", async () => {
+    mockModulePage.mockResolvedValue(viewBoard("list"));
+    mockInvoke.mockResolvedValue({ result: "{}" });
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    const table = await screen.findByRole("table");
+    fireEvent.click(within(table).getByRole("button", { name: "Complete" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("tasks", "tasks_complete", { task_id: "t1" }),
+    );
+  });
+
+  it("places dated cards in the Calendar month grid and navigates months", async () => {
+    // The 20th of next month: deep enough that the current month's 6-week grid (whose
+    // trailing pad reaches at most 14 days into the next month) can never show it, on
+    // any real-world date this test runs.
+    const nextMonth = stepMonth(monthOf(new Date()), 1);
+    const nextMonthDue = `${nextMonth.year}-${String(nextMonth.month).padStart(2, "0")}-20`;
+    const board = viewBoard("calendar");
+    board.columns[1].cards[0].due = nextMonthDue;
+    mockModulePage.mockResolvedValue(board);
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    // t1 is due today → a chip in the current month's grid.
+    expect(await screen.findByRole("button", { name: "Buy milk" })).toBeInTheDocument();
+    // t2 is due deep in next month → not on this grid until we navigate.
+    expect(screen.queryByRole("button", { name: "File taxes" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Next month" }));
+    expect(screen.getByRole("button", { name: "File taxes" })).toBeInTheDocument();
+  });
+
+  it("never places an undated card on the Calendar grid", async () => {
+    const board = viewBoard("calendar");
+    board.columns[0].cards[0].due = null as unknown as string; // stray undated card
+    mockModulePage.mockResolvedValue(board);
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    await screen.findByRole("button", { name: "Next month" }); // grid rendered
+    expect(screen.queryByRole("button", { name: "Buy milk" })).toBeNull();
+  });
+
+  it("opens a calendar chip into the ordinary card with its actions", async () => {
+    mockModulePage.mockResolvedValue(viewBoard("calendar"));
+    mockInvoke.mockResolvedValue({ result: "{}" });
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Buy milk" }));
+    const sheet = await screen.findByRole("dialog");
+    fireEvent.click(within(sheet).getByRole("button", { name: "Complete" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("tasks", "tasks_complete", { task_id: "t1" }),
+    );
+  });
+
+  it("persists the chosen view per page and restores it on the next mount (#743 pattern)", async () => {
+    mockModulePage.mockResolvedValue(viewBoard("board"));
+    const first = render(<BoardView module="tasks" pageId="board" />, { wrapper });
+    await screen.findAllByText("Buy milk");
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    await screen.findByRole("table");
+    first.unmount();
+
+    // A fresh mount (new router, no ?view=) restores the stored choice and fetches with it.
+    mockModulePage.mockClear();
+    render(<BoardView module="tasks" pageId="board" />, { wrapper });
+    expect(await screen.findByRole("table")).toBeInTheDocument();
+    expect(mockModulePage).toHaveBeenCalledWith("tasks", "board", { view: "list" });
+  });
+
+  it("stores the view per page — another page's board is unaffected", async () => {
+    mockModulePage.mockResolvedValue(viewBoard("board"));
+    const first = render(<BoardView module="tasks" pageId="board" />, { wrapper });
+    await screen.findAllByText("Buy milk");
+    fireEvent.click(screen.getByRole("button", { name: "Calendar" }));
+    await screen.findByRole("button", { name: "Next month" });
+    first.unmount();
+
+    render(<BoardView module="tasks" pageId="can" />, { wrapper });
+    await screen.findAllByText("Buy milk");
+    // The can page keeps the module default (board columns) — no month grid.
+    expect(screen.queryByRole("button", { name: "Next month" })).toBeNull();
+  });
+
+  it("lets a ?view= deep-link win over the stored choice", async () => {
+    localStorage.setItem("board-view:tasks/board", "list");
+    mockModulePage.mockResolvedValue(viewBoard("calendar"));
+    render(<BoardView module="tasks" pageId="board" />, {
+      wrapper: wrapperAt("/m/tasks/board?view=calendar"),
+    });
+
+    // The URL's calendar wins: month grid, not the stored list.
+    expect(await screen.findByRole("button", { name: "Next month" })).toBeInTheDocument();
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(mockModulePage).toHaveBeenCalledWith("tasks", "board", { view: "calendar" });
+  });
+
+  it("clamps an unknown ?view= to the kanban board", async () => {
+    mockModulePage.mockResolvedValue(viewBoard("board"));
+    render(<BoardView module="tasks" pageId="board" />, {
+      wrapper: wrapperAt("/m/tasks/board?view=hologram"),
+    });
+
+    // Kanban columns render (column headers present), no table, no month grid.
+    expect(await screen.findByText("Today")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Next month" })).toBeNull();
+  });
+
+  it("keeps the plain kanban rendering for a board that declares no view control", async () => {
+    // BOARD (no `view` control) — even a stray ?view= must not switch representations.
+    mockModulePage.mockResolvedValue(BOARD);
+    render(<BoardView module="tasks" pageId="board" />, {
+      wrapper: wrapperAt("/m/tasks/board?view=list"),
+    });
+
+    expect(await screen.findByText("Buy milk")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(screen.queryByRole("group", { name: "View" })).toBeNull();
+  });
+});

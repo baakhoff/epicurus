@@ -224,12 +224,36 @@ best-effort: if the playbook read fails the turn proceeds on the base prompt alo
 breaking. Token budget follows ADR-0083's precedent — an informal, UI-side soft-size warning over
 the *combined* length, not a hard server-side cap.
 
+**The base system prompt is off-limits (#762, amending ADR-0093 §1–§3).** Reflection originally
+offered two targets — a named playbook, or the base instructions themselves. The second target
+no longer exists, for three reasons the feature's own shape makes acute: **(1) the pass reads
+tainted input** — transcripts contain external content the agent quoted (mail bodies, web
+results, document text), so planted "operator preferences" in something the agent merely *read*
+could surface as a plausible edit to the very document the agent's rules live in; **(2) the
+approval gate is weakest exactly where the stakes are highest** — an instructions proposal was a
+full-document replacement, the largest possible diff, presented nightly, indefinitely, and
+approval fatigue makes a one-line planted change in an otherwise-reasonable edit realistic to
+wave through, after which it persists in the system prompt of every future turn; **(3)
+governance asymmetry** — the governed system drafting revisions to its own governing document is
+a conflict of interest even with review. Playbooks carry the same harvesting value with a
+categorically smaller blast radius: additive, named, rendered under a visible `## Playbook:`
+heading, individually disable-able, never rewriting operator-authored text. Enforced at **three
+layers**: the reflection prompt no longer offers the target (the base prompt stays in its
+context **read-only**, so proposals don't duplicate base rules, with an explicit "you may not
+propose changes to it"); `_resolve` drops any `"instructions"` target the model returns anyway
+(logged); and — defense in depth — the review sink refuses to stage a proposal whose path is the
+instructions path **for every origin**, with the instructions apply-path removed outright, so no
+future proposal source can quietly reintroduce the target. A pending instructions proposal that
+exists at upgrade time still renders (diffed against the live base) and is cleanly
+**rejectable**; Approve refuses it with a clear message. Operator editing of the base prompt via
+**Settings** is unchanged — humans edit freely; this bounds the *agent's* proposal surface.
+
 **The approval surface.** A proposal is an ordinary `ReviewSuggestion`
 ([`epicurus_core.review`](../reference/platform-api.md), ADR-0090) — `operation: "update"`
-against the base instructions or an existing playbook, `"create"` for a new one — so the existing
+against an existing playbook, `"create"` for a new one — so the existing
 `ReviewView` / `SuggestionReviewModal` render it with the same diff, editable draft, and audit
 trail every module's queue gets. Approve applies the (possibly hand-edited) content through the
-stores below; reject discards. Both record a durable decision row.
+playbook store below; reject discards. Both record a durable decision row.
 
 **The reserved `core` pseudo-module.** Every other `review`-page implementer is an external
 module the registry reaches over HTTP; the core hosts no page of its own. Rather than bend the
@@ -240,10 +264,15 @@ discovers its page like any module's, with no new endpoint and no new frontend c
 
 **Where proposals come from.** A `playbook-reflection` job on the nightly maintenance batch (see
 *Maintenance orchestrator* below — registered `nightly=True`, so it rides the orchestrator's one
-schedule rather than a knob of its own). Per tenant it scans the sessions active since its last
-run and makes **one** gateway call over them, asking for candidate edits; each is staged for
-review. It is metered under **the tenant whose sessions it scanned** — never a synthetic
-background tenant (constraints #1/#8, the ADR-0051 drain's precedent). Details that matter:
+schedule rather than an *hour* knob of its own). Per tenant it scans the sessions active since
+its last run — **invisible sessions excluded** (#772) — and makes **one** gateway call over
+them, asking for candidate playbook edits; each is staged for review. It is metered under **the
+tenant whose sessions it scanned** — never a synthetic background tenant (constraints #1/#8,
+the ADR-0051 drain's precedent). Since #762 the pass has its **own off-switch**,
+`PLAYBOOK_REFLECTION_ENABLED` (default on, now that it is playbook-only): disabled, the nightly
+job reports `skipped — disabled (PLAYBOOK_REFLECTION_ENABLED=false)` **without spending a
+gateway call** — previously the only way to stop reflection was disabling all nightly
+maintenance (fact extraction, profile synthesis, re-index included). Details that matter:
 
 - **It cannot apply anything.** It is handed a proposal sink and a *read-only* playbook lookup,
   never the stores that own the documents — the ADR's hard rule is enforced by construction, not
@@ -264,13 +293,13 @@ background tenant (constraints #1/#8, the ADR-0051 drain's precedent). Details t
   generation stages nothing rather than raising. Nothing new since the last pass? No gateway call
   at all.
 
-**Storage and undo.** An approved edit to the *base* prompt writes through the **existing**
-`AgentInstructionsStore` — the same path the operator's own Settings edit uses, so an approved
-edit is indistinguishable from a hand-typed one. Both halves version ADR-0046-style
-(snapshot-on-save, capped at the same `MAX_VERSIONS = 50`, oldest pruned). One deliberate
-departure from the editor's version store: it snapshots the content *being saved*; these
-snapshot the content being **replaced**. The editor accumulates many operator saves, so the prior
-body is always somewhere in its history; here the very first write may be an approved
+**Storage and undo.** An approved playbook edit writes through the playbook store; the base
+prompt is written **only** by the operator's own Settings edit (`instructions_routes.py`) —
+since #762 no proposal path reaches `AgentInstructionsStore` at all. Both stores version
+ADR-0046-style (snapshot-on-save, capped at the same `MAX_VERSIONS = 50`, oldest pruned). One
+deliberate departure from the editor's version store: it snapshots the content *being saved*;
+these snapshot the content being **replaced**. The editor accumulates many operator saves, so
+the prior body is always somewhere in its history; here the very first write may be an approved
 agent-authored edit against a body never saved through this path, and recording only the new
 content would leave the original unrecoverable — exactly the undo the ADR says an agent-proposed
 edit needs. A save that changes nothing records no version.

@@ -1,9 +1,21 @@
-"""The core's own ``review`` page — governed approval for instruction/playbook edits (ADR-0093 §2).
+"""The core's own ``review`` page — governed approval for **playbook** edits (ADR-0093 §2, #762).
 
 The agent never rewrites its own guidance. The nightly reflection pass (ADR-0093 §1) *stages* a
 proposal here; the operator approves or rejects it; only an approval writes through
-``instructions.py`` / ``playbooks.py``. Every path terminates at that Approve — the ADR's hard
-non-goal is that nothing self-applies, ever.
+``playbooks.py``. Every path terminates at that Approve — the ADR's hard non-goal is that
+nothing self-applies, ever.
+
+**The base system prompt is not a proposable target (#762, amending ADR-0093 §1..§3).** The
+reflection pass reads tainted transcripts, an instructions proposal was a full-document
+replacement reviewed under nightly approval fatigue, and the governed system drafting revisions
+to its own governing document is a conflict of interest even with review — so machine-derived
+lessons live only in clearly-labelled playbook space. Enforced here as **defense in depth**,
+independent of the proposer: :meth:`PlaybookProposalStore.add` refuses the instructions path for
+*every* origin, and the apply-path through ``AgentInstructionsStore`` is removed — no future
+proposal source can quietly reintroduce the target. A pending instructions proposal that exists
+at upgrade time still renders and is cleanly **rejectable** (the queue must be drainable), but
+Approve refuses it with a clear message. Operators keep editing the base prompt freely via
+Settings (``instructions_routes.py``) — this bounds the *agent's* proposal surface, not theirs.
 
 **Why this file exists at all.** Every other ``review``-page implementer is an external module the
 core reaches over HTTP through ``ModuleRegistry``'s probe; core-app hosts no page of its own. The
@@ -52,18 +64,20 @@ CORE_MODULE_NAME = "core"
 # every ``review`` page into the unified Suggestions inbox rather than giving it a nav entry.
 CORE_REVIEW_PAGE_ID = "playbooks"
 
-# The reserved ``path`` identifying a proposal against the base system prompt (ADR-0083), as
-# opposed to ``PLAYBOOK_PATH_PREFIX``-prefixed paths naming an individual playbook. ``path`` is
-# the review contract's document identity; these two shapes are the only ones the core proposes.
+# The reserved ``path`` that used to identify a proposal against the base system prompt
+# (ADR-0083). Since #762 it is **not proposable**: `add()` refuses it for every origin and the
+# apply-path is gone — the constant remains so a pre-#762 pending row can still be recognised,
+# rendered, and rejected. ``PLAYBOOK_PATH_PREFIX``-prefixed paths naming an individual playbook
+# are the only proposable shape (``path`` is the review contract's document identity).
 INSTRUCTIONS_PATH = "instructions"
 PLAYBOOK_PATH_PREFIX = "playbooks/"
 
 # Retention for the resolved-decision trail, mirroring the module-side cap (ADR-0090).
 MAX_DECISIONS = 200
 
-# The operations the core's review queue accepts: "update" an existing document (the base
-# instructions, or an existing playbook) and "create" a new named playbook (ADR-0093 §2). No
-# delete/move — removing a playbook is an operator action, never something the agent proposes.
+# The operations the core's review queue accepts: "update" an existing playbook and "create" a
+# new named one (ADR-0093 §2, narrowed to playbooks by #762). No delete/move — removing a
+# playbook is an operator action, never something the agent proposes.
 _OPERATIONS = frozenset({"create", "update"})
 
 
@@ -116,7 +130,11 @@ class _ProposalBase(DeclarativeBase):
 
 
 class _StoredProposal(_ProposalBase):
-    """One pending proposal against the base instructions or a playbook, scoped to a tenant."""
+    """One pending playbook proposal, scoped to a tenant.
+
+    A ``path`` of :data:`INSTRUCTIONS_PATH` can only be a pre-#762 legacy row (``add()``
+    refuses it now); such a row renders and rejects but can no longer be approved.
+    """
 
     __tablename__ = "agent_playbook_proposals"
 
@@ -174,7 +192,17 @@ class PlaybookProposalStore:
         origin: str = "reflection",
         note: str = "",
     ) -> PlaybookProposal:
-        """Stage a proposal and return it (with its freshly minted ``sid``)."""
+        """Stage a proposal and return it (with its freshly minted ``sid``).
+
+        Refuses a proposal against the base instructions **regardless of ``origin``** (#762):
+        the reflection pass already drops that target, but the sink is the layer no future
+        proposal source can bypass — the check must live where every write funnels.
+        """
+        if path == INSTRUCTIONS_PATH:
+            raise ValueError(
+                "proposals against the base instructions are not accepted (the base prompt is "
+                "operator-authored; propose a named playbook instead)"
+            )
         if operation not in _OPERATIONS:
             raise ValueError(f"unsupported operation: {operation!r}")
         sid = uuid.uuid4().hex
@@ -425,10 +453,22 @@ class CoreReviewPage:
         (ADR-0090) — what is applied is what they actually saw and okayed, never the raw
         proposal. Records the audit row (proposal alongside what was applied) **before** the
         pending row drops.
+
+        A pre-#762 pending proposal against the base instructions is **no longer approvable**
+        — refused with a clear message; Reject still resolves it. See the module docstring.
         """
         p = await self._store.get(tenant=self._tenant, sid=sid)
         if p is None:
             raise HTTPException(status_code=404, detail=f"no such suggestion: {sid}")
+        if p.path == INSTRUCTIONS_PATH:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "proposals against the base instructions can no longer be approved — the "
+                    "base prompt is operator-authored and edited only in Settings. Reject this "
+                    "proposal to dismiss it (its text stays in the audit trail)."
+                ),
+            )
         applied = p.proposed_content if content is None else content
         await self._apply(p, applied)
         await self._store.record(
@@ -452,18 +492,17 @@ class CoreReviewPage:
         return ApplyResult(id=sid, status="rejected", path=p.path, operation=p.operation)
 
     async def _apply(self, p: PlaybookProposal, content: str) -> None:
-        """Write *content* through the store that owns the document *p* targets (ADR-0093 §3).
+        """Write *content* through the playbook store (ADR-0093 §3, narrowed by #762).
 
-        The base instructions go through the **existing** ``AgentInstructionsStore`` — the very
-        path the operator's own Settings edit uses, so an approved edit is indistinguishable from
-        a hand-typed one and inherits its snapshot-on-save undo.
+        Playbooks are the **only** apply target: the instructions write-through was removed with
+        #762 (``approve`` refuses that path before ever reaching here), so no proposal — from
+        any origin — can modify the base prompt. The instructions *store* stays injected purely
+        for the read-only side (:meth:`_current_content` diffs a legacy pending row against the
+        live base so the operator can see what they're rejecting).
         """
         name = playbook_name_from_path(p.path)
         if name is None:
-            if p.path != INSTRUCTIONS_PATH:
-                raise HTTPException(status_code=400, detail=f"unknown target path: {p.path!r}")
-            await self._instructions.set_instructions(self._tenant, content)
-            return
+            raise HTTPException(status_code=400, detail=f"unknown target path: {p.path!r}")
         existing = await self._playbooks.get_by_name(self._tenant, name)
         if p.operation == "create":
             # A playbook created by hand (or by an earlier approval) between staging and approval

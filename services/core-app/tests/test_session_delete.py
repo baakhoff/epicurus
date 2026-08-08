@@ -32,7 +32,11 @@ from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.store import AutomationSessionStore
 from epicurus_core_app.memory.extraction import ExtractionRunner
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
-from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
+from epicurus_core_app.memory.store import (
+    AttachmentStore,
+    ConversationStore,
+    EphemeralSessionStore,
+)
 
 
 class _Stores:
@@ -48,6 +52,7 @@ class _Stores:
         self.pending_drafts = PendingDraftStore(engine)
         self.pending_approvals = PendingApprovalStore(engine)
         self.automation_sessions = AutomationSessionStore(engine)
+        self.ephemeral = EphemeralSessionStore(engine)
         self.live_runs = LiveRunRegistry()
         self.cascade = SessionDeleteCascade(
             store=self.store,
@@ -59,6 +64,7 @@ class _Stores:
             pending_approvals=self.pending_approvals,
             automation_sessions=self.automation_sessions,
             live_runs=self.live_runs,
+            ephemeral=self.ephemeral,
         )
 
     async def init(self) -> None:
@@ -253,6 +259,64 @@ async def test_drain_after_delete_extracts_nothing_from_the_deleted_session(
     assert processed == 1
     assert extractor.extracted == ["kept: the question"]  # nothing from the deleted session
     assert await stores.queue.count() == 0
+
+
+async def test_cascade_clears_the_ephemeral_flag_last(stores: _Stores) -> None:
+    """#772: deleting an invisible chat also drops its flag row — after everything else, so a
+    failed erase leaves the flag for the orphan sweep to retry."""
+    await _populate(stores, tenant="t1", session_id="ghost")
+    await stores.ephemeral.mark(tenant="t1", session_id="ghost")
+    result = await stores.cascade.delete(tenant="t1", session_id="ghost")
+    assert result.ephemeral_flag_cleared is True
+    assert await stores.ephemeral.is_ephemeral(tenant="t1", session_id="ghost") is False
+    # A plain (never-flagged) chat reports the flag untouched.
+    await _populate(stores, tenant="t1", session_id="plain")
+    assert (
+        await stores.cascade.delete(tenant="t1", session_id="plain")
+    ).ephemeral_flag_cleared is False
+
+
+async def test_sweep_erases_stranded_invisible_chats(stores: _Stores) -> None:
+    """The orphan sweep (#772): flagged sessions are fully erased (the #771 cascade, not just
+    the flag), except the client-named live one and any session with a turn in flight."""
+    await _populate(stores, tenant="t1", session_id="stranded")
+    await stores.ephemeral.mark(tenant="t1", session_id="stranded")
+    await _populate(stores, tenant="t1", session_id="live")
+    await stores.ephemeral.mark(tenant="t1", session_id="live")
+    await _populate(stores, tenant="t1", session_id="normal")  # unflagged — never swept
+
+    swept = await stores.cascade.sweep_ephemeral(tenant="t1", keep="live")
+    assert swept == 1
+    # The stranded one is gone from every store, including its flag.
+    assert await stores.store.messages(tenant="t1", session_id="stranded") == []
+    assert await stores.ephemeral.is_ephemeral(tenant="t1", session_id="stranded") is False
+    # The live one and the normal one are untouched.
+    assert len(await stores.store.messages(tenant="t1", session_id="live")) == 2
+    assert await stores.ephemeral.is_ephemeral(tenant="t1", session_id="live") is True
+    assert len(await stores.store.messages(tenant="t1", session_id="normal")) == 2
+
+    # At startup nothing can be live: no keep → the remaining flagged session goes too.
+    assert await stores.cascade.sweep_ephemeral(tenant="t1") == 1
+    assert await stores.store.messages(tenant="t1", session_id="live") == []
+    assert await stores.ephemeral.list_ids(tenant="t1") == []
+
+
+async def test_sweep_spares_a_session_with_a_turn_in_flight(stores: _Stores) -> None:
+    gate = asyncio.Event()
+
+    async def held() -> AsyncIterator[AgentEvent]:
+        await gate.wait()
+        yield AgentEvent(type="done", turn=None)
+
+    await stores.store.append(tenant="t1", session_id="ghost", role="user", content="q")
+    await stores.ephemeral.mark(tenant="t1", session_id="ghost")
+    await stores.live_runs.start(held, tenant="t1", session_id="ghost")
+
+    # No keep named (another client's list read) — the in-flight turn is proof of life.
+    assert await stores.cascade.sweep_ephemeral(tenant="t1") == 0
+    assert len(await stores.store.messages(tenant="t1", session_id="ghost")) == 1
+    gate.set()  # let the driver finish so teardown is clean
+    await asyncio.sleep(0)
 
 
 async def test_cascade_cancels_and_evicts_the_live_run(stores: _Stores) -> None:

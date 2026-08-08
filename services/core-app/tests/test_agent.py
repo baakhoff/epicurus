@@ -1064,6 +1064,79 @@ async def test_agent_stamps_the_queued_exchange_with_its_session() -> None:
     assert queue.sessions == ["s1"]
 
 
+class _FakeEphemeral:
+    """A stand-in for the invisible-chat flag store (#772)."""
+
+    def __init__(self, flagged: set[str] | None = None, *, broken: bool = False) -> None:
+        self._flagged = flagged or set()
+        self._broken = broken
+
+    async def is_ephemeral(self, *, tenant: str, session_id: str) -> bool:
+        if self._broken:
+            raise RuntimeError("db down")
+        return session_id in self._flagged
+
+
+async def test_agent_never_enqueues_an_invisible_sessions_exchange() -> None:
+    """#772: an invisible chat is excluded at learn time — the exchange never even reaches
+    the extraction queue (deletion's session-stamped purge is only the backstop)."""
+    gw = _FakeGateway(
+        [ChatResult(model="m", content="Noted."), ChatResult(model="m", content="ok")]
+    )
+    queue = _FakeQueue()
+    memory = _FakeMemory()
+    ephemeral = _FakeEphemeral({"ghost"})
+    agent = Agent(
+        gateway=gw,
+        mcp=_FakeMcp(),
+        memory=memory,
+        queue=queue,  # type: ignore[arg-type]
+        ephemeral=ephemeral,  # type: ignore[arg-type]
+    )
+    await agent.run([ChatMessage(role="user", content="secret thing")], session_id="ghost")
+    await _settle()
+    assert queue.enqueued == []  # nothing queued from the invisible chat…
+    await agent.run([ChatMessage(role="user", content="normal thing")], session_id="plain")
+    await _settle()
+    assert [u for _, u, _ in queue.enqueued] == ["normal thing"]  # …while a normal chat still is
+
+
+async def test_agent_immediate_mode_never_extracts_an_invisible_session() -> None:
+    """The exclusion covers MEMORY_EXTRACTION_MODE=immediate too — no learner path at all."""
+    gw = _FakeGateway([ChatResult(model="m", content="ok")])
+    extractor = _FakeExtractor()
+    memory = _FakeMemory()
+    agent = Agent(
+        gateway=gw,
+        mcp=_FakeMcp(),
+        memory=memory,
+        extractor=extractor,
+        defer_extraction=False,
+        ephemeral=_FakeEphemeral({"ghost"}),  # type: ignore[arg-type]
+    )
+    await agent.run([ChatMessage(role="user", content="secret")], session_id="ghost")
+    await _settle()
+    assert extractor.calls == []
+
+
+async def test_agent_skips_learning_when_the_ephemeral_check_fails() -> None:
+    """Fail closed (#772): if the flag store can't answer, nothing is learned — a privacy
+    feature must not leak on a database hiccup."""
+    gw = _FakeGateway([ChatResult(model="m", content="ok")])
+    queue = _FakeQueue()
+    memory = _FakeMemory()
+    agent = Agent(
+        gateway=gw,
+        mcp=_FakeMcp(),
+        memory=memory,
+        queue=queue,  # type: ignore[arg-type]
+        ephemeral=_FakeEphemeral(broken=True),  # type: ignore[arg-type]
+    )
+    await agent.run([ChatMessage(role="user", content="anything")], session_id="s1")
+    await _settle()
+    assert queue.enqueued == []
+
+
 async def test_agent_immediate_mode_extracts_even_with_a_queue() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="Hi Sam.")])
     queue = _FakeQueue()

@@ -39,8 +39,9 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
 | `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
-| `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. |
+| `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. **Invisible sessions are excluded** (#772), and every list read also runs the **orphan sweep**: any flagged session not named by the optional `?active=<session_id>` query param (the invisible chat the requesting client is currently *in*) and with no turn in flight is fully erased via the #771 cascade — so a crash never strands an invisible chat on disk. The sweep is best-effort; a hiccup never fails the list. |
 | `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
+| `PUT /platform/v1/agent/sessions/{id}/ephemeral` | Flag a session **invisible** (#772) — see *Invisible chats* below. Idempotent (a mid-chat reload re-marks so the flag is server truth, not client memory); **503** if no flag store is wired. Returns `{ephemeral: true}`. There is deliberately **no un-mark**: toggling invisibility off *is* an exit, and every exit deletes (`DELETE /sessions/{id}`). |
 | `GET /platform/v1/agent/sessions/{id}` | A session's full transcript. Each message carries its **`id`** — the stable anchor a client names to edit that turn (`/edit`, #552) — alongside `role`, `content`, `created_at`, `entity_refs`, `attachments`, and (assistant turns) `activity`. |
 | `GET /platform/v1/agent/sessions/{id}/active-run` | The session's in-flight run to re-attach to — `{run_id, last_seq}` or `null` if none is live (ADR-0055). How a client rediscovers a turn after a reload/reconnect. |
 | `DELETE /platform/v1/agent/sessions/{id}/active-run` | Cancel the session's in-flight turn — the explicit **Stop** (a decoupled turn outlives the connection, so Stop must say so). Returns `{cancelled}` (ADR-0055). |
@@ -167,6 +168,38 @@ client falls back to history. Finished runs are reaped after `LIVE_RUN_GRACE_SEC
 one *running* run exists per `(tenant, session)` — a second start gets `409` (+ `X-Run-Id`).
 Multi-instance re-attach (a shared event log over Valkey/NATS, or sticky routing) is a named
 follow-up; v1 is single-instance.
+
+### Invisible chats (#772)
+
+A session flagged via `PUT /sessions/{id}/ephemeral` is an **invisible chat**: everything works
+normally while you're in it, and when you leave it is **deleted — not archived, deleted** (the
+full #771 cascade). The design is *persist-flagged, then hard-delete*: the session writes
+normally (so an accidental reload mid-conversation keeps the thread), and the flag row
+(`ephemeral_sessions`) is what makes it different:
+
+- **Hidden from every listing and learner while live.** Excluded from `GET /sessions` (and so
+  from the web's sessions sheet), **never enqueued for fact extraction** — the agent checks the
+  flag at learn time, in both `nightly` and `immediate` modes, failing *closed* (a flag-store
+  hiccup skips learning rather than leaking; #771's session-stamped queue purge is the exit's
+  backstop) — filtered out of the nightly reflection pass's transcript scan (transitively: the
+  scan reads the store's `sessions()`, whose default now excludes flagged sessions), and out of
+  `memory_search`'s past-conversation half, so an invisible chat can't surface inside another
+  conversation. Profile synthesis reads facts, so it is covered transitively once extraction
+  never sees the chat.
+- **Every exit deletes.** Toggling off, switching sessions, starting a new chat, and closing
+  the app all run `DELETE /sessions/{id}` from the client; the **orphan sweep** is the safety
+  net — at startup (nothing can be live across a restart) and on every session-list read, any
+  flagged session not named by the client's `?active=` and with no turn in flight is erased.
+  One consequence, stated plainly: invisible chats are effectively **per-client** — another
+  client's list read treats your idle invisible chat as stranded (an in-flight turn is spared).
+  A core-app restart mid-invisible-chat likewise sweeps it (conservative by design: a crash
+  must never strand one).
+- **Honest semantics.** Invisible means the *transcript* evaporates — tool effects do not. A
+  task created or a mail sent from an invisible chat persists, exactly like downloads from a
+  private browser window; a file uploaded during it remains in Files (the storage-sink copy).
+  Usage metering still records tokens — the core meters all inference (constraint #8) and the
+  events carry no content. The per-session model picker works as usual; its `session_models`
+  row dies with the session. Normal chats are byte-identically unaffected.
 
 ### Governed playbooks (ADR-0093)
 
@@ -1357,6 +1390,14 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   because there is no other "session row": a session is derived from `agent_messages` via
   `GROUP BY` (`ConversationStore.sessions`), the same reason `automation_sessions` (above)
   needed its own table for the chat-list badge.
+- **Postgres `ephemeral_sessions`** — the invisible-chat flag rows (#772): `session_id`
+  (primary key — session ids are client-minted uuids, so a cross-tenant collision is
+  unrepresentable, the `session_models` precedent), `tenant`, `created_at`. A flagged session
+  writes normally but is excluded from the sessions list, the extraction enqueue, reflection's
+  transcript scan, and `memory_search`'s conversation half; every exit path deletes it via the
+  #771 cascade (which drops this row **last**, so a failed erase stays sweepable), and the
+  orphan sweep erases any flagged session a crashed client left behind. A new table created by
+  `create_all` — no migration.
 - **Postgres `scheduled_turns`** — recurring prompts that run unattended (ADR-0092): `id`,
   `tenant`, `prompt`, `cadence` (`daily`/`weekly`), `hour`, `weekday` (nullable, weekly-only,
   0=Monday..6=Sunday), `delivery_target` (the session id the turn delivers into), `enabled`,

@@ -30,7 +30,12 @@ from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import PowerState
 from epicurus_core_app.memory.memory import MemoryItem
 from epicurus_core_app.memory.profile import StandingProfileStore
-from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, SessionSummary
+from epicurus_core_app.memory.store import (
+    AttachmentStore,
+    ConversationStore,
+    EphemeralSessionStore,
+    SessionSummary,
+)
 from epicurus_core_app.readiness import Readiness, ReadinessComponent, create_readiness_router
 
 
@@ -237,6 +242,7 @@ def _memory_app(
     session_models: SessionModelStore | None = None,
     agent: object | None = None,
     session_delete: SessionDeleteCascade | None = None,
+    ephemeral: EphemeralSessionStore | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.include_router(
@@ -250,6 +256,7 @@ def _memory_app(
             live_runs=live_runs,
             session_models=session_models,
             session_delete=session_delete,
+            ephemeral=ephemeral,
         )
     )
     return app
@@ -329,6 +336,58 @@ async def test_delete_session_runs_the_cascade_and_reports_counts() -> None:
     assert await store.messages(tenant="local", session_id="s1") == []
     assert await attachments.get(tenant="local", att_id=att_id) is None
     assert await session_models.get(tenant="local", session_id="s1") is None
+
+
+async def test_mark_ephemeral_flags_the_session_idempotently() -> None:
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    ephemeral = EphemeralSessionStore(engine)
+    await ephemeral.init()
+    app = _memory_app(_FakeMemory(), ephemeral=ephemeral)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        first = await client.put("/platform/v1/agent/sessions/ghost/ephemeral")
+        again = await client.put("/platform/v1/agent/sessions/ghost/ephemeral")  # reload re-marks
+    assert first.status_code == 200 and first.json() == {"ephemeral": True}
+    assert again.status_code == 200
+    assert await ephemeral.is_ephemeral(tenant="local", session_id="ghost") is True
+
+
+async def test_mark_ephemeral_without_a_store_is_503() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(_FakeMemory())), base_url="http://test"
+    ) as client:
+        resp = await client.put("/platform/v1/agent/sessions/s/ephemeral")
+    assert resp.status_code == 503
+
+
+async def test_sessions_list_sweeps_stranded_invisible_chats_but_spares_active() -> None:
+    """GET /sessions is the sweep's second trigger (#772): flagged sessions not named by
+    `active` (and with no turn in flight) are fully erased on the way to the list."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
+    store = ConversationStore(engine)
+    await store.init()
+    ephemeral = EphemeralSessionStore(engine)
+    await store.append(tenant="local", session_id="stranded", role="user", content="x")
+    await store.append(tenant="local", session_id="live", role="user", content="y")
+    await ephemeral.mark(tenant="local", session_id="stranded")
+    await ephemeral.mark(tenant="local", session_id="live")
+    cascade = SessionDeleteCascade(
+        store=store, attachments=AttachmentStore(engine), ephemeral=ephemeral
+    )
+    app = _memory_app(_FakeMemory(), session_delete=cascade, ephemeral=ephemeral)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/sessions", params={"active": "live"})
+    assert resp.status_code == 200
+    assert await store.messages(tenant="local", session_id="stranded") == []  # swept
+    assert len(await store.messages(tenant="local", session_id="live")) == 1  # spared
+    assert await ephemeral.list_ids(tenant="local") == ["live"]
 
 
 async def test_delete_session_without_a_cascade_falls_back_to_messages_only() -> None:

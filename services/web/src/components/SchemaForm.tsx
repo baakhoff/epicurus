@@ -25,6 +25,9 @@ interface PropertySchema {
   // Names a sibling boolean field that, when true, renders this date-time field as a
   // *date* picker emitting a ``YYYY-MM-DD`` value (the calendar's all-day toggle).
   date_toggle?: string;
+  // Open typeahead values for a ``format: "tags"`` chips field (#763) — offered, never
+  // enforced (unlike ``enum``). Overlaid from a board action's ``field_suggestions``.
+  suggestions?: string[];
   minimum?: number;
   maximum?: number;
   // An optional field (e.g. Python ``str | None``) arrives as ``anyOf`` of the real
@@ -44,7 +47,9 @@ export interface ObjectSchema {
 export type FormValues = Record<string, unknown>;
 
 /** Collapse an ``anyOf`` (optional/union) prop to its first non-null member, keeping
- *  the outer title/description/default so the field renders by its real type + format. */
+ *  the outer title/description/default — and any overlaid ``suggestions`` (#763), which
+ *  a board action attaches at the top level — so the field renders by its real type +
+ *  format without losing the overlay. */
 function resolveProp(prop: PropertySchema): PropertySchema {
   if (!prop.anyOf || prop.anyOf.length === 0) return prop;
   const member = prop.anyOf.find((p) => p.type && p.type !== "null") ?? prop.anyOf[0];
@@ -53,6 +58,7 @@ function resolveProp(prop: PropertySchema): PropertySchema {
     title: prop.title ?? member.title,
     description: prop.description ?? member.description,
     default: prop.default ?? member.default,
+    suggestions: prop.suggestions ?? member.suggestions,
   };
 }
 
@@ -148,6 +154,154 @@ function RepeatField({
   );
 }
 
+/** Split a comma-separated tags value into its clean tag list. */
+function splitTags(value: unknown): string[] {
+  if (typeof value !== "string" || !value) return [];
+  return value
+    .split(",")
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The chips input for a `format: "tags"` field (#763): the current tags as removable
+ * chips **inside** the input box ("a box inside a box"), a typeahead over the
+ * module-supplied `suggestions` (offered, never enforced — a new tag is created by
+ * typing it), and Enter/comma committing the entry. The field's *value* stays the
+ * comma-separated string the tool already accepts, so the MCP contract is unchanged.
+ */
+function TagsField({
+  title,
+  description,
+  suggestions,
+  value,
+  onChange,
+}: {
+  title: string;
+  description?: string;
+  suggestions?: string[];
+  value: unknown;
+  onChange: (next: unknown) => void;
+}) {
+  const tags = splitTags(value);
+  const [entry, setEntry] = useState("");
+  const [focused, setFocused] = useState(false);
+
+  const commit = (raw: string) => {
+    const tag = raw.trim();
+    setEntry("");
+    if (!tag || tags.some((t) => t.toLocaleLowerCase() === tag.toLocaleLowerCase())) return;
+    onChange([...tags, tag].join(", "));
+  };
+  const remove = (tag: string) => onChange(tags.filter((t) => t !== tag).join(", "));
+
+  // Typeahead: known tags not already chosen, filtered by the entry (all while empty —
+  // the picker doubles as "what tags exist?"), capped to keep the menu scannable.
+  const matches = (suggestions ?? [])
+    .filter((s) => !tags.some((t) => t.toLocaleLowerCase() === s.toLocaleLowerCase()))
+    .filter((s) => s.toLocaleLowerCase().includes(entry.trim().toLocaleLowerCase()))
+    .slice(0, 8);
+
+  return (
+    <div>
+      <Label hint={description}>{title}</Label>
+      <div
+        className={cnField(focused)}
+        onMouseDown={(e) => {
+          // Clicking the box focuses the inner input (unless a chip button was hit).
+          if (e.target === e.currentTarget) {
+            e.preventDefault();
+            (e.currentTarget.querySelector("input") as HTMLInputElement | null)?.focus();
+          }
+        }}
+      >
+        {tags.map((tag) => (
+          <span
+            key={tag}
+            className="inline-flex items-center gap-1 rounded-(--radius-field) bg-accent-dim px-1.5 py-0.5 text-xs text-accent-strong"
+          >
+            {tag}
+            <button
+              type="button"
+              aria-label={`Remove tag ${tag}`}
+              onClick={() => remove(tag)}
+              className="leading-none opacity-70 transition-opacity hover:opacity-100"
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        {/* eslint-disable-next-line no-restricted-syntax -- the chips *container* is the
+            themed field (#763, "a box inside a box"): TextInput's own border/background
+            would draw a second box around this inner entry, which is deliberately bare. */}
+        <input
+          aria-label={title}
+          value={entry}
+          placeholder={tags.length === 0 ? "Add a tag…" : ""}
+          onChange={(e) => {
+            // A pasted/typed comma commits everything before it, chip by chip.
+            const raw = e.target.value;
+            if (raw.includes(",")) {
+              const parts = raw.split(",");
+              for (const part of parts.slice(0, -1)) commit(part);
+              setEntry(parts[parts.length - 1]);
+            } else {
+              setEntry(raw);
+            }
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              // Commit the pending entry instead of submitting the form — but let a bare
+              // Enter (nothing pending) fall through to the form's submit.
+              if (entry.trim()) {
+                e.preventDefault();
+                commit(entry);
+              }
+            } else if (e.key === "Backspace" && entry === "" && tags.length > 0) {
+              remove(tags[tags.length - 1]); // erase backwards into the chips
+            }
+          }}
+          onFocus={() => setFocused(true)}
+          onBlur={() => {
+            setFocused(false);
+            commit(entry); // don't lose a half-typed tag on blur/submit-click
+          }}
+          className="min-w-24 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-ink-faint"
+        />
+      </div>
+      {focused && matches.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-1" role="listbox" aria-label={`${title} suggestions`}>
+          {matches.map((s) => (
+            <button
+              key={s}
+              type="button"
+              role="option"
+              aria-selected={false}
+              // onMouseDown so the pick lands before the input's blur commits the entry.
+              onMouseDown={(e) => {
+                e.preventDefault();
+                commit(s);
+              }}
+              className="rounded-(--radius-field) border border-edge px-1.5 py-0.5 text-xs text-ink-dim transition-colors hover:border-accent hover:text-accent-strong"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The chips container's classes — a bordered "box" the tag "boxes" sit inside. */
+function cnField(focused: boolean): string {
+  return [
+    "flex min-h-9 w-full cursor-text flex-wrap items-center gap-1 rounded-(--radius-field)",
+    "border bg-surface px-2 py-1.5 transition-colors",
+    focused ? "border-accent" : "border-edge",
+  ].join(" ");
+}
+
 function FieldFor({
   name,
   prop,
@@ -201,6 +355,18 @@ function FieldFor({
 
   if (prop.format === "rrule") {
     return <RepeatField title={title} description={prop.description} value={value} onChange={onChange} />;
+  }
+
+  if (prop.format === "tags") {
+    return (
+      <TagsField
+        title={title}
+        description={prop.description}
+        suggestions={prop.suggestions}
+        value={value}
+        onChange={onChange}
+      />
+    );
   }
 
   if (prop.format === "date-time" || prop.format === "date") {

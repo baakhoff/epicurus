@@ -5,6 +5,7 @@ send needs a live push service); the send-path *decisions* are what's under test
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -272,6 +273,95 @@ async def test_notify_uses_the_automation_overrides_center_value(
         TENANT, category="automation", title="t", body="b", automation_id="auto-1"
     )
     assert await fx.notifications.list(TENANT) == []  # override's center=False wins
+
+
+# ── notify: NotifyResult.notification_id (#723) ────────────────────────────────────
+# A caller (the automations push sink) needs the center row's id back to build an EntityRef
+# pointing at what was recorded, without a second, racy lookup.
+
+
+async def test_notify_returns_the_center_rows_id_when_center_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    rows = await fx.notifications.list(TENANT)
+    assert result.notification_id == rows[0].id
+
+
+async def test_notify_returns_no_notification_id_when_center_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.prefs.set_categories(TENANT, {"mail": ChannelPrefs(push=True, center=False)})
+    result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert result.notification_id is None
+
+
+async def test_notify_carries_the_notification_id_through_every_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`notification_id` is set as soon as the center row is written — before push is ever
+    resolved — so it rides along with `queued`/`skipped_rate_limited`/`skipped_disabled`
+    exactly as it does with `sent`, never only the happy path."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.prefs.set_quiet_hours(TENANT, enabled=True, start="00:00", end="23:59")
+    result = await fx.service.notify(TENANT, category="mail", title="t", body="b")
+    assert result.outcome == "queued"
+    assert result.notification_id is not None
+
+
+async def test_send_digest_never_sets_a_notification_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A digest summarizes several already-recorded rows — it has no single row of its own."""
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _webpush_ok)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    result = await fx.service.send_digest(TENANT, [_queued("mail", "New mail")])
+    assert result.notification_id is None
+
+
+# ── notify: wire-payload truncation (#723) ──────────────────────────────────────────
+
+
+async def test_notify_truncates_the_outgoing_payload_body_but_not_the_center_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _record(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _record)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    long_body = "x" * 5000
+    await fx.service.notify(TENANT, category="mail", title="t", body=long_body)
+    sent_payload = json.loads(calls[0]["data"])
+    assert len(sent_payload["body"]) < len(long_body)
+    assert sent_payload["body"].endswith("…")
+    rows = await fx.notifications.list(TENANT)
+    assert rows[0].body == long_body  # the durable record is never shortened
+
+
+async def test_notify_does_not_touch_a_body_under_the_truncation_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _record(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr("epicurus_core_app.push.service.webpush", _record)
+    fx = await _fixture()
+    await fx.subscriptions.create_or_update(tenant=TENANT, endpoint="e1", p256dh="p", auth="a")
+    await fx.service.notify(TENANT, category="mail", title="t", body="a short body")
+    sent_payload = json.loads(calls[0]["data"])
+    assert sent_payload["body"] == "a short body"
 
 
 # ── notify: quiet hours ──────────────────────────────────────────────────────────

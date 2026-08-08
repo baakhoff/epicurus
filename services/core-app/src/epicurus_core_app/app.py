@@ -66,11 +66,13 @@ from epicurus_core_app.agent.playbook_review import (
 from epicurus_core_app.agent.playbooks import PlaybookStore
 from epicurus_core_app.agent.reflection import PlaybookReflector, ReflectionStateStore
 from epicurus_core_app.agent.routes import create_agent_router
+from epicurus_core_app.agent.session_delete import SessionDeleteCascade
 from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.document_sinks import make_kb_sink, make_notes_sink
 from epicurus_core_app.automations.feed import RunFeed
 from epicurus_core_app.automations.migration import migrate_scheduled_turns
+from epicurus_core_app.automations.push_sink import make_push_sink
 from epicurus_core_app.automations.review import (
     PROPOSE_AUTOMATION_SPEC,
     AutomationProposalStore,
@@ -128,7 +130,11 @@ from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.facts import UserFactStore
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.profile import ProfileSynthesizer, StandingProfileStore
-from epicurus_core_app.memory.store import AttachmentStore, ConversationStore
+from epicurus_core_app.memory.store import (
+    AttachmentStore,
+    ConversationStore,
+    EphemeralSessionStore,
+)
 from epicurus_core_app.messaging import (
     BridgeAdmin,
     InboundConsumer,
@@ -271,6 +277,11 @@ def create_app() -> FastAPI:
     # extractor may target a small dedicated model to keep the nightly pass cheap.
     extraction_queue = ExtractionQueue(engine)
     extractor = FactExtractor(gateway, facts, model=settings.memory_extraction_model or None)
+    # Invisible chats (#772): the flag rows behind ephemeral sessions. A flagged chat works
+    # normally but is hidden from the list and from every learner while live, and each exit
+    # path deletes it via the #771 cascade; the orphan sweep (startup + list reads) erases
+    # any flagged session a crashed client left stranded.
+    ephemeral_sessions = EphemeralSessionStore(engine)
     # Standing user profile (ADR-0094): a compact per-tenant picture of the user, synthesized from
     # the fact store on the nightly maintenance batch and injected STATICALLY in _assemble — no
     # turn-time embed — so the common-case recall cost leaves the response path (the ADR-0051 trade,
@@ -366,9 +377,11 @@ def create_app() -> FastAPI:
     # Which chat session each chat-sink automation writes into (#672) — the chat list reads this
     # to badge automation sessions and group a per-run automation's chats under it.
     automation_sessions = AutomationSessionStore(engine)
-    # The sink seam. Push/chat/notes/kb are companion issues, so nothing is registered yet:
-    # a configured-but-unregistered sink is recorded as unavailable and the run's output
-    # still lands on the ledger, which is what makes the degradation graceful (ADR-0105).
+    # The sink seam (ADR-0105). `chat` is realized at turn time by the runner itself and is
+    # never registered here; push/notes/kb are registered below, once their dependencies
+    # (`push_service`, `registry`) exist. A configured-but-unregistered sink still degrades
+    # gracefully — recorded as unavailable, the run's output still lands on the ledger — which
+    # matters again the day a fifth sink ships ahead of its own registration.
     automation_sinks = SinkDispatcher()
     # Named playbooks (ADR-0093 §3): independent, enable-able blocks of guidance beside the base
     # prompt, versioned ADR-0046-style. Composed into the prompt by the instructions store below.
@@ -437,6 +450,23 @@ def create_app() -> FastAPI:
     # detached task that buffers its events, so a client disconnect (PWA backgrounded, refresh)
     # no longer aborts it — the answer still persists and a reconnecting client re-attaches.
     live_runs = LiveRunRegistry(grace_seconds=settings.live_run_grace_seconds)
+    # Deleting a chat deletes the chat — everywhere (#771): messages, attachments, still-queued
+    # extraction exchanges, the session-model row, suspended/pending paused runs, the automation
+    # badge mapping, and any in-flight run's buffered state, in one tenant-scoped cascade.
+    session_delete = SessionDeleteCascade(
+        store=conversation_store,
+        attachments=attachment_store,
+        queue=extraction_queue,
+        session_models=session_models,
+        suspended=suspended_runs,
+        pending_drafts=pending_drafts,
+        pending_approvals=pending_approvals,
+        automation_sessions=automation_sessions,
+        live_runs=live_runs,
+        # Invisible chats (#772): the cascade drops the flag row last, and its orphan sweep
+        # walks these flags — sparing the client-named live session and any turn in flight.
+        ephemeral=ephemeral_sessions,
+    )
     mcp_host = McpHost(settings.module_mcp_urls)
     # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
     # restart-only path for Ollama's KV-cache apply (#307). Reaches docker-proxy-core by default
@@ -567,6 +597,10 @@ def create_app() -> FastAPI:
         # instead of distilling it inline; "immediate" mode still fires the extractor per turn.
         queue=extraction_queue,
         defer_extraction=settings.defer_extraction,
+        # Invisible chats (#772): a flagged session's exchanges are never enqueued for fact
+        # extraction (and never extracted immediately) — skipped at learn time, with the
+        # #771 session-stamped purge as the exit's backstop.
+        ephemeral=ephemeral_sessions,
         # Time-box the one inline memory step so a cold embedder can't stall the first token.
         recall_timeout_s=settings.memory_recall_timeout_s,
         # Resolve the loop bound per turn from the stored pref (else the env default), so the
@@ -626,8 +660,8 @@ def create_app() -> FastAPI:
     automation_run_feed = RunFeed(automations)
     # Notes/KB sinks (#672): a run's output routed into a module document through the *existing*
     # document API (registry.save_page_doc), never a second write path (the #541 rule). The chat
-    # sink is turn-time (handled in the runner), and push is its own issue — neither is registered
-    # here. Timezone-aware so a `{date}` in a target path is the operator's local date.
+    # sink is turn-time (handled in the runner) and is never registered here. Timezone-aware so a
+    # `{date}` in a target path is the operator's local date.
     automation_sinks.register(
         "notes",
         make_notes_sink(registry, lambda: timezone_prefs.get_timezone(settings.default_tenant_id)),
@@ -636,6 +670,9 @@ def create_app() -> FastAPI:
         "kb",
         make_kb_sink(registry, lambda: timezone_prefs.get_timezone(settings.default_tenant_id)),
     )
+    # Push sink (#723): goes through push_service.notify() itself, so quiet hours / the rate
+    # cap / category+automation toggles all apply exactly as they do for any other caller.
+    automation_sinks.register("push", make_push_sink(push_service))
     automation_runner = AutomationRunner(
         automations,
         automation_queue,
@@ -762,7 +799,11 @@ def create_app() -> FastAPI:
         [
             extraction_drain_job(extraction_runner.drain_once),
             profile_synthesis_job(profile_synthesizer.run),
-            playbook_reflection_job(playbook_reflector.run),
+            # Reflection's own off-switch (#762): disabled, the job reports "skipped" without
+            # spending a gateway call — independent of the whole-schedule toggle.
+            playbook_reflection_job(
+                playbook_reflector.run, enabled=settings.playbook_reflection_enabled
+            ),
             module_reindex_job(registry.reembed),
             facts_reembed_job(lambda: facts.reembed_all(tenant=settings.default_tenant_id)),
             prune_run_history_job(lambda: maintenance_history.prune(settings.default_tenant_id)),
@@ -895,6 +936,10 @@ def create_app() -> FastAPI:
         except Exception as exc:  # queue down → deferred extraction degrades; chat is unaffected
             log.error("extraction queue init failed; nightly extraction off", error=str(exc))
         try:
+            await ephemeral_sessions.init()
+        except Exception as exc:  # flag store down → invisible chats degrade; chat is unaffected
+            log.error("ephemeral-session store init failed; invisible chats off", error=str(exc))
+        try:
             await scheduled_turns.init()
         except Exception as exc:  # store down → scheduled turns degrade; chat is unaffected
             log.error("scheduled-turns init failed; scheduled turns disabled", error=str(exc))
@@ -965,6 +1010,18 @@ def create_app() -> FastAPI:
         # deployment no-ops after one /api/tags round trip; a fresh one pulls in the
         # background while the rest of the core serves.
         model_bootstrap_task = asyncio.create_task(model_bootstrap.run())
+
+        # Startup half of the invisible-chat orphan sweep (#772): nothing can be live across a
+        # restart, so every flagged session is a stranded one — erase them all via the #771
+        # cascade. A one-shot task in the fire-and-forget shape of the loops around it (never
+        # blocks startup); the list-read half of the sweep covers strays that appear later.
+        async def _sweep_stranded_ephemeral() -> None:
+            try:
+                await session_delete.sweep_ephemeral(tenant=settings.default_tenant_id)
+            except Exception as exc:  # the sweep is a cleanup, never a startup gate
+                log.warning("startup ephemeral sweep failed", error=str(exc))
+
+        ephemeral_sweep_task = asyncio.create_task(_sweep_stranded_ephemeral())
         # Distil queued exchanges into durable user facts on a nightly schedule (ADR-0051).
         # Fire-and-forget: it sleeps until the operator's configured hour, then drains serially.
         extraction_task = asyncio.create_task(extraction_runner.run_periodic())
@@ -1022,6 +1079,7 @@ def create_app() -> FastAPI:
             catalog_task.cancel()
             catalog_size_task.cancel()
             model_bootstrap_task.cancel()
+            ephemeral_sweep_task.cancel()
             extraction_task.cancel()
             scheduled_turns_task.cancel()
             push_digest_task.cancel()
@@ -1034,6 +1092,8 @@ def create_app() -> FastAPI:
                 await catalog_size_task
             with suppress(asyncio.CancelledError):
                 await model_bootstrap_task
+            with suppress(asyncio.CancelledError):
+                await ephemeral_sweep_task
             with suppress(asyncio.CancelledError):
                 await extraction_task
             with suppress(asyncio.CancelledError):
@@ -1166,6 +1226,11 @@ def create_app() -> FastAPI:
             # A session's persisted model override (#707): the sessions list reads it back;
             # the picker's explicit change route writes it (the same field set_chat_model does).
             session_models=session_models,
+            # The chat delete cascade (#771): DELETE /sessions/{id} erases every store above.
+            session_delete=session_delete,
+            # Invisible chats (#772): PUT /sessions/{id}/ephemeral flags one; the sessions
+            # list hides flagged sessions and sweeps stranded ones on every read.
+            ephemeral=ephemeral_sessions,
             max_upload_bytes=settings.attachment_max_bytes,
             allowed_upload_types=settings.attachment_allowed_type_list,
         )

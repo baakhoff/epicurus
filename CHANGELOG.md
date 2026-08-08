@@ -31,7 +31,158 @@ images to GHCR.
   carries its evidence — the failing request's method, path, and failure class
   (`TypeError`/`502`/`504`) — kept in the store and logged via `console.debug`, and named
   in the banner's `title` tooltip on hover, so a flap can be attributed without
-  network-tab archaeology. `web` 0.130.0→0.131.0 (MINOR).
+  network-tab archaeology. `web` 0.133.0→0.134.0 (MINOR).
+
+- **The automations `push` sink is wired up — all ten starter templates now deliver
+  something** (#723) — `push` has been valid sink vocabulary since the automations engine
+  shipped (ADR-0105), but `SinkDispatcher` never had a handler registered for it: a run
+  configured with `sinks=["push"]` executed, recorded a ledger row, and delivered nothing an
+  operator could see — exactly the case every one of the ten starter templates #717 shipped
+  was in. `make_push_sink` closes the gap the same way `document_sinks.py` closed it for
+  `notes`/`kb`: a thin adapter that calls `PushService.notify` under a fixed `"automation"`
+  category (with `automation_id`, so a per-automation override can silence just one without
+  touching the category default), title the automation's own name, body the run's raw output.
+  It goes *through* `notify()`, never around it, so quiet hours, the tenant-wide rate cap, and
+  the push/center toggles all apply exactly as they do for the settings UI's test button or
+  #732's event alerts. `PushService.notify` gains `NotifyResult.notification_id` — the
+  notification-center row's id, set the moment that row is written regardless of what push
+  delivery itself then does — so the sink can record it as an `EntityRef`
+  (`module="core"`, `kind="notification"`) on the run's `artifacts`, the same ledger field the
+  notes/kb sinks already populate; the runs feed renders a chip for it with no further UI
+  work. `PushService._send_now` also gains a 500-character cap on the outgoing push payload's
+  body (an automation's full report should not be able to blow a push service's own size
+  ceiling) — the notification-center row keeps the caller's complete text regardless. `core-app`
+  0.107.0→0.108.0 (MINOR).
+
+- **Nightly reflection can no longer propose edits to the base system prompt** (#762) — the
+  pass (ADR-0093) offered two targets: a named playbook, or `"instructions"` — the base
+  prompt itself. The second target is removed, by design: reflection reads **tainted
+  transcripts** (mail bodies, web results, document text the agent quoted), so outside text
+  could surface as a plausible edit to the very document the agent's rules live in; an
+  instructions proposal was a **full-document replacement** reviewed nightly under approval
+  fatigue, and a poisoned approval would persist in every future turn's system prompt; and
+  the governed system drafting its own governing document is a conflict of interest even
+  with review. Enforced at three layers: the reflection prompt now offers **playbooks only**
+  (the base prompt stays in its context read-only, explicitly non-proposable, so playbooks
+  don't duplicate base rules); `_resolve` drops any `"instructions"` target the model
+  returns anyway (logged); and the review sink refuses to stage a proposal against the
+  instructions path **for every origin**, with the instructions apply-path removed outright
+  — no future proposal source can quietly reintroduce the target. A pending instructions
+  proposal from before the upgrade still renders with its diff and is cleanly rejectable;
+  Approve refuses it with a clear message. Operator editing of the base prompt in Settings
+  is unchanged. Reflection also gains its **own off-switch**,
+  `PLAYBOOK_REFLECTION_ENABLED` (default on, now that it is playbook-only): disabled, the
+  nightly job reports "skipped — disabled" without spending a gateway call — previously the
+  only way to stop it was disabling all nightly maintenance. `core-app` 0.106.0→0.107.0
+  (MINOR).
+
+- **Invisible chats** (#772) — a ghost toggle left of the model chooser starts a **fresh
+  invisible session**: everything works normally while you're in it, and when you leave —
+  toggling off, switching sessions, starting a new chat, or closing the app — the
+  conversation is **deleted, not archived** (the #771 cascade, so nothing survives anywhere).
+  The design is *persist-flagged, then hard-delete*: the session writes normally under a
+  server-side flag (`PUT /agent/sessions/{id}/ephemeral`, table `ephemeral_sessions`), so an
+  accidental mid-chat reload keeps the thread, while the flag hides it from the sessions
+  list and from **every learner** while live — never enqueued for fact extraction (checked
+  at learn time in both extraction modes, failing closed), excluded from nightly
+  reflection's transcript scan (via an `include_ephemeral=False` default on the store's
+  `sessions()`), and from `memory_search`'s past-conversation half. An **orphan sweep** —
+  at startup and on every session-list read (`GET /agent/sessions?active=<live one>`) —
+  erases any flagged session a crash left stranded, sparing the client-named live one and
+  any session with a turn in flight. Honest semantics, in the UI's own words: the header
+  reads "Invisible — deleted when you leave", and the footnote states that nothing is
+  learned while tool effects (tasks, mail, files) persist — like downloads from a private
+  browser window; usage metering still records tokens (the events carry no content).
+  Normal chats are byte-identically unaffected. `core-app` 0.105.0→0.106.0 (MINOR),
+  `web` 0.132.1→0.133.0 (MINOR).
+
+- **Deleting a chat now deletes the chat — everything it produced, everywhere** (#771) —
+  `DELETE /agent/sessions/{id}` removed only the `agent_messages` rows, so a "deleted"
+  conversation lived on across every sidecar it had touched. Worst: the fact-extraction queue
+  (ADR-0051) carried the exchange *text* with no `session_id`, so a deleted chat's queued
+  exchanges could not even be targeted — the nightly drain still distilled the "deleted"
+  conversation into memory facts that night. Also surviving: the uploaded attachments' bytes
+  (`agent_attachments`), the per-session model override (`session_models`, #707), and any
+  paused runs (`agent_suspended_runs` / `agent_pending_drafts` / `agent_pending_approvals`) —
+  each carrying the conversation verbatim — while an in-flight turn kept generating into the
+  deleted session. Now: the queue is **stamped** with a nullable `session_id` at enqueue
+  (reconciled additively, ADR-0067; legacy rows drain as before), and the route runs a
+  tenant-scoped **cascade** (`SessionDeleteCascade`) — cancel + evict the live run, purge
+  queued extractions, clear the model override, drop the paused runs and the automation badge
+  mapping, delete the attachment bytes, then the messages last (a failure partway leaves the
+  session visible and retriable). The audited referencing stores keep deliberate exceptions:
+  `scheduled_turns` rows are operator-authored standing config (kept — the next delivery
+  starts the session afresh), `notifications` carry no session linkage (kept), and facts
+  distilled on *previous* nights are curated memory managed in the Memory view — the web
+  confirm dialog now states that boundary honestly instead of implying total erasure.
+  `core-app` 0.104.0→0.105.0 (MINOR), `web` 0.132.0→0.132.1 (PATCH — confirm-dialog copy).
+
+- **Tags become a first-class part of the tasks board: group by them, and pick them as
+  chips** (#763) — the model and tools carried `tags` all along, but the UX was half-wired:
+  a bare comma-separated text input and no grouping. **Group by → Tags** joins the board's
+  dimensions, offered (like *List*) only when a visible task actually has a tag — the first
+  **multi-membership** grouping: a task appears under **each** of its tags, untagged tasks
+  land in an **Untagged** column, and columns sort alphabetically (case-insensitive,
+  Untagged last, stable across reloads). The add/edit forms' tags field becomes a **chips
+  input** — "a box inside a box": removable chips inside the field, Enter/comma commits,
+  backspace erases into the chips — via a new `format: "tags"` hint (the ADR-0082 seam),
+  with a typeahead over the module's distinct tags supplied as **`field_suggestions`** (a
+  new open-valued `field_choices` sibling: suggestions are offered, never enforced, so a
+  new tag is created by typing it). Serialization stays the tool's comma-separated string —
+  the MCP contract is unchanged. **Google honesty**: tags are local-only (Google Tasks has
+  no such field; the provider ignores them on write), so the field is hidden wherever the
+  write would land on Google — a Google task's Edit form, and Add forms whenever the
+  (external-only) list picker shows — never a silent no-op; Google tasks group under
+  Untagged. Drag-and-drop stays honest too: list-grouped columns now carry their
+  **`list_id`** and the shell matches drop targets by id — never by a display title a tag
+  column might share — and with no list columns on screen, cards don't offer a grab that
+  could only dead-end (drag-to-retag deliberately not implemented in v1). `tasks`
+  0.20.0→0.21.0 (MINOR) · `web` 0.131.0→0.132.0 (MINOR).
+
+- **The Tasks page gets three representations of the same data — Board, List, and
+  Calendar — switchable in place** (#767). The `board` archetype gains a **reserved `view`
+  control** (an extension of ADR-0049's declarative controls): a board page declaring
+  `{id: "view"}` opts into the shell's client-side representations, rendered via the
+  standard segmented view switcher. **List** flattens the columns to one deduped row set —
+  title, due, priority, list, tag chips, the same per-card actions — with every column
+  client-side sortable (stable, missing values last); **Calendar** is a month grid
+  (Monday-start, the calendar archetype's geometry) placing each card on its due date,
+  with prev/today/next paging, chips toned by the board's overdue/today language, and a
+  chip opening the ordinary card + actions in a sheet (no new mutation paths anywhere).
+  To support this, board cards additionally carry their **structured fields** — `due`
+  (bare ISO date), `priority`, `tags`, `list_title` — as data beside the rendered badges
+  (additive; a board that sets none renders as before). The chosen view **persists per
+  page** (localStorage, the #743 pattern), a `?view=` deep-link wins over the stored
+  choice (and is kept in sync on switch), junk clamps to the kanban, and a board with no
+  `view` control ignores the param. The tasks module declares the control (Board / List /
+  Calendar), echoes the clamped `?view=`, and omits *Group by* off the Board view —
+  grouping shapes kanban columns; the flat/date-keyed views would render it as a dead
+  knob — while *Show* applies under every view; the payload is identical across views.
+  Undated tasks never appear in any of the three — they live in the Can (#766). The
+  calendar *page's* cross-module task overlay (#469) is untouched. `BoardView` is now
+  keyed per page in `ModulePageScreen`, so tasks' two board pages can't leak control
+  state onto each other. Day-cell quick-add is deferred. `tasks` 0.19.0→0.20.0 (MINOR) ·
+  `web` 0.130.0→0.131.0 (MINOR).
+
+- **The Can: undated tasks get their own backlog page, and the board shows only what's
+  scheduled** (#766) — undated tasks used to land on the Tasks board in a "No date" bucket
+  under the due grouping and inside every other grouping's columns, so the backlog and the
+  plan shared one surface. The tasks module now declares a second left-nav `board` page,
+  **Can** (`/m/tasks/can`): one flat **Backlog** column holding every task without a due
+  date, across the same enabled lists the board aggregates (category badges preserved). The
+  board and the Can partition the same fetch by `due` alone — the board excludes undated
+  tasks under **every** grouping (the "No date" bucket is gone). Each Can card leads with a
+  one-tap **Schedule** action (a due-only `tasks_update` form prefilled to today, rendered
+  as the shell's native date picker via a new `format: "date"` hint on both tools' `due`
+  params — the ADR-0082 format seam, no new web code); clearing a due date moves a task
+  back to the Can. The Can's Add offers no due or repeat field, and its only view control
+  is *Show*, so completed backlog items stay reachable. Nothing vanishes silently:
+  `tasks_add`'s description and both `due` param descriptions (which double as the web
+  form's field hints) say an undated task files into the Can, and a task's hover-card
+  `href` now targets the page it actually lives on. Purely a read-partition — no provider
+  or DB change; lead-time notifications are untouched (they key on due dates, which Can
+  items don't have — by design). `tasks` 0.18.0→0.19.0 (MINOR); no web change — the shell
+  already renders manifest pages, form actions, and the date field.
 
 - **Approving a delete suggestion no longer reports success when the file is already gone**
   (#761) — `SuggestionReview.approve`'s `delete` branch caught the file API's 404 (the vault

@@ -6,7 +6,8 @@ Both core-owned, not a module (ADR-0018) — there is no `push` or `notification
 every endpoint below lives on `core-app` at `/platform/v1/push` or `/platform/v1/notifications`.
 
 The flow is: a browser subscribes via the Push API → the core stores the subscription →
-some caller (today, only the Settings "send test notification" button) calls
+a category-based caller — the Settings "send test notification" button, or the
+[automations engine's push sink](#automations-push-sink-723) (#723) — calls
 [`PushService.notify`](#pushservicenotify-core-internal) → the core resolves the tenant's
 prefs (category/automation toggle → **center**: record a durable row, independent of the
 next step; **push**: quiet hours → rate cap) → either delivers a VAPID-signed push to every
@@ -64,9 +65,10 @@ async def notify(
 ```
 
 **Not an HTTP endpoint.** This is the contract a core-side caller codes against directly —
-the automations engine's push sink, a future system notice — never a module (ADR-0102 §5; if
-a module ever needs to trigger a push, that gets a `PlatformClient` method and an endpoint
-added in the PR that needs it, per the module-side-client-helper lesson, ADR-0020).
+the settings UI's test button and the automations engine's push sink today, a future
+core-originated system notice tomorrow — never a module (ADR-0102 §5; if a module ever needs
+to trigger a push, that gets a `PlatformClient` method and an endpoint added in the PR that
+needs it, per the module-side-client-helper lesson, ADR-0020).
 
 Resolves `PushPrefs.effective(category, automation_id)` once, then does two independent
 things with it (ADR-0104 §1): if `effective.center`, records a
@@ -82,8 +84,21 @@ subscribed device via VAPID-signed webpush and returns `sent` (with `sent_count`
 skipped_rate_limited | skipped_no_devices` — and describes **push delivery only**; it says
 nothing about whether a center row was written (check `center` in the tenant's prefs for that).
 
+`NotifyResult.notification_id` (#723) carries the center row's id back to the caller — set
+the moment that row is written (so it rides along with every outcome above, not just `sent`),
+`None` when `center` was off. A caller that wants to reference what was recorded — the
+automations push sink builds an `EntityRef` from it — reads this instead of making a second,
+racy lookup; `send_digest` (below) always leaves it `None`, since a digest summarizes several
+already-recorded rows rather than writing one of its own.
+
 A subscription the push service reports **Gone** (404/410 — an uninstalled PWA, cleared site
 data, an expired registration) is pruned automatically; that's expected churn, not an error.
+
+The outgoing wire payload's `body` is capped at `_MAX_PUSH_BODY_CHARS` (500 characters, an
+ellipsis appended when trimmed) — a browser push service enforces its own size ceiling, and an
+automation's full report should not be able to blow it. Only the JSON handed to `webpush()` is
+shortened; the notification-center row written above always keeps the caller's complete text,
+since a push payload limit is not a reason to lose part of the durable record.
 
 ## VAPID keys (ADR-0102 §1)
 
@@ -149,6 +164,38 @@ A per-tenant row cap (`NotificationStore`'s `max_per_tenant`, default 500), not 
 the oldest rows are pruned past the cap on every `create()` (ADR-0104 §3; contrast with the
 module-event log's day-based `EVENTS_RETENTION_DAYS`, ADR-0103 §5 — a different retention
 question: "what haven't I looked at" bounds naturally by count, not by age).
+
+## Automations push sink (#723)
+
+`epicurus_core_app.automations.push_sink` — the `push` sink's handler
+(`docs/reference/automations.md#sinks`), the last of the ADR-0105 sink vocabulary's four to
+get one. Before this, every one of the ten starter templates #717 shipped with
+`sinks=["push"]` ran, recorded a ledger row, and delivered nothing an operator could see —
+`SinkDispatcher._handlers.get("push")` returned `None`, so the sink was always "unavailable."
+
+`make_push_sink(push_service)` builds a plain closure and goes **through**
+[`PushService.notify`](#pushservicenotify-core-internal), never around it — quiet hours, the
+tenant-wide rate cap, and the push/center toggles all apply exactly as for any other caller.
+
+| Decision | What it does |
+| --- | --- |
+| **Category** | Always `"automation"` — one settings-UI toggle row covers every automation by default. |
+| **Per-automation override** | `automation_id=automation.id` is passed on every call, so an operator can silence one noisy automation via `PushPrefs.automation_overrides` without muting the whole category (the ADR-0102 §4 seam, unused until now). |
+| **Title** | The automation's own name (truncated defensively to 200 characters), the same "the entity's own label leads" preference [event alerts](#the-listener-eventalertlistener-core-internal) uses. |
+| **Body** | The run's raw output, untouched — `notify()`'s wire-payload truncation (above) is what shortens what actually goes out over the wire; the center row keeps it in full. Blank output falls back to a fixed placeholder rather than an empty notification. |
+| **Deep link** | `/observability?tab=runs&automation=<id>` — the same cross-link the Automations page's own per-row run history already uses, landing the operator on this automation's filtered run history rather than the flat automations list. |
+| **`entity_ref`** | Not set — a plain notification (title + body + deep link only; ADR-0104 §5 explicitly supports this combination). |
+
+**Artifact.** When `notify()` returns a `notification_id` (the category's `center` toggle was
+on), the handler returns an `EntityRef` — `ref_id=notification_id`, `module="core"`,
+`kind="notification"`, `title=<the push title>` — which `SinkDispatcher` collects onto the
+run's `automation_runs.artifacts` (`docs/reference/automations.md#the-run-ledger`), so the
+runs feed renders a chip for it exactly as it already does for a notes/kb document. `core` has
+no hover-card resolver, so the chip falls back to its own title on hover — the same precedent
+`CoreEventEmitter._file_ref` already sets for the Files page (`docs/services/core-app.md`).
+When `center` is off, `notification_id` is `None` and the handler returns `None`: there is no
+durable row to point at, the one case notes/kb never hits (a document sink always writes
+something).
 
 ## Event alerts (#732, ADR-0114)
 
@@ -240,5 +287,7 @@ PWA window and navigates it to `deep_link`, or opens a new one. Both are testabl
 [web](../services/web.md).
 
 See the running services that speak this contract: [core-app](../services/core-app.md#push-notifications-adr-0102)
-(the send path + the notification center + event alerts) and [web](../services/web.md)
-(subscribe flow + settings UI + service worker + the Notifications page).
+(the send path + the notification center + event alerts + the automations push sink) and
+[web](../services/web.md) (subscribe flow + settings UI + service worker + the Notifications
+page). The automations engine itself, including the other three sinks, is documented at
+[automations](automations.md).

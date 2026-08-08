@@ -12,6 +12,7 @@ import { Sheet, Spinner, cn } from "@/components/ui";
 import { api } from "@/lib/api";
 import type { Attachment } from "@/lib/contracts";
 import { moduleIcon } from "@/lib/icons";
+import { fetchSessions } from "@/stores/chat";
 
 function uid(): string {
   return crypto.randomUUID();
@@ -102,7 +103,9 @@ function FileSection({ onAttach }: { onAttach: (a: Attachment) => void }) {
 }
 
 function ChatSection({ onAttach, enabled }: { onAttach: (a: Attachment) => void; enabled: boolean }) {
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: api.sessions, enabled });
+  // fetchSessions, not api.sessions: every ["sessions"] fetch must name the live invisible
+  // session (#772) or a refetch from this surface would let the server sweep it.
+  const sessions = useQuery({ queryKey: ["sessions"], queryFn: fetchSessions, enabled });
   const items = sessions.data ?? [];
   return (
     <section>

@@ -2,24 +2,32 @@
 
 :meth:`PushService.notify` is what a caller with a *category* codes against — ``notify(
 tenant, category=..., title=..., body=...)`` — resolving push/center through `PushPrefs`
-(categories, then automation overrides). The settings UI's "send test notification" button
-(``push/routes.py``) is today's only category-based caller; the automations engine's push
-sink is still deferred (its own issue). :meth:`PushService.notify_effective` is the same
-send path for a caller whose prefs come from somewhere else entirely — the event-alerts
-listener (#732), whose per-``(module, event_type)`` subscription *is* the effective
-``ChannelPrefs``, with no category to resolve. See docs/reference/notifications.md for both
-signatures as the documented contract future callers code against.
+(categories, then automation overrides). Its category-based callers are the settings UI's
+"send test notification" button (``push/routes.py``, category ``"system"``) and the
+automations engine's push sink (``automations/push_sink.py``, #723, category
+``"automation"``). :meth:`PushService.notify_effective` is the same send path for a caller
+whose prefs come from somewhere else entirely — the event-alerts listener (#732), whose
+per-``(module, event_type)`` subscription *is* the effective ``ChannelPrefs``, with no
+category to resolve. See docs/reference/notifications.md for both signatures as the
+documented contract every caller codes against.
 
 Every call first records a notification-center row (``epicurus_core_app.notifications``) if
 the category/automation's ``center`` toggle is on — regardless of what push delivery does
-below (#671, ADR-0102 §4). Push delivery then resolves, in order: (1) the effective push
-toggle — off skips delivery entirely; (2) quiet hours in the tenant's timezone (ADR-0039) —
-queues for a digest rather than sending; (3) an in-memory per-tenant rate cap — single-instance v1,
-the same disposable-cache trade ADR-0055's live-run registry makes, not backed by a table
-since losing counts on a restart just under-limits for one window, never over-limits.
-Delivery itself fans out to every device via VAPID-signed webpush (RFC 8291/8292), pruning
-any subscription the push service reports Gone (404/410) — a dead endpoint is expected
-churn (uninstalled PWA, cleared site data), not an error.
+below (#671, ADR-0102 §4). ``NotifyResult.notification_id`` carries that row's id back to the
+caller (``None`` when ``center`` was off), so a caller that wants to reference what was
+recorded — the automations engine's push sink (#723) does exactly this, building an
+``EntityRef`` for the run's ledger — never has to make a second, racy lookup. Push delivery
+then resolves, in order: (1) the effective push toggle — off skips delivery entirely; (2)
+quiet hours in the tenant's timezone (ADR-0039) — queues for a digest rather than sending;
+(3) an in-memory per-tenant rate cap — single-instance v1, the same disposable-cache trade
+ADR-0055's live-run registry makes, not backed by a table since losing counts on a restart
+just under-limits for one window, never over-limits. Delivery itself fans out to every device
+via VAPID-signed webpush (RFC 8291/8292), pruning any subscription the push service reports
+Gone (404/410) — a dead endpoint is expected churn (uninstalled PWA, cleared site data), not
+an error. The outgoing wire payload's ``body`` is shortened to ``_MAX_PUSH_BODY_CHARS`` if
+needed (a push service enforces its own size ceiling); the notification-center row written
+above always keeps the caller's full, untruncated text — a push payload limit is not a reason
+to lose part of the durable record.
 """
 
 from __future__ import annotations
@@ -27,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time as _time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, tzinfo
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -52,9 +60,23 @@ _VAPID_SECRET_PATH = "push/vapid"
 # arrives, short enough that a very stale device doesn't get a burst of week-old pushes.
 _TTL_SECONDS = 24 * 60 * 60
 
+# A browser push payload has a real wire-size ceiling (RFC 8291's AES-GCM framing eats into
+# the ~4KB most push services accept) — long enough that an ordinary title/body is never
+# touched, short enough that an automation's full multi-paragraph report can't blow the
+# budget. Only `_send_now`'s outgoing JSON is shortened; by the time it runs, `_deliver` has
+# already written the notification-center row (if any) with the untruncated text.
+_MAX_PUSH_BODY_CHARS = 500
+
 Outcome = Literal[
     "sent", "queued", "skipped_disabled", "skipped_rate_limited", "skipped_no_devices"
 ]
+
+
+def _truncate(text: str, limit: int) -> str:
+    """*text*, or its first *limit* characters plus an ellipsis marker if longer."""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
 @dataclass(frozen=True)
@@ -64,6 +86,12 @@ class NotifyResult:
     outcome: Outcome
     sent_count: int = 0
     pruned_count: int = 0
+    #: The notification-center row's id, when `effective.center` wrote one — independent of
+    #: whatever `outcome` says about push (a row is written before push is ever resolved).
+    #: `None` when `center` was off, and always `None` from `send_digest` (a summary send with
+    #: no single center row of its own). Lets a caller build an `EntityRef` pointing at what
+    #: was recorded — see the module docstring.
+    notification_id: str | None = None
 
 
 class PushService:
@@ -177,8 +205,9 @@ class PushService:
         """The shared send path once push/center are resolved: center write, then push routes
         to delivered now / queued for quiet hours / skipped — independent of the center write
         (#671, ADR-0102 §4)."""
+        notification_id: str | None = None
         if effective.center:
-            await self._notifications.create(
+            notification = await self._notifications.create(
                 tenant=tenant,
                 category=category,
                 title=title,
@@ -187,8 +216,9 @@ class PushService:
                 entity_ref=entity_ref,
                 automation_id=automation_id,
             )
+            notification_id = notification.id
         if not effective.push:
-            return NotifyResult(outcome="skipped_disabled")
+            return NotifyResult(outcome="skipped_disabled", notification_id=notification_id)
         local_now = await self._local_now()
         if is_quiet_now(quiet_prefs, local_now.time()):
             await self._queue.enqueue(
@@ -199,10 +229,11 @@ class PushService:
                 deep_link=deep_link,
                 entity_ref=entity_ref,
             )
-            return NotifyResult(outcome="queued")
+            return NotifyResult(outcome="queued", notification_id=notification_id)
         if not self._check_rate_cap(tenant):
-            return NotifyResult(outcome="skipped_rate_limited")
-        return await self._send_now(tenant, category, title, body, deep_link, entity_ref)
+            return NotifyResult(outcome="skipped_rate_limited", notification_id=notification_id)
+        sent = await self._send_now(tenant, category, title, body, deep_link, entity_ref)
+        return replace(sent, notification_id=notification_id)
 
     async def send_digest(self, tenant: str, items: list[QueuedPush]) -> NotifyResult:
         """Deliver one summary push for a batch of quiet-hours-held items (called by the scheduler).
@@ -234,7 +265,7 @@ class PushService:
         payload = json.dumps(
             {
                 "title": title,
-                "body": body,
+                "body": _truncate(body, _MAX_PUSH_BODY_CHARS),
                 "category": category,
                 "deep_link": deep_link,
                 "entity_ref": entity_ref,

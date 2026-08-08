@@ -51,6 +51,7 @@ from epicurus_core_app.memory.extraction import FactExtractor
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.profile import StandingProfileStore
+from epicurus_core_app.memory.store import EphemeralSessionStore
 from epicurus_core_app.readiness import Readiness
 
 log = get_logger("epicurus_core_app.agent")
@@ -675,6 +676,7 @@ class Agent:
         extractor: FactExtractor | None = None,
         queue: ExtractionQueue | None = None,
         defer_extraction: bool = True,
+        ephemeral: EphemeralSessionStore | None = None,
         recall_timeout_s: float = _DEFAULT_RECALL_TIMEOUT_S,
         prefs: LlmPrefsStore | None = None,
         suspended: SuspendedRunStore | None = None,
@@ -704,6 +706,11 @@ class Agent:
         self._extractor = extractor
         self._queue = queue
         self._defer_extraction = defer_extraction
+        # Invisible chats (#772): a flagged session must never feed a learner, so the
+        # extraction scheduler checks this store and skips — enqueue *and* immediate mode —
+        # with #771's session_id purge as the belt-and-braces backstop. None disables the
+        # check (no flag store wired → no session can be invisible).
+        self._ephemeral = ephemeral
         self._recall_timeout_s = recall_timeout_s
         self._bg_tasks: set[asyncio.Task[Any]] = set()
         self._prefs = prefs
@@ -783,7 +790,9 @@ class Agent:
             )
         await self._persist_answer(turn, tenant=tenant, session_id=session_id)
         if not blocked:
-            self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
+            self._schedule_extraction(
+                tenant=tenant, messages=messages, answer=turn.content, session_id=session_id
+            )
         return turn
 
     async def run_stream(
@@ -1130,11 +1139,18 @@ class Agent:
         # must still flush it. The model call above stays promptly cancellable; losing the
         # finished answer here would be the very bug this decoupling fixes (#376).
         await asyncio.shield(self._persist_answer(turn, tenant=tenant, session_id=session_id))
-        self._schedule_extraction(tenant=tenant, messages=messages, answer=turn.content)
+        self._schedule_extraction(
+            tenant=tenant, messages=messages, answer=turn.content, session_id=session_id
+        )
         yield AgentEvent(type="done", turn=turn)
 
     def _schedule_extraction(
-        self, *, tenant: str, messages: list[ChatMessage], answer: str
+        self,
+        *,
+        tenant: str,
+        messages: list[ChatMessage],
+        answer: str,
+        session_id: str | None = None,
     ) -> None:
         """Persist this exchange for fact extraction, off the response path (ADR-0045/0051).
 
@@ -1144,7 +1160,8 @@ class Agent:
         ADR-0045 path). Either way it is fire-and-forget so it never delays the reply, and the
         task is tracked until it finishes so it isn't garbage-collected mid-flight. Skips when
         there is nothing to learn from — no user text, no answer, or only the empty-answer
-        fallback (a canned non-answer) — or when no sink is configured.
+        fallback (a canned non-answer) — or when no sink is configured. ``session_id`` stamps
+        the queued row so deleting the chat can purge it before the drain (#771).
         """
         if not answer or answer == _EMPTY_ANSWER_FALLBACK:
             return
@@ -1158,18 +1175,49 @@ class Agent:
         )
         if not user_text:
             return
-        coro: Coroutine[Any, Any, object]
-        if self._defer_extraction and self._queue is not None:
-            coro = self._queue.enqueue(tenant=tenant, user_text=user_text, assistant_text=answer)
-        elif self._extractor is not None:
-            coro = self._extractor.extract(
-                tenant=tenant, user_text=user_text, assistant_text=answer
-            )
-        else:
-            return
+        has_sink = (self._defer_extraction and self._queue is not None) or (
+            self._extractor is not None
+        )
+        if not has_sink:
+            return  # no sink configured — nothing to schedule
+        coro: Coroutine[Any, Any, object] = self._learn_exchange(
+            tenant=tenant, user_text=user_text, answer=answer, session_id=session_id
+        )
         task = asyncio.create_task(coro)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    async def _learn_exchange(
+        self, *, tenant: str, user_text: str, answer: str, session_id: str | None
+    ) -> None:
+        """The scheduled background half of :meth:`_schedule_extraction`.
+
+        An **invisible session** (#772) is skipped up front — in both modes, so a flagged
+        chat's exchange never even reaches the queue (enqueue-time exclusion; #771's
+        session-stamped purge is the backstop for the exit itself). The check fails *closed*:
+        if the flag store can't answer, nothing is learned — a privacy feature must not leak
+        on a database hiccup (and the enqueue against the same database would fail anyway).
+        """
+        if session_id is not None and self._ephemeral is not None:
+            try:
+                if await self._ephemeral.is_ephemeral(tenant=tenant, session_id=session_id):
+                    return
+            except Exception as exc:
+                log.warning(
+                    "ephemeral check failed; skipping fact learning for this exchange",
+                    session_id=session_id,
+                    error=str(exc),
+                )
+                return
+        if self._defer_extraction and self._queue is not None:
+            await self._queue.enqueue(
+                tenant=tenant,
+                user_text=user_text,
+                assistant_text=answer,
+                session_id=session_id,
+            )
+        elif self._extractor is not None:
+            await self._extractor.extract(tenant=tenant, user_text=user_text, assistant_text=answer)
 
     async def _persist_answer(
         self, turn: AgentTurn, *, tenant: str, session_id: str | None

@@ -210,6 +210,23 @@ skips a 404, so opting in is just serving it, no flag to set (see *Calendar-feed
 [core-app](core-app.md)). Every task hover-card (not only calendar-originated ones) also gains an
 `href` back to the Tasks board, previously absent.
 
+**v0.19.0** adds **the Can** (#766) — a second left-nav page holding the backlog: every task
+**without a due date**, in one flat column. The board and the Can **partition** the same fetch
+by `due` alone: the board now shows *scheduled* (dated) tasks only, under **every** grouping —
+the due grouping's "No date" bucket is gone — so it is always a clean picture of what's
+actually on the calendar, and the Can holds everything else. Scheduling is one tap: each Can
+card leads with a **Schedule** action (a due-only `tasks_update` form, prefilled to today,
+rendered as the SchemaForm date picker via a new `format: "date"` hint on both tools' `due`
+params); clearing a task's due date moves it back to the Can. The Can's **Add** creates a task
+with no due field offered (and no `repeat` — a rule needs a due anchor); its only view control
+is **Show** (open / completed / all), so completed backlog items stay reachable. Nothing
+vanishes silently: `tasks_add`'s tool description and both `due` param descriptions say an
+undated task files into the Can — the same text doubles as the web form's field hint — and a
+task's hover-card `href` now points at the page it actually lives on (board or Can). Purely a
+read-partition: no provider or DB change; dateless tasks from any provider (Google allows
+them) appear in the Can, and lead-time notifications are untouched (they key on due dates,
+which Can items don't have — by design).
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -219,9 +236,9 @@ skips a 404, so opting in is just serving it, no flag to set (see *Calendar-feed
 | `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | Open tasks as **entity-reference chips** (ADR-0019), newest first. |
 | `tasks_lists()` | none | The available lists (categories) as `- <title> — id: <id>` text, so the agent can pick one (or report only the default list exists). |
 | `tasks_create_list(title)` | `title`: the new list's display name | The created list as a `Collection` (`account`/`collection`/`title`/`writable`). **Google-only** (#474) — raises if no external account is connected; the local store has no lists of its own. |
-| `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?, repeat?)` | `title`: required; rest optional. `list_id`: target list (from `tasks_lists`). `repeat`: RRULE making it recurring (needs a `due`) | The created `Task`. |
+| `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?, repeat?)` | `title`: required; rest optional. `due`: omit it and the task files into the **Can** (the undated backlog page, #766) instead of the board — the tool description says so, so "note down: buy a drill" lands there knowingly. `list_id`: target list (from `tasks_lists`). `repeat`: RRULE making it recurring (needs a `due`) | The created `Task`. |
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | The updated `Task` with `completed=True`. A recurring task also spawns its next instance (ADR-0082). |
-| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?, repeat?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` / `repeat=""` **clears** that field (`None`/omitted leaves it unchanged) — clearing `due` alone while a repeat rule is still live raises (#534; clear `repeat=""` too, or give it a new due, instead). `to_list_id`: **move** the task to this list; `repeat`: an RRULE (`""` makes it one-off) | The updated `Task` (the moved task on a move). |
+| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?, repeat?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` / `repeat=""` **clears** that field (`None`/omitted leaves it unchanged) — clearing `due` moves the task off the board into the **Can** (#766), and raises while a repeat rule is still live (#534; clear `repeat=""` too, or give it a new due, instead); setting a due date on a Can task schedules it onto the board. `to_list_id`: **move** the task to this list; `repeat`: an RRULE (`""` makes it one-off) | The updated `Task` (the moved task on a move). |
 | `tasks_delete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | A short confirmation string. **Permanent** — unlike `tasks_complete`, the task is removed. Idempotent on the local store (a missing id is a no-op). |
 
 All tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
@@ -268,7 +285,7 @@ side table keyed by task id (ADR-0082).
 | `GET /manifest` | Module manifest (tools, UI declaration, `collections` spec). |
 | `GET /status` | `{"google_connected": bool}` (best-effort live OAuth check). |
 | `GET /accounts` | Connected accounts + their task lists for the picker (ADR-0030). The core proxies + merges this at `GET /platform/v1/modules/tasks/collections`. |
-| `GET /pages/{id}` | Page data for a manifest-declared page (`board`); the core proxies it (ADR-0018). Accepts forwarded `group` (due/status/priority/list/none) and `show` (open/done/all) query params (ADR-0049), each clamped to a known value. 404 for an unknown id. |
+| `GET /pages/{id}` | Page data for a manifest-declared page — `board` (the Tasks board) or `can` (the undated backlog, #766); both `board`-archetype payloads the core proxies (ADR-0018). Accepts forwarded `show` (open/done/all) on both pages and `group` (due/status/priority/list/none) on the board (ADR-0049), each clamped to a known value. 404 for an unknown id. |
 | `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
@@ -282,20 +299,29 @@ side table keyed by task id (ADR-0082).
 | **Status** | Whether Google is connected (polled from `GET /status`). |
 | **Lists** | Connected accounts + their task lists: per-list on/off toggles and a **default** picker for new tasks (ADR-0030/0036). |
 | **Actions** | None — `tasks_list` returns entity-reference chips (surfaced in chat), so it is not a card-action button. |
-| **Tasks page** | A left-nav `board` page (see below). |
+| **Tasks page** | A left-nav `board` page of *scheduled* (dated) tasks (see below). |
+| **Can page** | A second left-nav `board` page — the undated backlog (#766, see below). |
 
-### The Tasks page — `board` archetype (ADR-0018)
+### The Tasks + Can pages — `board` archetype (ADR-0018, #766)
 
-The module declares one page — `{id: "board", title: "Tasks", archetype: "board"}` — and
-serves its data at `GET /pages/board`. The core renders it; the module ships **no markup**.
+The module declares two pages — `{id: "board", title: "Tasks"}` and `{id: "can", title:
+"Can"}`, both `archetype: "board"` — and serves their data at `GET /pages/board` /
+`GET /pages/can`. The core renders both; the module ships **no markup**. The two pages
+**partition every task by whether it has a due date**: the board shows only dated tasks
+(under every grouping) and the Can holds the undated backlog, so a task lives on exactly
+one page and moves between them purely by gaining or losing a due date. The partition is
+read-side only — no provider contract change; an undated task from any provider shows in
+the Can.
 
 - **Columns** group the tasks **aggregated across every enabled list** by the operator's
-  chosen **Group by** dimension (ADR-0049): **Due date** (default — Overdue / Today / Upcoming
-  / No date), **Status**, **Priority**, **List** (one column per category), or **None** (a
-  single flat list). Empty columns are dropped, and each card carries a **category tag** naming
-  the list it came from (ADR-0036). Layout is a pure function,
+  chosen **Group by** dimension (ADR-0049): **Due date** (default — Overdue / Today / Upcoming;
+  the "No date" bucket is gone, #766 — undated tasks live in the Can), **Status**, **Priority**,
+  **List** (one column per category), or **None** (a single flat list). Empty columns are
+  dropped, and each card carries a **category tag** naming the list it came from (ADR-0036).
+  Layout is a pure function,
   `build_tasks_board(tasks, today=…, group_by=…, scope=…, lists=…, default_list_id=…)`, so it
-  is unit-tested without a clock — ISO date strings compare lexicographically, no parsing. The
+  is unit-tested without a clock — ISO date strings compare lexicographically, no parsing; it
+  drops undated tasks itself, so no caller can leak backlog onto the board. The
   `today` the columns key off is the **operator's** day, resolved from the same operator-timezone
   clock the overdue sweep runs on, so the Today/Overdue split and the sweep never disagree within
   a render (#555); it degrades to UTC when the core is unreachable.
@@ -321,6 +347,17 @@ serves its data at `GET /pages/board`. The core renders it; the module ships **n
   list picker does — Google-only (#474); creating one still needs the operator's one-time
   enable toggle before it shows up as a category (see the version note above). The board never
   carries credentials or business logic — it is data plus tool references.
+- **The Can** (#766) is one flat **Backlog** column of the undated tasks, built by the pure
+  `build_tasks_can(tasks, today=…, scope=…, lists=…, default_list_id=…)` from the **same
+  fetched list** the board partitions. Cards are the ordinary task cards (category badge,
+  Complete/Reopen, Edit with the move picker, Delete) plus a leading **Schedule** action — a
+  due-only `tasks_update` form prefilled to today, rendered as the shell's native date picker
+  via the `format: "date"` hint — which is how a task is placed on the board; clearing the due
+  date (from any Edit form or the agent) sends it back. Its **Add** offers no due or `repeat`
+  field (a rule needs a due anchor), so new entries land in the Can by construction, and its
+  only view control is **Show** (open / completed / all) — grouping would be noise in one
+  column. The board's own Add still accepts an empty due; the `due` field's hint (the tool
+  parameter description) says the task is then saved to the Can, so nothing vanishes silently.
 
 ### Connected accounts & collections (ADR-0030)
 
@@ -351,9 +388,10 @@ envelope (`title` · `description` · `details: [{label, value}]`): the task's n
 description, plus **Due** (when set) and **Status** (Open / Completed) detail rows. An unknown
 `kind` or a missing task is a `404`. The core proxies it at
 `GET /platform/v1/modules/tasks/resolve/{kind}/{ref_id}`. Every task hover-card also carries an
-`href` back to the Tasks board (`{label: "Open in Tasks", url: "/m/tasks/board"}`, #469) — added
-so a task reached from the calendar-feed overlay (below) has a way back to it; the same link
-shows regardless of where the chip was clicked (chat, the calendar, or elsewhere).
+`href` back to the page the task lives on — `/m/tasks/board` for a dated task, `/m/tasks/can`
+for an undated one (#469/#766) — added so a task reached from the calendar-feed overlay (below)
+has a way back to it; the same link shows regardless of where the chip was clicked (chat, the
+calendar, or elsewhere).
 
 ### Calendar-feed: task due-dates on the calendar page (#469, ADR-0088)
 
@@ -567,6 +605,6 @@ Package `epicurus_tasks`:
 | `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474); `complete_task` **materializes** a recurring task's next instance via `_materialize_next` (#471, ADR-0082), and `list_tasks` sweeps overdue ones the same way (#515) — both funnel through the shared `_materialize`, guarded by an in-process `_claim_materialize`/`_release_materialize` pair against concurrent double-materialization and retire-failure amplification (#533); `operator_clock` resolves the sweep's "today" in the operator's timezone rather than UTC (#433, #535). |
 | `recurrence.py` | Pure RRULE math (#471, ADR-0082): `validate_rrule` (tool-boundary check) + `next_due` (the next occurrence, **skip-missed** policy), date-only (naive) parsing. |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store (incl. the `repeat` column); `RepeatStore` — the `task_repeats` side table for external-provider recurrence rules (#471). |
-| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`, the last two taking `repeat`) + manifest UI (+ `collections` spec) + the Tasks `board` page (`PageSpec` + the pure `build_tasks_board` builder with group-by/scope **view controls**, the **New list** board action, the `repeat` form field + badge, and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
-| `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}`, `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
+| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`, the last two taking `repeat`) + manifest UI (+ `collections` spec) + the Tasks + Can `board` pages (two `PageSpec`s + the pure `build_tasks_board` / `build_tasks_can` builders partitioning dated from undated (#766), group-by/scope **view controls**, the **New list** board action, the **Schedule** Can-card action, the `repeat` form field + badge, and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
+| `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}` (board + can), `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `platform_url`, `database_url`). |

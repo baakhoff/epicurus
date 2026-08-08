@@ -93,7 +93,7 @@ def test_manifest(client: TestClient) -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.18.0"
+    assert data["version"] == "0.19.0"
     tools = {t["name"] for t in data["tools"]}
     assert tools == {
         "tasks_list",
@@ -121,13 +121,15 @@ def test_app_exposes_accounts_route(client: TestClient) -> None:
     assert "/accounts" in route_paths(client.app)  # type: ignore[arg-type]
 
 
-def test_manifest_declares_tasks_board_page(client: TestClient) -> None:
-    """The Tasks left-nav page is declared as a core `board` archetype (ADR-0018)."""
+def test_manifest_declares_tasks_board_and_can_pages(client: TestClient) -> None:
+    """Both left-nav pages are core `board` archetypes (ADR-0018): Tasks + the Can (#766)."""
     data = client.get("/manifest").json()
     pages = {p["id"]: p for p in data["pages"]}
-    assert "board" in pages
+    assert set(pages) == {"board", "can"}
     assert pages["board"]["archetype"] == "board"
     assert pages["board"]["title"] == "Tasks"
+    assert pages["can"]["archetype"] == "board"
+    assert pages["can"]["title"] == "Can"
 
 
 def test_page_unknown_id_404s(client: TestClient) -> None:
@@ -194,6 +196,88 @@ def test_page_board_forwards_and_clamps_query_params(
     junk = booted_client.get("/pages/board?group=nonsense&show=bogus").json()
     junk_controls = {c["id"]: c["value"] for c in junk["controls"]}
     assert junk_controls == {"group": "due", "show": "open"}  # clamped to defaults
+
+
+# ── the Can page (#766) — the undated backlog behind GET /pages/can ─────────────────
+
+
+def test_page_can_serves_can_data(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /pages/can returns the Can payload (#766): empty store → no columns, an Add
+    form with no due (or repeat) field, and the Show filter as the only control."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    resp = booted_client.get("/pages/can")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["title"] == "Can"
+    assert data["columns"] == []  # fresh in-memory store has no tasks
+    add = data["actions"][0]
+    assert add["tool"] == "tasks_add"
+    assert "due" not in add["fields"]
+    assert "repeat" not in add["fields"]
+    assert [c["id"] for c in data["controls"]] == ["show"]
+
+
+def test_page_can_forwards_and_clamps_the_show_param(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Completed undated tasks stay reachable via the Can's own Show filter (#766)."""
+    from epicurus_core import CollectionPrefs, PlatformClient
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    done = booted_client.get("/pages/can?show=done").json()
+    assert done["controls"][0]["value"] == "done"
+
+    junk = booted_client.get("/pages/can?show=bogus").json()
+    assert junk["controls"][0]["value"] == "open"  # clamped to the default
+
+
+def test_pages_partition_dated_and_undated_tasks(
+    booted_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One fetch, two read views (#766): an undated task appears on /pages/can and never
+    on /pages/board (under any grouping); a dated one, exactly the other way round."""
+    from typing import Any
+
+    from epicurus_core import CollectionPrefs, PlatformClient
+    from epicurus_tasks.models import Task
+    from epicurus_tasks.router import TasksRouter
+
+    monkeypatch.setattr(
+        PlatformClient, "get_collections", AsyncMock(return_value=CollectionPrefs())
+    )
+    monkeypatch.setattr(
+        TasksRouter,
+        "list_tasks",
+        AsyncMock(
+            return_value=[
+                Task(id="dated", title="Scheduled", due="2026-01-01"),
+                Task(id="undated", title="Someday"),
+            ]
+        ),
+    )
+
+    def ids(payload: dict[str, Any]) -> list[str]:
+        return [card["id"] for column in payload["columns"] for card in column["cards"]]
+
+    for group in ("due", "status", "priority", "none"):
+        board = booted_client.get(f"/pages/board?group={group}").json()
+        assert ids(board) == ["dated"]
+        assert "No date" not in [c["title"] for c in board["columns"]]
+
+    can = booted_client.get("/pages/can").json()
+    assert ids(can) == ["undated"]
+    # The Can card leads with the one-tap Schedule action (a due-only tasks_update form).
+    schedule = can["columns"][0]["cards"][0]["actions"][0]
+    assert schedule["label"] == "Schedule"
+    assert schedule["fields"] == ["due"]
 
 
 # ── calendar-feed endpoint wiring (#469) — filtering logic itself is unit-tested

@@ -320,6 +320,15 @@ Priority / List / None) and a **Show** filter (Open / Completed / All); the modu
 params, lays out the columns, and echoes the resolved selection back in each control's
 `value`. The vocabulary is archetype-generic, so any board module reuses it.
 
+A module may declare **several pages of the same archetype** — nothing about a `PageSpec` is
+one-per-archetype. Tasks declares two boards (#766): the **Tasks** board (dated tasks,
+grouped) and the **Can** (`id: "can"` — the undated backlog, one flat column, whose only
+control is its own *Show* filter and whose per-card **Schedule** action is an ordinary
+form action over `tasks_update` narrowed to the `due` field). Each page is a full, separate
+`GET /pages/{id}` payload; the shell renders each nav entry with the same `BoardView` and
+never knows they partition one underlying collection — that split lives module-side, where
+the domain does.
+
 ```jsonc
 {
   "title": "Tasks",                                  // optional page heading

@@ -1,15 +1,20 @@
-"""Tests for build_tasks_board — the `board` archetype payload (ADR-0018 / ADR-0049).
+"""Tests for build_tasks_board / build_tasks_can — the `board` archetype payloads
+(ADR-0018 / ADR-0049 / #766).
 
-Pure and deterministic given ``today``, so the grouping, view controls, and filter
-echo are exercised here without a database or a clock.
+Pure and deterministic given ``today``, so the grouping, the dated/undated partition,
+view controls, and filter echo are exercised here without a database or a clock.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 from epicurus_tasks.models import Task
 from epicurus_tasks.service import (
+    CAN_PAGE_ID,
     TASKS_PAGE_ID,
     build_tasks_board,
+    build_tasks_can,
     calendar_feed_items,
     coerce_group,
     coerce_scope,
@@ -45,6 +50,7 @@ def _task(
 
 def test_page_id_is_board() -> None:
     assert TASKS_PAGE_ID == "board"
+    assert CAN_PAGE_ID == "can"
 
 
 def test_groups_open_tasks_by_due_bucket() -> None:
@@ -52,17 +58,17 @@ def test_groups_open_tasks_by_due_bucket() -> None:
         _task("1", "Overdue thing", due="2026-06-01"),
         _task("2", "Today thing", due="2026-06-14"),
         _task("3", "Future thing", due="2026-12-25"),
-        _task("4", "Someday thing"),
+        _task("4", "Someday thing"),  # undated → the Can, never the board (#766)
     ]
     board = build_tasks_board(tasks, today=TODAY)
 
-    # Columns appear in canonical order, empty ones dropped.
-    assert [c["title"] for c in board["columns"]] == ["Overdue", "Today", "Upcoming", "No date"]
+    # Columns appear in canonical order, empty ones dropped — and there is no
+    # "No date" bucket any more: the undated task belongs to the Can (#766).
+    assert [c["title"] for c in board["columns"]] == ["Overdue", "Today", "Upcoming"]
     by_title = {c["title"]: c for c in board["columns"]}
     assert by_title["Overdue"]["cards"][0]["title"] == "Overdue thing"
     assert by_title["Today"]["cards"][0]["title"] == "Today thing"
     assert by_title["Upcoming"]["cards"][0]["title"] == "Future thing"
-    assert by_title["No date"]["cards"][0]["title"] == "Someday thing"
 
 
 def test_empty_columns_are_dropped() -> None:
@@ -142,21 +148,23 @@ def test_due_badge_tone_tracks_bucket() -> None:
 
 
 def test_no_due_card_has_no_badge() -> None:
-    board = build_tasks_board([_task("a", "whenever")], today=TODAY)
-    assert board["columns"][0]["cards"][0]["badges"] == []
+    # An undated task lives in the Can (#766); with no due there is no due badge.
+    can = build_tasks_can([_task("a", "whenever")], today=TODAY)
+    assert can["columns"][0]["cards"][0]["badges"] == []
 
 
 def test_priority_badge_added_and_toned() -> None:
     high = Task(id="h", title="Urgent", priority="high")
     med = Task(id="m", title="Moderate", priority="medium")
     low = Task(id="l", title="Someday", priority="low")
-    board_h = build_tasks_board([high], today=TODAY)
-    board_m = build_tasks_board([med], today=TODAY)
-    board_l = build_tasks_board([low], today=TODAY)
+    # Undated → the Can (#766); the badge logic is the shared card builder either way.
+    can_h = build_tasks_can([high], today=TODAY)
+    can_m = build_tasks_can([med], today=TODAY)
+    can_l = build_tasks_can([low], today=TODAY)
 
-    badges_h = board_h["columns"][0]["cards"][0]["badges"]
-    badges_m = board_m["columns"][0]["cards"][0]["badges"]
-    badges_l = board_l["columns"][0]["cards"][0]["badges"]
+    badges_h = can_h["columns"][0]["cards"][0]["badges"]
+    badges_m = can_m["columns"][0]["cards"][0]["badges"]
+    badges_l = can_l["columns"][0]["cards"][0]["badges"]
 
     assert badges_h == [{"label": "High", "tone": "danger"}]
     assert badges_m == [{"label": "Medium", "tone": "warn"}]
@@ -164,7 +172,7 @@ def test_priority_badge_added_and_toned() -> None:
 
 
 def test_tags_rendered_as_accent_badges() -> None:
-    task = Task(id="t", title="Tagged", tags=["work", "q3"])
+    task = Task(id="t", title="Tagged", due=TODAY, tags=["work", "q3"])
     board = build_tasks_board([task], today=TODAY)
     badges = board["columns"][0]["cards"][0]["badges"]
     assert {"label": "work", "tone": "accent"} in badges
@@ -186,15 +194,16 @@ def test_board_offers_add_action_even_when_empty() -> None:
 
 
 def test_card_has_category_badge_from_list_title() -> None:
-    task = _task("t", "Categorised", list_id="work", list_title="Work")
+    task = _task("t", "Categorised", due=TODAY, list_id="work", list_title="Work")
     board = build_tasks_board([task], today=TODAY)
     badges = board["columns"][0]["cards"][0]["badges"]
     assert {"label": "Work", "tone": "dim"} in badges
 
 
 def test_card_has_no_category_badge_without_list_title() -> None:
-    board = build_tasks_board([_task("t", "Uncategorised")], today=TODAY)
-    assert board["columns"][0]["cards"][0]["badges"] == []
+    board = build_tasks_board([_task("t", "Uncategorised", due=TODAY)], today=TODAY)
+    # The due badge is the only one — no category badge without a list title.
+    assert board["columns"][0]["cards"][0]["badges"] == [{"label": TODAY, "tone": "accent"}]
 
 
 def test_add_action_has_list_selector_when_lists_given() -> None:
@@ -311,9 +320,9 @@ def test_controls_echo_active_selection() -> None:
 
 def test_group_by_status_columns_in_order() -> None:
     tasks = [
-        _task("o", "Open one"),
-        _task("p", "Doing", status="in_progress"),
-        _task("d", "Done one", status="done"),
+        _task("o", "Open one", due=TODAY),
+        _task("p", "Doing", due=TODAY, status="in_progress"),
+        _task("d", "Done one", due=TODAY, status="done"),
     ]
     board = build_tasks_board(tasks, today=TODAY, group_by="status", scope="all")
     cols = {c["title"]: [card["title"] for card in c["cards"]] for c in board["columns"]}
@@ -325,16 +334,16 @@ def test_group_by_status_columns_in_order() -> None:
 
 def test_group_by_priority_orders_high_to_none() -> None:
     tasks = [
-        _task("1", "hi", priority="high"),
-        _task("2", "lo", priority="low"),
-        _task("3", "none"),
+        _task("1", "hi", due=TODAY, priority="high"),
+        _task("2", "lo", due=TODAY, priority="low"),
+        _task("3", "none", due=TODAY),
     ]
     board = build_tasks_board(tasks, today=TODAY, group_by="priority")
     assert [c["title"] for c in board["columns"]] == ["High", "Low", "No priority"]
 
 
 def test_group_by_none_is_a_single_flat_column() -> None:
-    tasks = [_task("1", "a", due="2026-06-01"), _task("2", "b")]
+    tasks = [_task("1", "a", due="2026-06-01"), _task("2", "b", due=TODAY)]
     board = build_tasks_board(tasks, today=TODAY, group_by="none")
     assert [c["title"] for c in board["columns"]] == ["All tasks"]
     assert len(board["columns"][0]["cards"]) == 2
@@ -342,9 +351,9 @@ def test_group_by_none_is_a_single_flat_column() -> None:
 
 def test_group_by_list_orders_by_lists_then_extras() -> None:
     tasks = [
-        _task("1", "w", list_id="work", list_title="Work"),
-        _task("2", "h", list_id="home", list_title="Home"),
-        _task("3", "p"),  # local default → "Personal" fallback (no list_title)
+        _task("1", "w", due=TODAY, list_id="work", list_title="Work"),
+        _task("2", "h", due=TODAY, list_id="home", list_title="Home"),
+        _task("3", "p", due=TODAY),  # local default → "Personal" fallback (no list_title)
     ]
     board = build_tasks_board(
         tasks, today=TODAY, group_by="list", lists=[("work", "Work"), ("home", "Home")]
@@ -372,7 +381,10 @@ def test_due_badge_tone_is_independent_of_grouping() -> None:
 
 def test_completed_card_is_done_and_offers_reopen() -> None:
     board = build_tasks_board(
-        [_task("d", "Finished", status="done")], today=TODAY, group_by="status", scope="done"
+        [_task("d", "Finished", due=TODAY, status="done")],
+        today=TODAY,
+        group_by="status",
+        scope="done",
     )
     card = board["columns"][0]["cards"][0]
     assert card["done"] is True
@@ -384,12 +396,154 @@ def test_completed_card_is_done_and_offers_reopen() -> None:
 
 
 def test_open_card_is_not_done_and_offers_complete() -> None:
-    board = build_tasks_board([_task("o", "Open")], today=TODAY)
+    board = build_tasks_board([_task("o", "Open", due=TODAY)], today=TODAY)
     card = board["columns"][0]["cards"][0]
     assert card["done"] is False
     primary = card["actions"][0]
     assert primary["tool"] == "tasks_complete"
     assert primary["label"] == "Complete"
+
+
+# ── the Can: the undated backlog + the dated/undated partition (#766) ─────────
+
+
+def _card_ids(page: dict[str, Any]) -> list[str]:
+    """Every card id on a built page, in column order."""
+    return [card["id"] for column in page["columns"] for card in column["cards"]]
+
+
+def test_board_excludes_undated_tasks_under_every_grouping() -> None:
+    tasks = [
+        _task("dated", "Scheduled", due=TODAY, list_id="work", list_title="Work"),
+        _task("undated", "Someday", list_id="work", list_title="Work"),
+    ]
+    for group in ("due", "status", "priority", "list", "none"):
+        board = build_tasks_board(
+            tasks, today=TODAY, group_by=group, scope="all", lists=[("work", "Work")]
+        )
+        assert _card_ids(board) == ["dated"], f"group={group!r} leaked the undated task"
+        assert "No date" not in [c["title"] for c in board["columns"]]
+
+
+def test_can_and_board_partition_the_same_fetch() -> None:
+    # Both builders take the same full task list; every task lands on exactly one page.
+    tasks = [
+        _task("a", "Scheduled", due="2026-06-01"),
+        _task("b", "Backlog one"),
+        _task("c", "Backlog two"),
+    ]
+    board_ids = set(_card_ids(build_tasks_board(tasks, today=TODAY)))
+    can_ids = set(_card_ids(build_tasks_can(tasks, today=TODAY)))
+    assert board_ids == {"a"}
+    assert can_ids == {"b", "c"}
+    assert board_ids | can_ids == {"a", "b", "c"}
+    assert board_ids & can_ids == set()
+
+
+def test_can_is_a_single_flat_column() -> None:
+    can = build_tasks_can([_task("1", "x"), _task("2", "y")], today=TODAY)
+    assert can["title"] == "Can"
+    assert [c["title"] for c in can["columns"]] == ["Backlog"]
+    assert len(can["columns"][0]["cards"]) == 2
+
+
+def test_can_with_no_undated_tasks_has_no_columns() -> None:
+    can = build_tasks_can([_task("1", "Scheduled", due=TODAY)], today=TODAY)
+    assert can["columns"] == []
+
+
+def test_can_card_leads_with_a_schedule_action() -> None:
+    can = build_tasks_can([_task("t1", "Someday", list_id="work", list_title="Work")], today=TODAY)
+    card = can["columns"][0]["cards"][0]
+    tools = [a["tool"] for a in card["actions"]]
+    assert tools == ["tasks_update", "tasks_complete", "tasks_update", "tasks_delete"]
+    schedule = card["actions"][0]
+    assert schedule["label"] == "Schedule"
+    assert schedule["form"] is True
+    # A due-only form — the existing SchemaForm date picker — prefilled to today so the
+    # one-tap path (open, submit) schedules for today; the mutation routes to the owning list.
+    assert schedule["fields"] == ["due"]
+    assert schedule["form_values"] == {"due": TODAY}
+    assert schedule["args"] == {"task_id": "t1", "list_id": "work"}
+
+
+def test_board_cards_have_no_schedule_action() -> None:
+    board = build_tasks_board([_task("t1", "Scheduled", due=TODAY)], today=TODAY)
+    tools = [a["tool"] for a in board["columns"][0]["cards"][0]["actions"]]
+    assert tools == ["tasks_complete", "tasks_update", "tasks_delete"]
+
+
+def test_can_add_offers_no_due_or_repeat_field() -> None:
+    can = build_tasks_can([], today=TODAY)
+    add = next(a for a in can["actions"] if a["tool"] == "tasks_add")
+    # The Can's Add creates an undated task by construction: no due to fill in, and no
+    # repeat either (a rule needs a due date to anchor it).
+    assert add["fields"] == ["title", "notes", "priority", "tags"]
+    assert add["form"] is True
+    assert add["field_options"]["priority"] == ["low", "medium", "high"]
+
+
+def test_can_add_offers_list_picker_when_lists_given() -> None:
+    can = build_tasks_can(
+        [],
+        today=TODAY,
+        lists=[("@default", "My Tasks"), ("work", "Work")],
+        default_list_id="work",
+    )
+    add = can["actions"][0]
+    assert add["fields"] == ["title", "list_id", "notes", "priority", "tags"]
+    assert add["field_choices"]["list_id"] == [
+        {"value": "@default", "label": "My Tasks"},
+        {"value": "work", "label": "Work"},
+    ]
+    assert add["form_values"]["list_id"] == "work"
+    # "New list" stays a board affordance — the Can keeps a single Add action.
+    assert [a["tool"] for a in can["actions"]] == ["tasks_add"]
+
+
+def test_can_declares_only_the_show_control() -> None:
+    # Completed undated tasks stay reachable via the Can's own Show filter; there is no
+    # Group-by (one flat column) — the control set is just Show, echoing the selection.
+    can = build_tasks_can([], today=TODAY, scope="done")
+    assert [c["id"] for c in can["controls"]] == ["show"]
+    show = can["controls"][0]
+    assert show["value"] == "done"
+    assert [o["value"] for o in show["options"]] == ["open", "done", "all"]
+
+
+def test_can_keeps_list_badge_and_move_picker() -> None:
+    task = _task("t1", "Someday", list_id="work", list_title="Work")
+    can = build_tasks_can([task], today=TODAY, lists=[("@default", "My Tasks"), ("work", "Work")])
+    card = can["columns"][0]["cards"][0]
+    assert {"label": "Work", "tone": "dim"} in card["badges"]  # category badge preserved
+    edit = next(a for a in card["actions"] if a.get("form") and "title" in (a["fields"] or []))
+    assert "to_list_id" in edit["fields"]  # the ADR-0038 move picker, same as the board
+
+
+def test_can_completed_card_is_done_and_offers_reopen() -> None:
+    can = build_tasks_can([_task("d", "Done backlog", status="done")], today=TODAY, scope="done")
+    card = can["columns"][0]["cards"][0]
+    assert card["done"] is True
+    # Schedule still leads; the primary complete/reopen slot follows it.
+    reopen = card["actions"][1]
+    assert reopen["label"] == "Reopen"
+    assert reopen["args"]["status"] == "open"
+
+
+def test_schedule_round_trip_moves_a_task_between_can_and_board() -> None:
+    # Scheduling = giving the task a due date; clearing it sends the task back. The pages
+    # partition on `due` alone, so the round trip is expressible purely through the builders.
+    undated = _task("t", "Buy a drill")
+    assert _card_ids(build_tasks_can([undated], today=TODAY)) == ["t"]
+    assert build_tasks_board([undated], today=TODAY)["columns"] == []
+
+    scheduled = undated.model_copy(update={"due": "2026-06-20"})
+    assert build_tasks_can([scheduled], today=TODAY)["columns"] == []
+    assert _card_ids(build_tasks_board([scheduled], today=TODAY)) == ["t"]
+
+    cleared = scheduled.model_copy(update={"due": None})
+    assert build_tasks_board([cleared], today=TODAY)["columns"] == []
+    assert _card_ids(build_tasks_can([cleared], today=TODAY)) == ["t"]
 
 
 # ── query-param coercion (ADR-0049) ───────────────────────────────────────────

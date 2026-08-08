@@ -12,6 +12,26 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The Can: undated tasks get their own backlog page, and the board shows only what's
+  scheduled** (#766) — undated tasks used to land on the Tasks board in a "No date" bucket
+  under the due grouping and inside every other grouping's columns, so the backlog and the
+  plan shared one surface. The tasks module now declares a second left-nav `board` page,
+  **Can** (`/m/tasks/can`): one flat **Backlog** column holding every task without a due
+  date, across the same enabled lists the board aggregates (category badges preserved). The
+  board and the Can partition the same fetch by `due` alone — the board excludes undated
+  tasks under **every** grouping (the "No date" bucket is gone). Each Can card leads with a
+  one-tap **Schedule** action (a due-only `tasks_update` form prefilled to today, rendered
+  as the shell's native date picker via a new `format: "date"` hint on both tools' `due`
+  params — the ADR-0082 format seam, no new web code); clearing a due date moves a task
+  back to the Can. The Can's Add offers no due or repeat field, and its only view control
+  is *Show*, so completed backlog items stay reachable. Nothing vanishes silently:
+  `tasks_add`'s description and both `due` param descriptions (which double as the web
+  form's field hints) say an undated task files into the Can, and a task's hover-card
+  `href` now targets the page it actually lives on. Purely a read-partition — no provider
+  or DB change; lead-time notifications are untouched (they key on due dates, which Can
+  items don't have — by design). `tasks` 0.18.0→0.19.0 (MINOR); no web change — the shell
+  already renders manifest pages, form actions, and the date field.
+
 - **Approving a delete suggestion no longer reports success when the file is already gone**
   (#761) — `SuggestionReview.approve`'s `delete` branch caught the file API's 404 (the vault
   document had already been removed some other way) and swallowed it outright, so both

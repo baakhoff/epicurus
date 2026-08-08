@@ -8,13 +8,11 @@ reflects the modules currently running.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
 from typing import Any
 
-import httpx
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
-from mcp.shared.exceptions import McpError
+import httpx2
+from mcp import Client, MCPError
+from mcp.types import ContentBlock, TextContent
 
 from epicurus_core import SideEffect, get_logger
 
@@ -24,12 +22,13 @@ log = get_logger("epicurus_core_app.agent.mcp")
 # over MCP to a module (ADR-0039).
 _BUILTIN_URL = "__builtin__"
 
-# Bound for a single module tool call — the HTTP request timeout *and* the MCP RPC read
-# timeout (initialize + call_tool). Without it a module that accepts the connection but
-# never replies would hang ``call`` forever, and the board/calendar action behind it would
-# stall until the browser gave up with a raw ``NetworkError`` (#472). 30s is generous — a
-# tool may make an external round-trip (a Google write) — but finite, matching the
-# ``_post_json`` write bound in ``modules.py``.
+# Bound for a single module MCP round trip — the session-level RPC read timeout applied to
+# every request (the mcp 2.0 ``Client`` handshake and ``call_tool`` alike). Without it a
+# module that accepts the connection but never replies would hang ``call`` forever, and the
+# board/calendar action behind it would stall until the browser gave up with a raw
+# ``NetworkError`` (#472). The connect phase is separately bounded at 30s by the SDK's
+# default HTTP client. 30s is generous — a tool may make an external round-trip (a Google
+# write) — but finite, matching the ``_post_json`` write bound in ``modules.py``.
 _CALL_TIMEOUT_S = 30.0
 
 #: A built-in tool: its OpenAI function spec + an async handler
@@ -44,12 +43,12 @@ BuiltinTool = tuple[dict[str, Any], BuiltinHandler, SideEffect]
 
 
 class ToolCallError(Exception):
-    """A module tool ran and reported failure — the MCP result carried ``isError``.
+    """A module tool ran and reported failure — the MCP result carried ``is_error``.
 
-    FastMCP wraps a tool exception as an error *result* (not a transport error), so
-    without this check a failed tool read as a successful call whose text happened to
-    be the error message — the web closed the form as if the action worked (#435).
-    ``str(exc)`` is the tool's own message (e.g. ``event 'x' not found``).
+    The module's server wraps a tool exception as an error *result* (not a transport
+    error), so without this check a failed tool read as a successful call whose text
+    happened to be the error message — the web closed the form as if the action worked
+    (#435). ``str(exc)`` is the tool's own message (e.g. ``event 'x' not found``).
 
     Distinct from :class:`ModuleUnreachableError`: here the tool *ran* and rejected the
     request (a 4xx-shaped, caller-facing failure); there the module never answered.
@@ -60,20 +59,21 @@ class ModuleUnreachableError(Exception):
     """The module could not be reached or did not answer in time — no tool logic ran.
 
     Raised when the MCP transport to the module refuses, drops, or exceeds
-    :data:`_CALL_TIMEOUT_S` (a connection error, or an RPC read timeout on
-    ``initialize`` / ``call_tool``). The streamable-HTTP client runs its transport in an
-    anyio task group, so such a failure surfaces as an ``ExceptionGroup``, never a bare
-    ``httpx``/``McpError`` — :meth:`McpHost.call` normalizes all of those into this one
-    type so callers have a stable, layer-appropriate contract. The HTTP layer
-    (``ModuleRegistry.invoke``) maps it to a controlled **502**, so a board/calendar
-    action against a down module shows a reason instead of a raw ``NetworkError`` (#472);
-    the agent's tool loop reports it to the model rather than crashing the turn.
+    :data:`_CALL_TIMEOUT_S` (a connection error, or an RPC read timeout on the
+    handshake / ``call_tool``). The mcp 2.0 ``Client`` still runs its streamable-HTTP
+    transport in an anyio task group, so such a failure can surface as an
+    ``ExceptionGroup`` rather than a bare ``httpx2``/``MCPError`` —
+    :meth:`McpHost.call` normalizes all of those into this one type so callers have a
+    stable, layer-appropriate contract. The HTTP layer (``ModuleRegistry.invoke``) maps
+    it to a controlled **502**, so a board/calendar action against a down module shows a
+    reason instead of a raw ``NetworkError`` (#472); the agent's tool loop reports it to
+    the model rather than crashing the turn.
     """
 
 
-def _text(content: list[Any]) -> str:
+def _text(content: list[ContentBlock]) -> str:
     """Join the text blocks of an MCP tool result."""
-    parts = [text for block in content if (text := getattr(block, "text", None))]
+    parts = [block.text for block in content if isinstance(block, TextContent) and block.text]
     return "\n".join(parts)
 
 
@@ -192,12 +192,13 @@ class McpHost:
         route: dict[str, str] = {}
         for url in urls:
             try:
-                async with (
-                    streamablehttp_client(url) as (read, write, _),
-                    ClientSession(read, write) as session,
-                ):
-                    await session.initialize()
-                    listing = await session.list_tools()
+                # The RPC read timeout bounds the handshake and ``list_tools`` alike, so a
+                # module that accepts connections but never answers delays a turn's
+                # discovery by at most :data:`_CALL_TIMEOUT_S` — the SDK's own HTTP read
+                # default (300s, sized for long-lived SSE streams) is far too generous
+                # for a scan that runs on every agent turn.
+                async with Client(url, read_timeout_seconds=_CALL_TIMEOUT_S) as client:
+                    listing = await client.list_tools()
                     for tool in listing.tools:
                         if tool.name in disabled or _withheld(tool.name):
                             continue
@@ -207,7 +208,7 @@ class McpHost:
                                 "function": {
                                     "name": tool.name,
                                     "description": tool.description or "",
-                                    "parameters": tool.inputSchema
+                                    "parameters": tool.input_schema
                                     or {"type": "object", "properties": {}},
                                 },
                             }
@@ -243,39 +244,38 @@ class McpHost:
         (``set_chat_model``). Neither is used for a module call (the module resolves identity
         through the platform API, and has no notion of the core's session ids).
 
-        Every hop is bounded by :data:`_CALL_TIMEOUT_S` (connect, ``initialize``, and the
-        tool RPC) so an unresponsive module can never hang the caller (#472).
+        Every hop is bounded so an unresponsive module can never hang the caller (#472):
+        the RPC rounds (handshake + tool call) by :data:`_CALL_TIMEOUT_S` at the session
+        level, the connect phase by the SDK HTTP client's 30s connect default.
 
         Raises:
-            ToolCallError: when the tool ran but reported failure (MCP ``isError``) —
+            ToolCallError: when the tool ran but reported failure (MCP ``is_error``) —
                 the message is the tool's own error text (#435).
             ModuleUnreachableError: when the module refuses, drops, or exceeds the timeout
                 before the tool could run — mapped to a controlled 502 by the HTTP layer.
         """
         if url == _BUILTIN_URL:
             return await self._builtins[name][1](arguments, tenant, session_id)
-        timeout = timedelta(seconds=_CALL_TIMEOUT_S)
         try:
-            async with (
-                streamablehttp_client(url, timeout=_CALL_TIMEOUT_S) as (read, write, _),
-                ClientSession(read, write, read_timeout_seconds=timeout) as session,
-            ):
-                await session.initialize()
-                result = await session.call_tool(name, arguments, read_timeout_seconds=timeout)
-        except (McpError, httpx.HTTPError, OSError, ExceptionGroup) as exc:
-            # The streamable-HTTP client runs its transport in an anyio task group, so a
-            # refused/dropped connection or an RPC read timeout escapes wrapped in a
-            # (possibly nested) ``ExceptionGroup`` — not a bare httpx/McpError. Normalize
+            # ``Client`` (mcp 2.0) owns transport + session + handshake in one object; the
+            # session-level read timeout applies to every request it sends, the tool RPC
+            # included, replacing 1.x's per-piece transport/session/initialize wiring.
+            async with Client(url, read_timeout_seconds=_CALL_TIMEOUT_S) as client:
+                result = await client.call_tool(name, arguments)
+        except (MCPError, httpx2.HTTPError, OSError, ExceptionGroup) as exc:
+            # The client runs its streamable-HTTP transport in an anyio task group, so a
+            # refused/dropped connection or an RPC read timeout can escape wrapped in a
+            # (possibly nested) ``ExceptionGroup`` — not a bare httpx2/MCPError. Normalize
             # every such failure to one domain type so callers don't have to unwrap groups
-            # (a bare httpx/OSError is caught too, for a failure raised before the task
-            # group starts). ``ExceptionGroup`` — never ``BaseExceptionGroup`` — so a
+            # (a bare httpx2/OSError/MCPError is caught too, for a failure raised outside
+            # the task group). ``ExceptionGroup`` — never ``BaseExceptionGroup`` — so a
             # cancellation group (CancelledError is a BaseException) still propagates (#472).
             log.warning("module call unreachable", tool=name, url=url, error=repr(exc))
             raise ModuleUnreachableError(f"module for tool {name!r} is unreachable") from exc
-        # The ``isError`` → ``ToolCallError`` raise lives *outside* the transport block on
+        # The ``is_error`` → ``ToolCallError`` raise lives *outside* the transport block on
         # purpose: raised inside, anyio would wrap it in an ExceptionGroup and callers'
         # ``except ToolCallError`` would silently miss it (the #472 failure the mocked #435
         # tests couldn't see). Out here the result is in hand and the group is unwound.
-        if result.isError:
+        if result.is_error:
             raise ToolCallError(_text(result.content) or f"tool {name!r} failed")
         return _text(result.content)

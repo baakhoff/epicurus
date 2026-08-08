@@ -3,7 +3,7 @@
 Uses the local provider backed by an in-memory SQLite database so the tools
 are exercised end-to-end without needing a running Docker stack.
 
-Tools are called via ``module.mcp.call_tool(name, args)`` which returns
+Tools are called via ``module.call_tool(name, args)`` which returns
 ``(content, structured)`` — the same wire path used by the agent.  The
 structured dict carries a ``"result"`` key (or is the result itself if the
 tool returns a plain dict); a tool that returns an entity-reference envelope
@@ -18,7 +18,6 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
@@ -47,7 +46,7 @@ from epicurus_calendar.service import (
     event_hover_card,
     fetch_event,
 )
-from epicurus_core import LIST_CAP, Collection, CollectionPrefs, CollectionRef
+from epicurus_core import LIST_CAP, Collection, CollectionPrefs, CollectionRef, ToolError
 from epicurus_core.contracts import ToolEnvelope
 
 
@@ -112,7 +111,7 @@ async def local_provider() -> LocalCalendarProvider:
 
 async def test_list_events_empty_has_no_refs(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 7})
+    content, _ = await module.call_tool("calendar_list_events", {"range_days": 7})
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
     assert "No events" in envelope.text
@@ -126,7 +125,7 @@ async def test_list_events_returns_event_chips(local_provider: LocalCalendarProv
         end=datetime.now(tz=UTC) + timedelta(hours=2),
     )
     module = build_module(local_provider, tenant_id="t1")
-    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    content, _ = await module.call_tool("calendar_list_events", {"range_days": 1})
     envelope = _parse_envelope(content)
     assert len(envelope.entity_refs) == 1
     ref = envelope.entity_refs[0]
@@ -140,7 +139,7 @@ async def test_list_events_returns_event_chips(local_provider: LocalCalendarProv
 async def test_list_events_clamps_range(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     # range_days=200 is clamped to 90; must not raise and yields a valid envelope.
-    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 200})
+    content, _ = await module.call_tool("calendar_list_events", {"range_days": 200})
     envelope = _parse_envelope(content)
     assert isinstance(envelope.entity_refs, list)
 
@@ -161,7 +160,7 @@ async def test_list_events_text_truncates_past_the_cap_but_chips_stay_full(
             end=base + timedelta(minutes=10 * i + 5),
         )
     module = build_module(local_provider, tenant_id="t1")
-    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    content, _ = await module.call_tool("calendar_list_events", {"range_days": 1})
     envelope = _parse_envelope(content)
     assert len(envelope.entity_refs) == total  # chips: every event, uncapped
     assert envelope.text.startswith(f"Found {total} event(s):")
@@ -174,7 +173,7 @@ async def test_list_events_text_truncates_past_the_cap_but_chips_stay_full(
 
 async def test_create_event(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Team lunch",
@@ -194,7 +193,7 @@ async def test_create_event(local_provider: LocalCalendarProvider) -> None:
 
 async def test_create_event_minimal(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Quick call",
@@ -212,7 +211,7 @@ async def test_create_event_minimal(local_provider: LocalCalendarProvider) -> No
 
 async def test_find_free_no_events(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_find_free", {"duration_minutes": 60, "range_days": 1}
     )
     result = _extract(structured)
@@ -224,7 +223,7 @@ async def test_find_free_no_events(local_provider: LocalCalendarProvider) -> Non
 async def test_find_free_clamps_args(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
     # Boundary values must not raise.
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_find_free", {"duration_minutes": 0, "range_days": 0}
     )
     assert isinstance(_extract(structured), list)
@@ -583,7 +582,7 @@ class _MockGoogleProvider(CalendarProvider):
 async def test_google_mock_provider_creates_event() -> None:
     mock_provider = _MockGoogleProvider()
     module = build_module(mock_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Video call",
@@ -599,7 +598,7 @@ async def test_google_mock_provider_creates_event() -> None:
 async def test_calendar_create_event_tool_threads_add_meet_to_the_provider() -> None:
     mock_provider = _MockGoogleProvider()
     module = build_module(mock_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -615,7 +614,7 @@ async def test_calendar_create_event_tool_omits_meet_link_by_default(
     local_provider: LocalCalendarProvider,
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -640,7 +639,7 @@ async def test_google_mock_provider_lists_events() -> None:
         )
     ]
     module = build_module(mock_provider, tenant_id="t1")
-    content, _ = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    content, _ = await module.call_tool("calendar_list_events", {"range_days": 1})
     envelope = _parse_envelope(content)
     assert any(r.title == "Seeded" for r in envelope.entity_refs)
 
@@ -669,7 +668,7 @@ async def test_both_providers_same_tool_interface() -> None:
 
     for prov in (local, mock_google):
         module = build_module(prov, tenant_id="t1")
-        _content, structured = await module.mcp.call_tool(
+        _content, structured = await module.call_tool(
             "calendar_create_event",
             {
                 "title": "Interface test",
@@ -1071,7 +1070,7 @@ async def test_update_tool_threads_home_calendar_token() -> None:
     # the router so the write targets the owning calendar (#435).
     router, google = await _multi_cal_router()
     module = build_module(router, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_update_event",
         {"event_id": "w1", "title": "Via tool", "calendar_id": "google:work"},
     )
@@ -1082,7 +1081,7 @@ async def test_update_tool_threads_home_calendar_token() -> None:
 async def test_delete_tool_threads_home_calendar_token() -> None:
     router, google = await _multi_cal_router()
     module = build_module(router, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_delete_event", {"event_id": "w1", "calendar_id": "google:work"}
     )
     assert _extract(structured)["deleted"] is True
@@ -1263,7 +1262,7 @@ async def test_calendar_update_event_tool_edits_in_place(
         tenant_id="t1", title="Old", start=_dt(9), end=_dt(10)
     )
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_update_event",
         {"event_id": created.id, "title": "New", "start": "2025-06-15T11:00:00+00:00"},
     )
@@ -1278,7 +1277,7 @@ async def test_calendar_update_event_tool_unknown_raises(
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
     with pytest.raises(ToolError):  # MCP surfaces the ValueError as a ToolError
-        await module.mcp.call_tool("calendar_update_event", {"event_id": "nope", "title": "x"})
+        await module.call_tool("calendar_update_event", {"event_id": "nope", "title": "x"})
 
 
 async def test_calendar_update_event_tool_blank_recurrence_with_all_clears_the_rule(
@@ -1288,7 +1287,7 @@ async def test_calendar_update_event_tool_blank_recurrence_with_all_clears_the_r
     # edit_scope='all' that CLEARS the master's rule, collapsing the series to a one-off event —
     # the real contract that replaced the #528 "leave unchanged" containment.
     module = build_module(local_provider, tenant_id="t1")
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1298,7 +1297,7 @@ async def test_calendar_update_event_tool_blank_recurrence_with_all_clears_the_r
         },
     )
     series_id = _extract(created_structured)["id"]
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_update_event",
         {"event_id": series_id, "title": "Standup (moved)", "recurrence": "", "edit_scope": "all"},
     )
@@ -1317,7 +1316,7 @@ async def test_calendar_update_event_tool_blank_recurrence_on_this_is_rejected(
     # untouched.
     module = build_module(local_provider, tenant_id="t1")
     start = _future_weekly_series_start()
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1331,7 +1330,7 @@ async def test_calendar_update_event_tool_blank_recurrence_on_this_is_rejected(
     series_id = _extract(created_structured)["id"]
     iid = instance_id(series_id, start + timedelta(days=7))  # the 2nd occurrence
     with pytest.raises(ToolError, match="whole series"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "calendar_update_event",
             {"event_id": iid, "recurrence": "", "edit_scope": "this"},
         )
@@ -1348,7 +1347,7 @@ async def test_calendar_update_event_tool_blank_recurrence_following_ends_the_se
     # series. A 4-occurrence weekly series cleared at the 3rd yields 2 recurring + 1 one-off = 3.
     module = build_module(local_provider, tenant_id="t1")
     start = _future_weekly_series_start()
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1361,7 +1360,7 @@ async def test_calendar_update_event_tool_blank_recurrence_following_ends_the_se
 
     series_id = _extract(created_structured)["id"]
     iid = instance_id(series_id, start + timedelta(days=14))  # the 3rd occurrence
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_update_event",
         {"event_id": iid, "recurrence": "", "edit_scope": "following"},
     )
@@ -1370,7 +1369,7 @@ async def test_calendar_update_event_tool_blank_recurrence_following_ends_the_se
     assert tail["recurrence"] is None  # …and it does not recur
     assert tail["recurring_event_id"] is None
 
-    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    listed, _structured = await module.call_tool("calendar_list_events", {"range_days": 60})
     envelope = _parse_envelope(listed)
     # 2 surviving recurring occurrences (weeks 1 & 2) + the split-off one-off (week 3) = 3;
     # week 4 is gone because the recurrence ended at week 3.
@@ -1382,9 +1381,7 @@ async def test_calendar_delete_event_tool_removes(local_provider: LocalCalendarP
         tenant_id="t1", title="Bye", start=_dt(9), end=_dt(10)
     )
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
-        "calendar_delete_event", {"event_id": created.id}
-    )
+    _content, structured = await module.call_tool("calendar_delete_event", {"event_id": created.id})
     result = _extract(structured)
     assert result["deleted"] is True
     assert await local_provider.get_event(tenant_id="t1", event_id=created.id) is None
@@ -1398,7 +1395,7 @@ async def test_calendar_update_event_tool_following_splits_the_series(
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
     start = _future_weekly_series_start()
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1411,7 +1408,7 @@ async def test_calendar_update_event_tool_following_splits_the_series(
 
     series_id = _extract(created_structured)["id"]
     iid = instance_id(series_id, start + timedelta(days=14))  # the 3rd occurrence
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_update_event",
         {"event_id": iid, "title": "Standup (async)", "edit_scope": "following"},
     )
@@ -1420,7 +1417,7 @@ async def test_calendar_update_event_tool_following_splits_the_series(
     assert result["title"] == "Standup (async)"
     assert result["recurring_event_id"] is None  # it's a master, not an instance
 
-    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    listed, _structured = await module.call_tool("calendar_list_events", {"range_days": 60})
     envelope = _parse_envelope(listed)
     assert len(envelope.entity_refs) == 4  # same total occurrence count, just split
     assert "Standup (async)" in envelope.text
@@ -1431,7 +1428,7 @@ async def test_calendar_delete_event_tool_following_removes_tail(
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
     start = _future_weekly_series_start()
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1444,11 +1441,11 @@ async def test_calendar_delete_event_tool_following_removes_tail(
 
     series_id = _extract(created_structured)["id"]
     iid = instance_id(series_id, start + timedelta(days=14))  # the 3rd occurrence
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_delete_event", {"event_id": iid, "edit_scope": "following"}
     )
     assert _extract(structured)["deleted"] is True
-    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    listed, _structured = await module.call_tool("calendar_list_events", {"range_days": 60})
     envelope = _parse_envelope(listed)
     assert len(envelope.entity_refs) == 2  # only the two occurrences before the split remain
 
@@ -1458,7 +1455,7 @@ async def test_calendar_delete_event_tool_unknown_raises(
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
     with pytest.raises(ToolError):
-        await module.mcp.call_tool("calendar_delete_event", {"event_id": "nope"})
+        await module.call_tool("calendar_delete_event", {"event_id": "nope"})
 
 
 async def test_calendar_create_event_declares_datetime_format(
@@ -1533,7 +1530,7 @@ async def test_create_all_day_event_spans_whole_day(
     # An all-day create takes inclusive date strings and stores an exclusive end one day
     # later, flagged all_day — never a timed midnight instant.
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {"title": "Holiday", "start": "2026-06-15", "end": "2026-06-15", "all_day": True},
     )
@@ -1546,7 +1543,7 @@ async def test_create_all_day_event_spans_whole_day(
 
 async def test_create_multi_day_all_day_event(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {"title": "Trip", "start": "2026-06-15", "end": "2026-06-17", "all_day": True},
     )
@@ -1604,7 +1601,7 @@ async def test_update_event_to_all_day(local_provider: LocalCalendarProvider) ->
         tenant_id="t1", title="Was timed", start=_dt(9), end=_dt(10)
     )
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_update_event",
         {"event_id": created.id, "all_day": True, "start": "2025-06-15", "end": "2025-06-15"},
     )
@@ -1619,7 +1616,7 @@ async def test_update_event_to_all_day(local_provider: LocalCalendarProvider) ->
 
 async def test_create_event_tool_with_recurrence(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1638,7 +1635,7 @@ async def test_create_event_tool_with_invalid_recurrence_raises(
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
     with pytest.raises(ToolError, match="invalid recurrence rule"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "calendar_create_event",
             {
                 "title": "Standup",
@@ -1651,7 +1648,7 @@ async def test_create_event_tool_with_invalid_recurrence_raises(
 
 async def test_create_event_tool_with_attendees(local_provider: LocalCalendarProvider) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Sync",
@@ -1669,7 +1666,7 @@ async def test_create_event_tool_with_invalid_attendee_raises(
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
     with pytest.raises(ToolError, match="not an email"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "calendar_create_event",
             {
                 "title": "Sync",
@@ -1684,7 +1681,7 @@ async def test_update_event_tool_this_occurrence(local_provider: LocalCalendarPr
     from epicurus_calendar.db import instance_id
 
     module = build_module(local_provider, tenant_id="t1")
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1695,7 +1692,7 @@ async def test_update_event_tool_this_occurrence(local_provider: LocalCalendarPr
     )
     series_id = _extract(created_structured)["id"]
     iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_update_event", {"event_id": iid, "title": "Standup (moved)"}
     )
     result = _extract(structured)
@@ -1709,7 +1706,7 @@ async def test_update_event_tool_recurrence_with_this_scope_raises(
     from epicurus_calendar.db import instance_id
 
     module = build_module(local_provider, tenant_id="t1")
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1721,7 +1718,7 @@ async def test_update_event_tool_recurrence_with_this_scope_raises(
     series_id = _extract(created_structured)["id"]
     iid = instance_id(series_id, datetime(2026, 7, 13, 9, 0, tzinfo=UTC))
     with pytest.raises(ToolError, match="single occurrence"):
-        await module.mcp.call_tool(
+        await module.call_tool(
             "calendar_update_event",
             {"event_id": iid, "recurrence": "FREQ=DAILY", "edit_scope": "this"},
         )
@@ -1731,7 +1728,7 @@ async def test_update_event_tool_all_scope_renames_series(
     local_provider: LocalCalendarProvider,
 ) -> None:
     module = build_module(local_provider, tenant_id="t1")
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1741,12 +1738,12 @@ async def test_update_event_tool_all_scope_renames_series(
         },
     )
     series_id = _extract(created_structured)["id"]
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_update_event",
         {"event_id": series_id, "title": "Renamed", "edit_scope": "all"},
     )
     assert _extract(structured)["title"] == "Renamed"
-    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    listed, _structured = await module.call_tool("calendar_list_events", {"range_days": 60})
     envelope = _parse_envelope(listed)
     assert all("Renamed" in ref.title for ref in envelope.entity_refs)
 
@@ -1758,7 +1755,7 @@ async def test_delete_event_tool_this_scope_removes_one_occurrence(
 
     module = build_module(local_provider, tenant_id="t1")
     start = _future_weekly_series_start()
-    _content, created_structured = await module.mcp.call_tool(
+    _content, created_structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -1769,9 +1766,9 @@ async def test_delete_event_tool_this_scope_removes_one_occurrence(
     )
     series_id = _extract(created_structured)["id"]
     iid = instance_id(series_id, start + timedelta(days=7))  # the 2nd occurrence
-    _content, structured = await module.mcp.call_tool("calendar_delete_event", {"event_id": iid})
+    _content, structured = await module.call_tool("calendar_delete_event", {"event_id": iid})
     assert _extract(structured)["deleted"] is True
-    listed, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 60})
+    listed, _structured = await module.call_tool("calendar_list_events", {"range_days": 60})
     envelope = _parse_envelope(listed)
     assert len(envelope.entity_refs) == 3  # 4 minus the deleted occurrence
 
@@ -1933,7 +1930,7 @@ async def test_create_event_reads_naive_start_in_operator_timezone(
     # "15:00" with no offset is the operator's 3 PM — Europe/Belgrade is UTC+2 in July,
     # so the stored instant is 13:00 UTC, not 15:00 UTC (#433).
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {"title": "Local time", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
     )
@@ -1950,7 +1947,7 @@ async def test_create_event_late_evening_stays_on_local_date(
     # 00:30 "today" in Belgrade is 22:30 *yesterday* in UTC — the instant must reflect
     # the operator's date, which is how "for today" stopped landing on the wrong day.
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {"title": "Midnight", "start": "2026-07-02T00:30:00", "end": "2026-07-02T01:00:00"},
     )
@@ -1965,7 +1962,7 @@ async def test_create_event_honors_explicit_offset(
     # A value that carries its own offset is pinned to it — the operator zone only
     # applies to naive values.
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {
             "title": "Pinned",
@@ -1985,7 +1982,7 @@ async def test_update_event_reads_naive_bounds_in_operator_timezone(
         tenant_id="t1", title="Move me", start=_dt(9), end=_dt(10)
     )
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
-    await module.mcp.call_tool(
+    await module.call_tool(
         "calendar_update_event",
         {
             "event_id": created.id,
@@ -2002,7 +1999,7 @@ async def test_unknown_operator_timezone_degrades_to_utc(
     local_provider: LocalCalendarProvider,
 ) -> None:
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("Neverland/Nowhere"))
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {"title": "Fallback", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
     )
@@ -2018,7 +2015,7 @@ async def test_timezone_source_error_degrades_to_utc(
         raise RuntimeError("core down")
 
     module = build_module(local_provider, tenant_id="t1", timezone=broken)
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {"title": "Fallback", "start": "2026-07-02T15:00:00", "end": "2026-07-02T16:00:00"},
     )
@@ -2034,7 +2031,7 @@ async def test_create_event_reads_naive_start_in_operator_timezone_in_winter(
     # winter, not UTC+2 (CEST) as in July — so a test suite confined to one season can't
     # hide a hardcoded/cached-offset bug in the wall-time parsing (#446 test nit, #438).
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_create_event",
         {"title": "Winter", "start": "2026-01-15T15:00:00", "end": "2026-01-15T16:00:00"},
     )
@@ -2125,7 +2122,7 @@ async def test_calendar_list_events_tool_names_the_operator_timezone(
         end=datetime.now(tz=UTC) + timedelta(hours=2),
     )
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
-    content, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    content, _structured = await module.call_tool("calendar_list_events", {"range_days": 1})
     envelope = _parse_envelope(content)
     assert "(Europe/Belgrade)" in envelope.text
     assert len(envelope.entity_refs) == 1
@@ -2148,7 +2145,7 @@ async def test_calendar_list_events_tool_google_event_uses_operator_timezone_too
         )
     ]
     module = build_module(mock_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
-    content, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    content, _structured = await module.call_tool("calendar_list_events", {"range_days": 1})
     envelope = _parse_envelope(content)
     assert "(Europe/Belgrade)" in envelope.text
 
@@ -2166,7 +2163,7 @@ async def test_calendar_list_events_tool_unreachable_core_names_utc_fallback(
         end=datetime.now(tz=UTC) + timedelta(hours=2),
     )
     module = build_module(local_provider, tenant_id="t1", timezone=broken)
-    content, _structured = await module.mcp.call_tool("calendar_list_events", {"range_days": 1})
+    content, _structured = await module.call_tool("calendar_list_events", {"range_days": 1})
     envelope = _parse_envelope(content)
     assert "(UTC)" in envelope.text
 
@@ -2181,7 +2178,7 @@ async def test_calendar_find_free_slots_reflect_operator_timezone(
         tenant_id="t1", title="Busy", start=now, end=now + timedelta(hours=1)
     )
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("Europe/Belgrade"))
-    _content, structured = await module.mcp.call_tool(
+    _content, structured = await module.call_tool(
         "calendar_find_free", {"duration_minutes": 30, "range_days": 1}
     )
     result = _extract(structured)
@@ -2201,7 +2198,7 @@ async def test_create_event_tool_persists_the_operator_timezone_on_a_recurring_s
     # instead of drifting by the offset delta (#446) — see test_recurrence.py for the
     # provider-level version of this assertion; this proves the tool wires it end to end.
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("America/New_York"))
-    await module.mcp.call_tool(
+    await module.call_tool(
         "calendar_create_event",
         {
             "title": "Standup",
@@ -2232,7 +2229,7 @@ async def test_update_event_tool_setting_recurrence_persists_the_operator_timezo
         tenant_id="t1", title="Standup", start=start, end=start + timedelta(minutes=30)
     )
     module = build_module(local_provider, tenant_id="t1", timezone=_tz("America/New_York"))
-    await module.mcp.call_tool(
+    await module.call_tool(
         "calendar_update_event",
         {"event_id": created.id, "recurrence": "FREQ=WEEKLY;COUNT=4", "edit_scope": "all"},
     )

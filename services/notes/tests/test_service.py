@@ -10,10 +10,9 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from epicurus_core import EpicurusModule, PlatformClient
+from epicurus_core import EpicurusModule, PlatformClient, ToolError
 from epicurus_notes.db import NotesStore
 from epicurus_notes.events import NOTE_CREATED, NOTE_DELETED, NOTE_UPDATED
 from epicurus_notes.indexer import NotesIndexer
@@ -154,13 +153,13 @@ async def test_append_and_delete_do_not_open_the_document_pane() -> None:
 # off the MCP call's structural `isError`, not the returned text. Before #690 `_stage`'s guard
 # clauses returned a normal `tool_envelope`, so a rejected write left `is_error=False` and the
 # pane opened an editor over a document that was never created. `pytest.raises(ToolError)` is
-# how FastMCP surfaces a raised exception from inside a `@module.tool()` function (proven
+# how the MCP server surfaces a raised exception from inside a `@module.tool()` function (proven
 # pattern: calendar's `test_calendar_update_event_tool_unknown_raises`).
 
 
 async def test_create_rejects_invalid_slug_by_raising() -> None:
     with pytest.raises(ToolError, match="Invalid note slug"):
-        await _module().mcp.call_tool("notes_create", {"slug": "", "content": "x"})
+        await _module().call_tool("notes_create", {"slug": "", "content": "x"})
 
 
 async def test_apply_failure_raises_not_a_success_envelope() -> None:
@@ -177,4 +176,4 @@ async def test_apply_failure_raises_not_a_success_envelope() -> None:
     review.approve = AsyncMock(side_effect=RuntimeError("disk full"))
     module = build_module(store, sugg, review, platform, tenant="test")
     with pytest.raises(ToolError, match=r"applying failed.*disk full"):
-        await module.mcp.call_tool("notes_create", {"slug": "a-note", "content": "hello"})
+        await module.call_tool("notes_create", {"slug": "a-note", "content": "hello"})

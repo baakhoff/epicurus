@@ -166,29 +166,25 @@ async def test_the_provider_is_only_consulted_when_a_dial_is_applied() -> None:
 # ── module tools: the same filter, over the real discovery path ─────────────
 
 
-def _mock_transport(tool_names: list[str]) -> tuple[object, object]:
-    """(transport_cm, session_cm) mocks advertising *tool_names* — as test_mcp_host does."""
+def _mock_client(tool_names: list[str]) -> object:
+    """A ``Client`` context-manager mock advertising *tool_names* — as test_mcp_host does."""
     tools = []
     for name in tool_names:
         tool = MagicMock()
         tool.name = name
         tool.description = ""
-        tool.inputSchema = {}
+        tool.input_schema = {}
         tools.append(tool)
     listing = MagicMock()
     listing.tools = tools
 
-    session = AsyncMock()
-    session.initialize = AsyncMock()
-    session.list_tools = AsyncMock(return_value=listing)
+    client = AsyncMock()
+    client.list_tools = AsyncMock(return_value=listing)
 
-    transport_cm = MagicMock()
-    transport_cm.__aenter__ = AsyncMock(return_value=(None, None, None))
-    transport_cm.__aexit__ = AsyncMock(return_value=False)
-    session_cm = MagicMock()
-    session_cm.__aenter__ = AsyncMock(return_value=session)
-    session_cm.__aexit__ = AsyncMock(return_value=False)
-    return transport_cm, session_cm
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=client)
+    client_cm.__aexit__ = AsyncMock(return_value=False)
+    return client_cm
 
 
 async def _discover_module_tools(
@@ -199,11 +195,8 @@ async def _discover_module_tools(
     """Discover *tool_names* from a fake module at *level*; returns (spec names, routes)."""
     host = McpHost(["http://a:8080/mcp"])
     host.set_side_effect_provider(_provider(classes))
-    transport_cm, session_cm = _mock_transport(tool_names)
-    with (
-        patch("epicurus_core_app.agent.mcp_host.streamablehttp_client", return_value=transport_cm),
-        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
-    ):
+    client_cm = _mock_client(tool_names)
+    with patch("epicurus_core_app.agent.mcp_host.Client", return_value=client_cm):
         specs, route = await host.discover(allow=allowed_side_effects(level))  # type: ignore[arg-type]
     return _names(specs), set(route)
 
@@ -241,11 +234,8 @@ async def test_the_disabled_filter_and_the_dial_compose() -> None:
         return {"mail_search"}
 
     host.set_tool_filter(_disabled)
-    transport_cm, session_cm = _mock_transport(["mail_search", "mail_mark_read"])
-    with (
-        patch("epicurus_core_app.agent.mcp_host.streamablehttp_client", return_value=transport_cm),
-        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
-    ):
+    client_cm = _mock_client(["mail_search", "mail_mark_read"])
+    with patch("epicurus_core_app.agent.mcp_host.Client", return_value=client_cm):
         _specs, route = await host.discover(allow=allowed_side_effects("act"))
     assert set(route) == {"mail_mark_read"}  # the disabled read tool stays gone
 

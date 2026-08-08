@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from epicurus_core.manifest import CONTRACT_VERSION, ModelSlot, WritesDocument
-from epicurus_core.module import EpicurusModule, add_manifest_route
+from epicurus_core.module import EpicurusModule, ToolError, add_manifest_route
 
 
 def _greeter() -> EpicurusModule:
@@ -66,9 +66,28 @@ async def test_manifest_reindexable_defaults_false() -> None:
 
 
 async def test_tool_is_callable() -> None:
-    content, structured = await _greeter().mcp.call_tool("greet", {"name": "ada"})
+    content, structured = await _greeter().call_tool("greet", {"name": "ada"})
     assert structured == {"result": "hello ada"}
     assert content[0].text == "hello ada"
+
+
+async def test_call_tool_raises_tool_error_for_a_failing_tool() -> None:
+    # The in-process invocation surface (module tests everywhere) reports a tool's own
+    # exception as ToolError — re-exported here so modules never import SDK paths that
+    # move between major versions (mcp 2.0 relocated it).
+    module = EpicurusModule("boom")
+
+    @module.tool()
+    def explode() -> str:
+        raise ValueError("event 'e1' not found")
+
+    with pytest.raises(ToolError, match="event 'e1' not found"):
+        await module.call_tool("explode", {})
+
+
+async def test_call_tool_raises_tool_error_for_an_unknown_tool() -> None:
+    with pytest.raises(ToolError, match="nope"):
+        await _greeter().call_tool("nope", {})
 
 
 def test_http_app_builds() -> None:
@@ -80,10 +99,30 @@ def test_mcp_is_reachable_for_clients() -> None:
     # The MCP endpoint must be reachable by an MCP client over the internal network:
     # served at the app root (so mounting under "/mcp" is not double-prefixed to
     # "/mcp/mcp") with DNS-rebinding protection off (it rejects service hostnames like
-    # "echo:8080" with HTTP 421 — the contract is local-only, ADR-0004).
-    settings = _greeter().mcp.settings
-    assert settings.streamable_http_path == "/"
-    assert settings.transport_security.enable_dns_rebinding_protection is False
+    # "echo:8080" with HTTP 421 — the contract is local-only, ADR-0004). mcp 2.0 moved
+    # both knobs off the server constructor onto streamable_http_app(), so the pin is
+    # behavioral: an initialize POST to "/" under a service-style Host header must reach
+    # the MCP transport (404 = wrong path, 421 = rebinding protection back on).
+    with TestClient(_greeter().http_app()) as client:
+        response = client.post(
+            "/",
+            headers={
+                "host": "echo:8080",
+                "accept": "application/json, text/event-stream",
+                "content-type": "application/json",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "probe", "version": "0"},
+                },
+            },
+        )
+    assert response.status_code == 200
 
 
 # ── writes_document declared through the decorator (#541, ADR-0100) ──────────
@@ -147,7 +186,7 @@ async def test_annotating_a_tool_that_never_registered_is_an_error() -> None:
 
 
 async def test_annotated_tools_still_run() -> None:
-    _content, structured = await _writer().mcp.call_tool(
+    _content, structured = await _writer().call_tool(
         "write_doc", {"path": "a.md", "title": "A", "content": "hi"}
     )
     assert structured == {"result": "a.md"}  # the annotation changes nothing about the call

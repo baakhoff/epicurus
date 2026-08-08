@@ -1,14 +1,14 @@
 """Unit tests for McpHost discovery URL and tool filtering (#126, #213).
 
-The MCP connection itself is stubbed: ``streamablehttp_client`` is patched to record
-the URL it is asked to open and then raise (URL-filter tests), or replaced with a mock
-session that returns a canned tool listing (tool-filter tests), so ``discover``
+The MCP connection itself is stubbed: the mcp 2.0 ``Client`` is patched to record the
+URL it is asked to open and then raise (URL-filter tests), or replaced with a mock
+client that returns a canned tool listing (tool-filter tests), so ``discover``
 exercises filtering logic without a live server.
 
 The transport-hardening tests at the bottom (#472) are the exception — they run a *real*
-FastMCP streamable-HTTP server, because the behavior they pin (a tool's isError, a refused
-connection, and an RPC read timeout) only manifests through the live anyio task group the
-mocks bypass.
+MCPServer streamable-HTTP server, because the behavior they pin (a tool's ``is_error``, a
+refused connection, and an RPC read timeout) only manifests through the live anyio task
+group the mocks bypass.
 """
 
 from __future__ import annotations
@@ -21,17 +21,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import uvicorn
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+from mcp.types import TextContent
 
 import epicurus_core_app.agent.mcp_host as mcp_host
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 
 
 def _recording_client() -> tuple[list[str], object]:
-    """A ``streamablehttp_client`` stand-in: record the URL, then fail the connection."""
+    """A ``Client`` stand-in: record the URL, then fail the connection."""
     seen: list[str] = []
 
-    def fake(url: str) -> object:
+    def fake(url: str, **_kwargs: object) -> object:
         seen.append(url)
         raise RuntimeError("no server in tests")
 
@@ -41,7 +42,7 @@ def _recording_client() -> tuple[list[str], object]:
 async def test_discover_without_provider_scans_static_list() -> None:
     host = McpHost(["http://a:8080/mcp", "http://b:8080/mcp"])
     seen, fake = _recording_client()
-    with patch("epicurus_core_app.agent.mcp_host.streamablehttp_client", side_effect=fake):
+    with patch("epicurus_core_app.agent.mcp_host.Client", side_effect=fake):
         specs, route = await host.discover()
     assert seen == ["http://a:8080/mcp", "http://b:8080/mcp"]
     assert specs == []
@@ -56,7 +57,7 @@ async def test_discover_uses_provider_when_wired() -> None:
     host = McpHost(["http://enabled:8080/mcp", "http://disabled:8080/mcp"])
     host.set_url_provider(provider)
     seen, fake = _recording_client()
-    with patch("epicurus_core_app.agent.mcp_host.streamablehttp_client", side_effect=fake):
+    with patch("epicurus_core_app.agent.mcp_host.Client", side_effect=fake):
         await host.discover()
     assert seen == ["http://enabled:8080/mcp"]
 
@@ -67,56 +68,45 @@ async def test_discover_provider_returning_empty_scans_nothing() -> None:
 
     host = McpHost(["http://a:8080/mcp"], url_provider=provider)
     seen, fake = _recording_client()
-    with patch("epicurus_core_app.agent.mcp_host.streamablehttp_client", side_effect=fake):
+    with patch("epicurus_core_app.agent.mcp_host.Client", side_effect=fake):
         specs, _ = await host.discover()
     assert seen == []
     assert specs == []
 
 
 # ── Per-tool filter (#213) ────────────────────────────────────────────────────
-# These tests replace the full MCP transport with a mock session that returns a
-# known tool listing, so we can assert which names appear in specs / route.
+# These tests replace the full MCP client with a mock that returns a known tool
+# listing, so we can assert which names appear in specs / route.
 
 
-def _mock_transport(tool_names: list[str]) -> tuple[object, object]:
-    """Return (transport_cm, session_cm) mocks that advertise the given tool names."""
+def _mock_client(tool_names: list[str]) -> object:
+    """Return a ``Client`` context-manager mock that advertises the given tool names."""
     tool_objs = []
     for name in tool_names:
         t = MagicMock()
         t.name = name
         t.description = ""
-        t.inputSchema = {}
+        t.input_schema = {}
         tool_objs.append(t)
 
     listing = MagicMock()
     listing.tools = tool_objs
 
-    session = AsyncMock()
-    session.initialize = AsyncMock()
-    session.list_tools = AsyncMock(return_value=listing)
+    client = AsyncMock()
+    client.list_tools = AsyncMock(return_value=listing)
 
-    transport_cm = MagicMock()
-    transport_cm.__aenter__ = AsyncMock(return_value=(None, None, None))
-    transport_cm.__aexit__ = AsyncMock(return_value=False)
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=client)
+    client_cm.__aexit__ = AsyncMock(return_value=False)
 
-    session_cm = MagicMock()
-    session_cm.__aenter__ = AsyncMock(return_value=session)
-    session_cm.__aexit__ = AsyncMock(return_value=False)
-
-    return transport_cm, session_cm
+    return client_cm
 
 
 async def test_discover_without_filter_includes_all_tools() -> None:
     host = McpHost(["http://a:8080/mcp"])
-    transport_cm, session_cm = _mock_transport(["tool_a", "tool_b"])
+    client_cm = _mock_client(["tool_a", "tool_b"])
 
-    with (
-        patch(
-            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
-            return_value=transport_cm,
-        ),
-        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
-    ):
+    with patch("epicurus_core_app.agent.mcp_host.Client", return_value=client_cm):
         specs, _route = await host.discover()
 
     assert {s["function"]["name"] for s in specs} == {"tool_a", "tool_b"}
@@ -129,15 +119,9 @@ async def test_discover_with_tool_filter_excludes_disabled_tools() -> None:
 
     host = McpHost(["http://a:8080/mcp"])
     host.set_tool_filter(tool_filter)
-    transport_cm, session_cm = _mock_transport(["tool_a", "tool_b"])
+    client_cm = _mock_client(["tool_a", "tool_b"])
 
-    with (
-        patch(
-            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
-            return_value=transport_cm,
-        ),
-        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
-    ):
+    with patch("epicurus_core_app.agent.mcp_host.Client", return_value=client_cm):
         specs, route = await host.discover()
 
     assert {s["function"]["name"] for s in specs} == {"tool_a"}
@@ -150,15 +134,9 @@ async def test_discover_with_empty_filter_includes_all_tools() -> None:
 
     host = McpHost(["http://a:8080/mcp"])
     host.set_tool_filter(tool_filter)
-    transport_cm, session_cm = _mock_transport(["tool_a", "tool_b"])
+    client_cm = _mock_client(["tool_a", "tool_b"])
 
-    with (
-        patch(
-            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
-            return_value=transport_cm,
-        ),
-        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
-    ):
+    with patch("epicurus_core_app.agent.mcp_host.Client", return_value=client_cm):
         specs, _ = await host.discover()
 
     assert {s["function"]["name"] for s in specs} == {"tool_a", "tool_b"}
@@ -167,61 +145,46 @@ async def test_discover_with_empty_filter_includes_all_tools() -> None:
 # ── Tool errors surface, never swallow (#435) ─────────────────────────────────
 
 
-def _call_transport(result: MagicMock) -> tuple[object, object]:
-    """(transport_cm, session_cm) mocks whose ``call_tool`` returns *result*."""
-    session = AsyncMock()
-    session.initialize = AsyncMock()
-    session.call_tool = AsyncMock(return_value=result)
+def _call_client(result: MagicMock) -> object:
+    """A ``Client`` context-manager mock whose ``call_tool`` returns *result*."""
+    client = AsyncMock()
+    client.call_tool = AsyncMock(return_value=result)
 
-    transport_cm = MagicMock()
-    transport_cm.__aenter__ = AsyncMock(return_value=(None, None, None))
-    transport_cm.__aexit__ = AsyncMock(return_value=False)
-
-    session_cm = MagicMock()
-    session_cm.__aenter__ = AsyncMock(return_value=session)
-    session_cm.__aexit__ = AsyncMock(return_value=False)
-    return transport_cm, session_cm
+    client_cm = MagicMock()
+    client_cm.__aenter__ = AsyncMock(return_value=client)
+    client_cm.__aexit__ = AsyncMock(return_value=False)
+    return client_cm
 
 
 def _tool_result(text: str, *, is_error: bool) -> MagicMock:
-    block = MagicMock()
-    block.text = text
+    # Real TextContent blocks: the host's ``_text`` narrows by isinstance, which a
+    # MagicMock block would never satisfy.
     result = MagicMock()
-    result.isError = is_error
-    result.content = [block] if text else []
+    result.is_error = is_error
+    result.content = [TextContent(type="text", text=text)] if text else []
     return result
 
 
 async def test_call_returns_text_on_success() -> None:
     host = McpHost([])
-    transport_cm, session_cm = _call_transport(_tool_result("all good", is_error=False))
-    with (
-        patch(
-            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
-            return_value=transport_cm,
-        ),
-        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
-    ):
+    client_cm = _call_client(_tool_result("all good", is_error=False))
+    with patch("epicurus_core_app.agent.mcp_host.Client", return_value=client_cm):
         out = await host.call("some_tool", {}, "http://m:8080/mcp", tenant="t1")
     assert out == "all good"
 
 
 async def test_call_raises_tool_call_error_on_iserror() -> None:
-    # FastMCP reports a tool exception as an error *result*, not a transport error; the
-    # host must raise so callers can tell failure from output — previously the error
-    # text read as a successful call and the web closed the form as if it worked (#435).
+    # The module's server reports a tool exception as an error *result*, not a transport
+    # error; the host must raise so callers can tell failure from output — previously the
+    # error text read as a successful call and the web closed the form as if it worked (#435).
     host = McpHost([])
-    transport_cm, session_cm = _call_transport(
+    client_cm = _call_client(
         _tool_result(
             "Error executing tool calendar_update_event: event 'e1' not found", is_error=True
         )
     )
     with (
-        patch(
-            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
-            return_value=transport_cm,
-        ),
-        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
+        patch("epicurus_core_app.agent.mcp_host.Client", return_value=client_cm),
         pytest.raises(ToolCallError, match="event 'e1' not found"),
     ):
         await host.call("calendar_update_event", {}, "http://m:8080/mcp", tenant="t1")
@@ -229,13 +192,9 @@ async def test_call_raises_tool_call_error_on_iserror() -> None:
 
 async def test_call_error_without_text_gets_fallback_message() -> None:
     host = McpHost([])
-    transport_cm, session_cm = _call_transport(_tool_result("", is_error=True))
+    client_cm = _call_client(_tool_result("", is_error=True))
     with (
-        patch(
-            "epicurus_core_app.agent.mcp_host.streamablehttp_client",
-            return_value=transport_cm,
-        ),
-        patch("epicurus_core_app.agent.mcp_host.ClientSession", return_value=session_cm),
+        patch("epicurus_core_app.agent.mcp_host.Client", return_value=client_cm),
         pytest.raises(ToolCallError, match="'boom' failed"),
     ):
         await host.call("boom", {}, "http://m:8080/mcp", tenant="t1")
@@ -342,14 +301,15 @@ async def test_builtin_respects_disabled_filter() -> None:
 
 # ── Transport hardening: real server, real failure modes (#472) ────────────────
 # ``call`` dispatches every board/calendar UI action. The mocked tests above cannot
-# reproduce what a live streamable-HTTP connection does: it runs its transport in an anyio
-# task group, so a failure raised *inside* the ``async with`` — a refused/dropped socket, an
-# RPC read timeout, *or* a tool's isError — escapes wrapped in a (possibly nested)
-# ``ExceptionGroup``, never a bare exception. These tests run a real FastMCP server so the
-# host's contract is verified against production behavior: a tool error surfaces as a bare
-# ``ToolCallError`` (raised after the block, so it is never wrapped), while a genuinely
-# unreachable module normalizes to ``ModuleUnreachableError`` — the structured signal
-# ``ModuleRegistry.invoke`` maps to a controlled 502 instead of a raw ``NetworkError``.
+# reproduce what a live streamable-HTTP connection does: the mcp 2.0 ``Client`` still runs
+# its transport in an anyio task group, so a failure raised *inside* the ``async with`` — a
+# refused/dropped socket, an RPC read timeout, *or* a tool's ``is_error`` — can escape
+# wrapped in a (possibly nested) ``ExceptionGroup``, never a bare exception. These tests
+# run a real MCPServer so the host's contract is verified against production behavior: a
+# tool error surfaces as a bare ``ToolCallError`` (raised after the block, so it is never
+# wrapped), while a genuinely unreachable module normalizes to ``ModuleUnreachableError`` —
+# the structured signal ``ModuleRegistry.invoke`` maps to a controlled 502 instead of a raw
+# ``NetworkError``.
 
 
 def _free_port() -> int:
@@ -363,8 +323,8 @@ def _free_port() -> int:
 
 
 def _live_module_app() -> object:
-    """A FastMCP streamable-HTTP app with a ``echo`` tool and a raising ``boom`` tool."""
-    mcp = FastMCP("test-module")
+    """An MCPServer streamable-HTTP app with a ``echo`` tool and a raising ``boom`` tool."""
+    mcp = MCPServer("test-module")
 
     @mcp.tool()
     def echo(message: str) -> str:

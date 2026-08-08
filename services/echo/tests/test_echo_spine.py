@@ -162,7 +162,7 @@ async def test_emit_ping_rejects_a_malformed_tenant() -> None:
 async def test_ping_tool_emits_and_reports_the_key() -> None:
     bus = _RecordingBus()
     module = build_module(bus, tenant=TENANT)  # type: ignore[arg-type]
-    _content, structured = await module.mcp.call_tool("echo_ping", {"note": "hi"})
+    _content, structured = await module.call_tool("echo_ping", {"note": "hi"})
     key = bus.envelopes()[0].dedup_key
     assert isinstance(structured, dict)
     assert key in str(structured["result"])
@@ -172,20 +172,20 @@ async def test_ping_tool_emits_and_reports_the_key() -> None:
 async def test_ping_tool_forwards_an_explicit_dedup_key() -> None:
     bus = _RecordingBus()
     module = build_module(bus, tenant=TENANT)  # type: ignore[arg-type]
-    await module.mcp.call_tool("echo_ping", {"dedup_key": "fixed"})
-    await module.mcp.call_tool("echo_ping", {"dedup_key": "fixed"})
+    await module.call_tool("echo_ping", {"dedup_key": "fixed"})
+    await module.call_tool("echo_ping", {"dedup_key": "fixed"})
     # Both go on the wire — deduplication is the core log's job, not the emitter's.
     assert [e.dedup_key for e in bus.envelopes()] == ["fixed", "fixed"]
 
 
 async def test_ping_tool_reports_a_missing_bus_instead_of_failing_the_build() -> None:
     # build_module() with no bus stays valid so the manifest is readable without NATS.
-    _content, structured = await build_module().mcp.call_tool("echo_ping", {})
+    _content, structured = await build_module().call_tool("echo_ping", {})
     assert isinstance(structured, dict)
     assert "error" in str(structured["result"])
 
 
 async def test_echo_tool_still_works_alongside_the_emitter() -> None:
     # The spine is additive: the original contract proof is untouched.
-    _content, structured = await build_module().mcp.call_tool("echo", {"message": "hello"})
+    _content, structured = await build_module().call_tool("echo", {"message": "hello"})
     assert structured == {"result": "hello"}

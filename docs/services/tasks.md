@@ -325,7 +325,7 @@ side table keyed by task id (ADR-0082).
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
 | `GET /calendar-feed?start=&end=` | Open tasks with a due date in `[start, end)` (`end` exclusive), as calendar-feed items (#469, ADR-0088): `{id, title, date, status, ref_id, kind}`. No manifest declaration — probed generically by the core's cross-module aggregate, `GET /platform/v1/calendar-feed` (see [core-app](core-app.md)). |
-| `GET /mcp` (streamable-HTTP) | MCP tool surface (served by FastMCP). |
+| `GET /mcp` (streamable-HTTP) | MCP tool surface (served by the MCP SDK's `MCPServer`). |
 
 ### Web UI (manifest, ADR-0007 Tier 1)
 

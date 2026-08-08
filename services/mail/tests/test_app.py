@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -54,11 +55,17 @@ def _client_with_provider(provider: MailProvider) -> TestClient:
     The cache path (the plain landing view) needs the schema, which ``create_app`` builds in
     its lifespan — enter the client as a context manager (``with``) for those tests so
     ``MailCache.init`` runs; the live/thread/send routes work without it.
+
+    The background reconcile is switched **off** here (``MAIL_POLL_INTERVAL_S=0``, #796): these
+    tests assert exact provider call counts for one page read, and a poll tick racing the
+    request would reconcile the same mailbox underneath them. That the lifespan really does
+    start the loop when it is configured is asserted in ``test_mail_poller.py``.
     """
     if not hasattr(provider.health_check, "assert_awaited"):  # ensure health_check is mocked
         provider.health_check = AsyncMock(return_value=True)  # type: ignore[method-assign]
     _categories_off(provider)
     with (
+        patch.dict(os.environ, {"MAIL_POLL_INTERVAL_S": "0"}),
         patch("epicurus_mail.app.GmailProvider", return_value=provider),
         patch("epicurus_mail.app.EventBus.from_settings", return_value=AsyncMock()),
     ):

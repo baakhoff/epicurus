@@ -21,13 +21,26 @@ seam, so an IMAP backend reuses it unchanged.
 
 :meth:`reconcile` is also where ``mail.received`` and ``mail.sync_failed`` are emitted
 (#663) — the one place a genuinely-new message or a broken sync is already known, rather
-than duplicating that knowledge at every provider implementation. A cold/full sync never
-emits ``mail.received`` (the no-firehose rule): it has no delta to report new-vs-seen
-against, so treating a first load as "N new messages" would be noise, not news.
+than duplicating that knowledge at every provider implementation. A **first-ever** sync never
+emits ``mail.received`` (the no-firehose rule): it has no delta to report new-vs-seen against,
+so treating a first load as "N new messages" would be noise, not news.
+
+Since #796 those two read paths have **two** callers — the mailbox page and the background
+poller (:mod:`epicurus_mail.poller`) — which is what makes the rest of this module's shape
+load-bearing:
+
+- **Single-flight.** Both entry points serialize on one per-instance lock, so a poll tick and
+  a page reconcile can never interleave their cursor read/advance and emit the same message
+  twice. The loser re-reads the cursor the winner just advanced and finds nothing new.
+- **A resumed sync is not a first sync.** A full sync that follows an earlier successful one —
+  the cursor lapsed while the service was down — replays ``mail.received`` for the window it
+  missed (bounded by :data:`DEFAULT_RESUME_BACKLOG_LIMIT`) instead of swallowing it. Only a
+  mailbox that has never been synced at all stays silent.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -40,6 +53,16 @@ from epicurus_mail.db import MailCache
 from epicurus_mail.provider import MailCategory, MailLabel, MailProvider, MailThreadSummary
 
 log = get_logger("epicurus_mail.cache")
+
+DEFAULT_RESUME_BACKLOG_LIMIT = 50
+"""How many missed messages a *resumed* full sync replays as ``mail.received`` (#796).
+
+A ceiling on the notification burst after an outage, not on the sync itself: the mailbox state
+is restored in full either way, this only bounds how many events the gap can turn into. Fifty
+is roughly "a long weekend of real mail" — enough that a normal restart replays everything,
+small enough that a fortnight offline can't hand the automations engine a thousand triggers at
+once. A truncated replay is logged, so the shortfall is visible rather than assumed.
+"""
 
 
 class LandingBundle(BaseModel):
@@ -70,6 +93,9 @@ class CachedMailbox:
         category_ttl_s: How long an assembled category-tab set stays fresh (#765). Assembling
             it is a provider fan-out, so it must not run per render; short enough that newly
             arrived mail moves the badges without anyone asking.
+        resume_backlog_limit: How many missed messages a *resumed* full sync replays as
+            ``mail.received`` (#796) — see :data:`DEFAULT_RESUME_BACKLOG_LIMIT`. ``0`` turns
+            the replay off entirely (a resumed sync then behaves like a first-ever one).
     """
 
     def __init__(
@@ -85,6 +111,7 @@ class CachedMailbox:
         provider_name: str = "gmail",
         sync_failed_cooldown_s: float = 900.0,
         category_ttl_s: float = 60.0,
+        resume_backlog_limit: int = DEFAULT_RESUME_BACKLOG_LIMIT,
     ) -> None:
         self._provider = provider
         self._cache = cache
@@ -97,14 +124,30 @@ class CachedMailbox:
         self._sync_failed_cooldown_s = sync_failed_cooldown_s
         self._last_sync_failed_at: float | None = None
         self._category_ttl_s = category_ttl_s
+        self._resume_backlog_limit = resume_backlog_limit
+        # Single-flight for everything that reads-then-advances the change cursor (#796). The
+        # mailbox page and the background poller are two concurrent callers of the same cursor;
+        # without this they can both observe the pre-advance value and emit `mail.received`
+        # twice for one message. Instance-scoped, which is single-flight per account per
+        # process — see `reconcile` for the multi-replica caveat.
+        self._sync_lock = asyncio.Lock()
 
     # ── read paths ───────────────────────────────────────────────────────────
 
     async def landing(self, label: str) -> LandingBundle:
-        """The instant landing view: cached rows + rail, or a one-time full sync when cold."""
+        """The instant landing view: cached rows + rail, or a one-time full sync when cold.
+
+        The warm path never touches the sync lock — serving 25 cached rows must stay instant
+        even while a poll tick is mid-flight. Only the cold path takes it, and re-checks the
+        cache once it holds it: with a poller running, "cache is cold" is a racy observation,
+        and two concurrent full syncs would double a ~28-call provider fan-out for one result.
+        """
         if await self._cache.has_landing(tenant_id=self._tenant, label=label):
             return await self._bundle_from_cache(label)
-        return await self._full_sync(label)
+        async with self._sync_lock:
+            if await self._cache.has_landing(tenant_id=self._tenant, label=label):
+                return await self._bundle_from_cache(label)
+            return await self._full_sync(label)
 
     async def reconcile(self, label: str) -> LandingBundle:
         """Pull the delta since the last sync into the cache, then return the fresh landing.
@@ -112,14 +155,28 @@ class CachedMailbox:
         Cheap when idle: one ``changed_threads_since`` call that returns an empty delta just
         advances the cursor and re-serves the cache. When threads changed, only those rows are
         rebuilt (a single ``get_thread_summary`` each) and the rail's unread counts refreshed.
-        A cold or expired cursor falls back to a full sync — which never emits ``mail.received``
-        (#663's no-firehose rule): a full sync has no prior state to diff against, so every row
-        would look "new" without actually being news.
+        A cold or expired cursor falls back to a full sync — which emits ``mail.received`` only
+        when it is *resuming* a mailbox that was synced before (see :meth:`_full_sync`).
+
+        **Single-flight (#796).** Two callers now reach here: the mailbox page (``?reconcile=1``)
+        and the background poller. The whole read-cursor → fetch-delta → emit → advance-cursor
+        sequence runs under one lock, so an overlapping run cannot see the same pre-advance
+        cursor and emit a second ``mail.received`` for one message; it waits, re-reads the
+        advanced cursor, and finds nothing new. The guard is **per process**, exactly like the
+        tasks scheduler's ``_claim_materialize``: two replicas of the mail module against one
+        mailbox would each hold their own lock. That is out of scope by the same reasoning —
+        modules are single-instance today — and the spine's ``dedup_key`` (the provider message
+        id) is the backstop that keeps even that case from reaching a consumer twice.
 
         A provider failure (``httpx.HTTPError`` — an auth failure surfaces this way, via
         ``PlatformClient.get_oauth_token``) emits ``mail.sync_failed`` and re-raises, so the
         existing HTTP-level error mapping (403 scope hints, 429 throttling) is unchanged.
         """
+        async with self._sync_lock:
+            return await self._reconcile_locked(label)
+
+    async def _reconcile_locked(self, label: str) -> LandingBundle:
+        """:meth:`reconcile`'s body, with the sync lock already held."""
         cursor = await self._cache.get_cursor(tenant_id=self._tenant)
         if cursor.is_empty():
             return await self._full_sync(label)
@@ -220,6 +277,47 @@ class CachedMailbox:
             except Exception as exc:  # a spine hiccup must never cost the cache write already made
                 log.warning("mail.received emit failed", message_id=message_id, error=str(exc))
 
+    async def _emit_backlog(self, label: str, *, since: datetime) -> None:
+        """Replay ``mail.received`` for the window a resumed sync missed (#796).
+
+        Called only from a *resumed* full sync — the mailbox was synced before, the change
+        cursor can no longer bridge the gap, and the plain full sync would otherwise restore
+        every row while announcing none of them. Asks the provider what arrived after *since*
+        (capped at ``resume_backlog_limit``) and hands those ids to the same
+        :meth:`_emit_received` the delta path uses, so a replayed event is indistinguishable
+        from a live one to every consumer.
+
+        Best-effort by construction. The capability is optional
+        (:meth:`MailProvider.messages_since` defaults to ``[]``), a provider error here is
+        logged and dropped rather than failing a full sync whose *actual* job — restoring the
+        cache — has already succeeded, and a truncated replay is logged so the shortfall is
+        visible instead of assumed.
+        """
+        if self._bus is None or self._resume_backlog_limit <= 0:
+            return
+        try:
+            message_ids = await self._provider.messages_since(
+                since_ms=int(since.timestamp() * 1000), limit=self._resume_backlog_limit
+            )
+        except Exception as exc:
+            log.warning("mail backlog replay unavailable", tenant=self._tenant, error=str(exc))
+            return
+        if not message_ids:
+            return
+        if len(message_ids) >= self._resume_backlog_limit:
+            log.warning(
+                "mail backlog replay truncated; older missed mail is not announced",
+                tenant=self._tenant,
+                limit=self._resume_backlog_limit,
+            )
+        log.info(
+            "replaying mail backlog after a sync gap",
+            tenant=self._tenant,
+            count=len(message_ids),
+            since=since.isoformat(),
+        )
+        await self._emit_received(label, set(message_ids))
+
     async def _emit_sync_failed(self, *, reason: str) -> None:
         """Emit ``mail.sync_failed``, rate-limited so a flapping account can't storm the bus.
 
@@ -272,7 +370,17 @@ class CachedMailbox:
     # ── internals ────────────────────────────────────────────────────────────
 
     async def _full_sync(self, label: str) -> LandingBundle:
-        """Fetch the folder's landing page + rail live, replace the cache, stamp the cursor."""
+        """Fetch the folder's landing page + rail live, replace the cache, stamp the cursor.
+
+        Also decides the one thing the no-firehose rule has to get right (#796): whether this
+        sync is a **first** or a **resume**. ``synced_at`` answers it — absent means this
+        mailbox has never been synced, so there is no new-vs-seen to report and the sync stays
+        silent; present means we synced successfully at that instant and have since lost the
+        thread (a cursor Gmail no longer retains, a wiped cache), so everything that arrived
+        after it *is* news and is replayed by :meth:`_emit_backlog`. Read the stamp before
+        :meth:`MailCache.set_cursor` overwrites it below.
+        """
+        resumed_from = await self._cache.get_last_synced_at(tenant_id=self._tenant)
         # Snapshot the cursor BEFORE fetching: a change during the fetch is then replayed by the
         # next reconcile rather than lost. Reconcile is idempotent, so replaying is harmless.
         snapshot = await self._provider.current_cursor()
@@ -288,6 +396,8 @@ class CachedMailbox:
             next_cursor=page.next_cursor,
         )
         await self._cache.set_cursor(tenant_id=self._tenant, cursor=snapshot)
+        if resumed_from is not None:
+            await self._emit_backlog(label, since=resumed_from)
         return LandingBundle(
             labels=labels,
             threads=list(page.threads[: self._landing_size]),

@@ -12,6 +12,38 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`mail.received` only fired while the Mail page was open, so automations and push alerts on
+  new mail never ran** (#796) — the event had exactly one emitter, `CachedMailbox.reconcile`, and
+  exactly one caller: the mailbox page's `?reconcile=1` read, which the web fires when an operator
+  opens Mail. Mail had no background worker at all, unlike calendar and tasks, both of which have
+  shipped a scheduler since #664. So "notify me when mail arrives" could only ever fire *after* the
+  operator had already seen the mail — the inverse of the feature. Nothing downstream was broken:
+  the automation matcher and the per-event alert listener were wired and waiting on an event nobody
+  emitted. Worse for the reported case, a cold or expired cursor fell back to a full sync, which by
+  design emits nothing (the no-firehose rule), so the first open after a while — exactly when the
+  most mail had accumulated — was the one guaranteed to announce nothing at all.
+
+  Mail now runs the loop itself (`epicurus_mail.poller`, started and cancelled by the service
+  lifespan, the same shape calendar and tasks use). A tick is `is_available()` →
+  `reconcile("INBOX")` and nothing else: deliberately only a *caller* of the existing path, so the
+  events, payloads, dedup keys and every consumer downstream are literally the ones the page
+  produces, and the two can never drift. It is **on by default** at `MAIL_POLL_INTERVAL_S=300`
+  (`0` disables the loop entirely) — an event contract that holds only while a human is watching
+  the page is not a contract, and the cost is one history-delta call per tick. An unconnected
+  deployment costs one token-presence check per tick and logs nothing at all.
+
+  Two supporting changes fall out of having a second caller. Reconcile is now **single-flight per
+  account**, so a poll tick and a page read serialize on the change cursor instead of both
+  announcing one message (per process, like the tasks scheduler's `_claim_materialize`; the
+  spine's message-id `dedup_key` is the backstop beyond that). And the no-firehose rule is split
+  in two by the cache's `synced_at` stamp: a **first-ever** sync still emits nothing, while a sync
+  that *resumes* a mailbox synced before — the cursor lapsed while the service was down — replays
+  `mail.received` for what arrived since that instant, newest first, capped at 50 messages, via a
+  new capability-gated `MailProvider.messages_since` (Gmail: one `messages.list` with an
+  epoch-second `after:` term). A provider that can't answer inherits the empty default and simply
+  gets no replay; the full sync itself is never blocked or failed by it.
+  `mail` 0.17.0→0.18.0 (MINOR).
+
 - **Entities the assistant named in an answer were plain text, never clickable** (#794) — the
   shell has rendered an inline `epicurus://entity/<module>/<kind>/<ref_id>` markdown link as an
   interactive chip since ADR-0019, excluding anything so linked from the trailing "Sources"

@@ -12,6 +12,102 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Tasks added while an account was disconnected were saved and then invisible forever**
+  (#795) — `TasksRouter` resolved a *missing provider* in exactly opposite ways on its write and
+  read paths, and the trigger is a stale `enabled`/`active` collection reference, which nothing
+  prunes when the account behind it goes away. A write fell back to the local store — but kept
+  the stale reference, so the task was mislabeled with the account and collection it had fallen
+  back *from*, visible in the emitted `tasks.task_created` event's `dedup_key` and in the list
+  id handed to the local provider. The read aggregate hit the very same condition and
+  `continue`d past it, never trying local at all, because its fallback only fires when `enabled`
+  is *empty*, never when an entry inside it is dead. So `tasks_add` reported a genuine,
+  persisted task and the very next `tasks_list` or board read came back empty — not lost, just
+  unreadable through the router — and the skip was silent, unlike the neighbouring read-failure
+  path which logs. Fixed by giving every read and write one shared rule, `_resolve_provider`: a
+  live provider for the reference's account is used as-is; a missing one degrades to the local
+  collection — replacing the reference rather than merely re-pointing it, so a write is never
+  mislabeled — and logs a warning naming the account and collection that went missing. A
+  `_dedup_refs` helper applies the rule across a multi-collection read and de-duplicates by
+  *effective* target, so two independently stale references, or a degraded one landing on a
+  local entry already enabled, read local once instead of double-counting its tasks. The
+  explicit-`list_id` write branch funnels through the same rule, which also closes a related
+  asymmetry: a `list_id` matching a stale enabled reference now degrades to local instead of
+  falling through to "the sole external provider owns this unlisted id" and potentially
+  misrouting to an unrelated account. Pruning the stale reference itself is deliberately left
+  alone — the core's disconnect cleanup is best-effort by design and a module-side prune would
+  need a new write-back into the shared library — because the router-level rule makes staleness
+  permanently harmless whatever caused it. The calendar module had the identical defect; it is
+  fixed separately as #814.
+  `tasks` 0.21.0→0.22.0 (MINOR).
+
+- **`mail.received` only fired while the Mail page was open, so automations and push alerts on
+  new mail never ran** (#796) — the event had exactly one emitter, `CachedMailbox.reconcile`, and
+  exactly one caller: the mailbox page's `?reconcile=1` read, which the web fires when an operator
+  opens Mail. Mail had no background worker at all, unlike calendar and tasks, both of which have
+  shipped a scheduler since #664. So "notify me when mail arrives" could only ever fire *after* the
+  operator had already seen the mail — the inverse of the feature. Nothing downstream was broken:
+  the automation matcher and the per-event alert listener were wired and waiting on an event nobody
+  emitted. Worse for the reported case, a cold or expired cursor fell back to a full sync, which by
+  design emits nothing (the no-firehose rule), so the first open after a while — exactly when the
+  most mail had accumulated — was the one guaranteed to announce nothing at all.
+
+  Mail now runs the loop itself (`epicurus_mail.poller`, started and cancelled by the service
+  lifespan, the same shape calendar and tasks use). A tick is `is_available()` →
+  `reconcile("INBOX")` and nothing else: deliberately only a *caller* of the existing path, so the
+  events, payloads, dedup keys and every consumer downstream are literally the ones the page
+  produces, and the two can never drift. It is **on by default** at `MAIL_POLL_INTERVAL_S=300`
+  (`0` disables the loop entirely) — an event contract that holds only while a human is watching
+  the page is not a contract, and the cost is one history-delta call per tick. An unconnected
+  deployment costs one token-presence check per tick and logs nothing at all.
+
+  Two supporting changes fall out of having a second caller. Reconcile is now **single-flight per
+  account**, so a poll tick and a page read serialize on the change cursor instead of both
+  announcing one message (per process, like the tasks scheduler's `_claim_materialize`; the
+  spine's message-id `dedup_key` is the backstop beyond that). And the no-firehose rule is split
+  in two by the cache's `synced_at` stamp: a **first-ever** sync still emits nothing, while a sync
+  that *resumes* a mailbox synced before — the cursor lapsed while the service was down — replays
+  `mail.received` for what arrived since that instant, newest first, capped at 50 messages, via a
+  new capability-gated `MailProvider.messages_since` (Gmail: one `messages.list` with an
+  epoch-second `after:` term). A provider that can't answer inherits the empty default and simply
+  gets no replay; the full sync itself is never blocked or failed by it.
+  `mail` 0.17.0→0.18.0 (MINOR).
+
+- **Entities the assistant named in an answer were plain text, never clickable** (#794) — the
+  shell has rendered an inline `epicurus://entity/<module>/<kind>/<ref_id>` markdown link as an
+  interactive chip since ADR-0019, excluding anything so linked from the trailing "Sources"
+  pill, but the model was never told the syntax exists — so it never emitted one, and every
+  reference fell through to the pill unconditionally. The one place the model does see
+  reference ids, the "Referenced items" block appended to a tool result whose envelope carries
+  entity refs (ADR-0079), framed them as tool *inputs* only: "pass an item's id to a tool that
+  needs one". That block now carries each reference's ready-made link beside its id, and the
+  intro teaches the syntax — link what you mention, using the URL shown, verbatim. Fixing it in
+  that one place fixes every module at once, the same reasoning that introduced the id listing.
+  Every component of the URL is percent-encoded, `/` included, because the web's inline-link
+  matcher stops at the first `)` or whitespace and then decodes: a `ref_id` containing either
+  would otherwise break the link, and being markdown, break it *silently*. Handing the model
+  the finished URL rather than three raw fields to assemble removes the failure mode entirely.
+  The instruction is deliberately to link what is actually named rather than everything — a
+  twenty-hit search should not become twenty chips, and the pill remains the outlet for the
+  long tail. No web change: the renderer, the pill exclusion, and the graceful degradation for
+  an unknown or malformed link all already existed.
+  `core-app` 0.109.0→0.110.0 (MINOR).
+
+- **A bare weekday name landed the event exactly one week late** (#793) — the `now` built-in
+  handed the model the current date, time and weekday *name*, leaving weekday-to-date
+  conversion as head arithmetic: count forward from today's weekday, carry the month or year
+  boundary, hope. Nothing anywhere downstream could catch a slip, because the calendar accepts
+  any well-formed ISO date — a date a week out is a perfectly valid event, not an error — so
+  the failure was silent and self-confident, and "Wednesday" reliably meant the Wednesday after
+  the one that was asked for. `now` resolves it in the tool now rather than describing it: the
+  payload gains `today` and `tomorrow` as ISO dates, plus an `upcoming` map from every weekday
+  name to its next date, strictly in the future — asked on a Friday, `upcoming.Friday` is next
+  Friday, not today. All three are computed from the same zone-resolved instant the rest of the
+  payload already uses, so the operator's configured timezone decides what "today" is rather
+  than UTC, the same trap #559 closed for calendar read paths. The tool description now tells
+  the model to take `upcoming` verbatim and never to count days itself, and to ask rather than
+  guess when phrasing like "next Monday" is genuinely ambiguous *and* the difference matters.
+  `core-app` 0.108.0→0.109.0 (MINOR).
+
 - **Cold-switching documents in the editor could save the outgoing note's content over the
   newly-opened one — data loss** (#781) — every `EditorView` host (Notes, Knowledge, the chat
   document pane) shares the same Preview surface: Milkdown's Crepe (#377), deliberately

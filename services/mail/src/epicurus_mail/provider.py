@@ -407,6 +407,28 @@ class MailProvider(ABC):
         An empty delta with a fresh ``next_cursor`` is the cheap "nothing changed" case.
         """
 
+    async def messages_since(self, *, since_ms: int, limit: int) -> list[str]:
+        """Ids of messages that arrived at/after *since_ms* (epoch **ms**), newest first (#796).
+
+        The **resume-backlog** seam. When a change cursor can no longer be replayed — the
+        service was down longer than the provider retains history — the orchestrator falls back
+        to a full sync, which by design emits no ``mail.received`` (the no-firehose rule). That
+        is right for a *first-ever* sync and wrong for a *resumed* one: everything that arrived
+        during the gap would be swallowed silently. This is how the module recovers exactly that
+        window, bounded by *limit* so a long outage can't turn into an unbounded notification
+        storm.
+
+        Deliberately **concrete, not abstract** — a capability gate (ADR-0030), like
+        :meth:`list_categories`. A backend that cannot answer "what arrived since T" inherits
+        this empty default and simply gets no backlog replay, which is exactly the behavior
+        every provider had before the background poller existed; it never crashes and never
+        blocks the full sync that carries the actual mailbox state.
+
+        Implementations must exclude spam/trash (a backlog replay is about mail the operator
+        would care about) and must not include messages older than *since_ms*.
+        """
+        return []
+
     @abstractmethod
     async def get_thread_summary(self, thread_id: str) -> MailThreadSummary | None:
         """One thread's list-row summary (ADR-0096, #623), or ``None`` if it no longer exists.

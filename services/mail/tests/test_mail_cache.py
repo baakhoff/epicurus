@@ -7,11 +7,15 @@ since the whole point of the cache is to *avoid* provider calls.
 
 The ``*_emits_*``/``*_sync_failed*`` tests below (#663) additionally drive a
 :class:`_RecordingBus` fake to pin the event-spine emission behavior: genuinely-new messages
-only, never on a full/cold sync, and a rate-limited ``mail.sync_failed`` on provider failure.
+only, nothing at all on a **first-ever** sync, and a rate-limited ``mail.sync_failed`` on
+provider failure. Since #796 the full-sync half of that rule is split in two — a sync that
+*resumes* a mailbox synced before replays the window it missed, while a first-ever one stays
+silent — so the tests state which of the two they mean.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import httpx
@@ -20,7 +24,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core import EventEnvelope
-from epicurus_mail.cache import CachedMailbox, _primary_folder
+from epicurus_mail.cache import (
+    DEFAULT_RESUME_BACKLOG_LIMIT,
+    CachedMailbox,
+    _primary_folder,
+)
 from epicurus_mail.db import MailCache
 from epicurus_mail.provider import (
     MailAttachment,
@@ -92,6 +100,9 @@ def _provider(
     provider.list_threads = AsyncMock(
         return_value=ThreadPage(threads=threads or [_summary("t1", sort_ts=100)], next_cursor="NX")
     )
+    # The backlog-replay capability (#796) is opt-in on the seam; state the empty default here so
+    # a test that doesn't care about it can't be surprised by an auto-stubbed mock.
+    provider.messages_since = AsyncMock(return_value=[])
     return provider
 
 
@@ -102,7 +113,11 @@ async def _mailbox(provider: AsyncMock) -> tuple[CachedMailbox, MailCache]:
 
 
 async def _mailbox_with_bus(
-    provider: AsyncMock, bus: _RecordingBus, *, sync_failed_cooldown_s: float = 900.0
+    provider: AsyncMock,
+    bus: _RecordingBus,
+    *,
+    sync_failed_cooldown_s: float = 900.0,
+    resume_backlog_limit: int = DEFAULT_RESUME_BACKLOG_LIMIT,
 ) -> CachedMailbox:
     cache = MailCache(_engine())
     await cache.init()
@@ -112,6 +127,7 @@ async def _mailbox_with_bus(
         tenant_id=TENANT,
         bus=bus,  # type: ignore[arg-type]
         sync_failed_cooldown_s=sync_failed_cooldown_s,
+        resume_backlog_limit=resume_backlog_limit,
     )
 
 
@@ -372,34 +388,138 @@ async def test_reconcile_empty_delta_emits_nothing() -> None:
     assert bus.published == []
 
 
-async def test_landing_cold_full_sync_never_emits_mail_received() -> None:
-    # The no-firehose rule (#663): a cold cache has no prior state to diff against, so a full
-    # sync's rows must never be reported as "new mail" — the very first `landing()` call.
+async def test_landing_first_ever_full_sync_never_emits_mail_received() -> None:
+    # The no-firehose rule (#663): a mailbox that has never been synced has no prior state to
+    # diff against, so a full sync's rows must never be reported as "new mail". Unchanged by
+    # #796 — the backlog replay applies only where a *previous* successful sync is on record.
     provider = _provider(threads=[_summary("t1", sort_ts=100), _summary("t2", sort_ts=200)])
+    provider.messages_since = AsyncMock(return_value=["m1", "m2"])  # would be a firehose
     bus = _RecordingBus()
     mailbox = await _mailbox_with_bus(provider, bus)
     await mailbox.landing("INBOX")
     assert bus.published == []
+    provider.messages_since.assert_not_awaited()  # never even asked
 
 
-async def test_reconcile_cold_cursor_full_sync_never_emits_mail_received() -> None:
+async def test_reconcile_first_ever_full_sync_never_emits_mail_received() -> None:
     provider = _provider(threads=[_summary("t1", sort_ts=100)])
+    provider.messages_since = AsyncMock(return_value=["m1"])
     bus = _RecordingBus()
     mailbox = await _mailbox_with_bus(provider, bus)
-    # No landing seed → cursor is empty → reconcile falls back to a full sync, same no-firehose
-    # rule as the cold-landing case above.
+    # No landing seed → no sync ever recorded → reconcile falls back to a full sync, same
+    # no-firehose rule as the first-ever landing case above.
     await mailbox.reconcile("INBOX")
     assert bus.published == []
+    provider.messages_since.assert_not_awaited()
 
 
-async def test_reconcile_expired_cursor_resync_never_emits_mail_received() -> None:
+async def test_reconcile_expired_cursor_resync_replays_the_missed_window() -> None:
+    """A *resumed* full sync announces the gap it just papered over (#796).
+
+    This mailbox has been synced before, so an expired cursor means "we lost the thread since a
+    known instant", not "we have never looked". Before the background poller existed this path
+    stayed silent, which is how a restart could swallow every message that arrived while the
+    service was down.
+    """
     provider = _provider(threads=[_summary("t1", sort_ts=100)])
     bus = _RecordingBus()
     mailbox = await _mailbox_with_bus(provider, bus)
-    await mailbox.landing("INBOX")
+    await mailbox.landing("INBOX")  # a first, successful sync — the stamp the replay resumes from
     provider.changed_threads_since = AsyncMock(return_value=None)  # history expired
     provider.get_thread_summary = AsyncMock()
+    provider.messages_since = AsyncMock(return_value=["m1", "m2"])
+    provider.read = AsyncMock(side_effect=_message)
+
     await mailbox.reconcile("INBOX")
+
+    assert {e.dedup_key for e in bus.envelopes_of_type("mail.received")} == {"m1", "m2"}
+    # Bounded by the configured limit, and resumed from an instant, never from "the beginning".
+    assert provider.messages_since.await_args.kwargs["limit"] == DEFAULT_RESUME_BACKLOG_LIMIT
+    assert provider.messages_since.await_args.kwargs["since_ms"] > 0
+
+
+async def test_the_replay_window_starts_at_the_last_successful_sync() -> None:
+    """Not "now", and not the epoch: the stamp of the sync that last succeeded."""
+    provider = _provider(threads=[_summary("t1", sort_ts=100)])
+    bus = _RecordingBus()
+    mailbox = await _mailbox_with_bus(provider, bus)
+    before = datetime.now(UTC)
+    await mailbox.landing("INBOX")
+    after = datetime.now(UTC)
+    provider.changed_threads_since = AsyncMock(return_value=None)
+    provider.get_thread_summary = AsyncMock()
+    provider.messages_since = AsyncMock(return_value=["m1"])
+    provider.read = AsyncMock(side_effect=_message)
+
+    await mailbox.reconcile("INBOX")
+
+    since_ms = provider.messages_since.await_args.kwargs["since_ms"]
+    # A second of slack each way: the stamp is written mid-`landing`, not at either boundary.
+    assert int(before.timestamp() * 1000) - 1000 <= since_ms <= int(after.timestamp() * 1000) + 1000
+
+
+async def test_a_truncated_backlog_still_replays_what_it_can() -> None:
+    """The cap bounds the notification burst, it never turns the replay off."""
+    provider = _provider(threads=[_summary("t1", sort_ts=100)])
+    bus = _RecordingBus()
+    mailbox = await _mailbox_with_bus(provider, bus, resume_backlog_limit=2)
+    await mailbox.landing("INBOX")
+    provider.changed_threads_since = AsyncMock(return_value=None)
+    provider.get_thread_summary = AsyncMock()
+    provider.messages_since = AsyncMock(return_value=["m1", "m2"])
+    provider.read = AsyncMock(side_effect=_message)
+
+    await mailbox.reconcile("INBOX")
+
+    assert provider.messages_since.await_args.kwargs["limit"] == 2
+    assert len(bus.envelopes_of_type("mail.received")) == 2
+
+
+async def test_a_zero_backlog_limit_restores_the_old_silent_resync() -> None:
+    """An operator who wants no replay at all gets no provider call for one, either."""
+    provider = _provider(threads=[_summary("t1", sort_ts=100)])
+    bus = _RecordingBus()
+    mailbox = await _mailbox_with_bus(provider, bus, resume_backlog_limit=0)
+    await mailbox.landing("INBOX")
+    provider.changed_threads_since = AsyncMock(return_value=None)
+    provider.get_thread_summary = AsyncMock()
+    provider.messages_since = AsyncMock(return_value=["m1"])
+
+    await mailbox.reconcile("INBOX")
+
+    assert bus.envelopes_of_type("mail.received") == []
+    provider.messages_since.assert_not_awaited()
+
+
+async def test_a_provider_without_the_backlog_capability_syncs_silently() -> None:
+    """``messages_since`` is a capability gate (ADR-0030): no replay, no crash, no blocked sync."""
+    provider = _provider(threads=[_summary("t1", sort_ts=100)])
+    bus = _RecordingBus()
+    mailbox = await _mailbox_with_bus(provider, bus)
+    await mailbox.landing("INBOX")
+    provider.changed_threads_since = AsyncMock(return_value=None)
+    provider.get_thread_summary = AsyncMock()
+    provider.messages_since = AsyncMock(return_value=[])  # the seam's inherited default
+
+    bundle = await mailbox.reconcile("INBOX")
+
+    assert [t.id for t in bundle.threads] == ["t1"]  # the sync itself still landed
+    assert bus.envelopes_of_type("mail.received") == []
+
+
+async def test_a_failing_backlog_lookup_never_fails_the_full_sync() -> None:
+    """Restoring the mailbox is the full sync's job; announcing the gap is best-effort."""
+    provider = _provider(threads=[_summary("t1", sort_ts=100)])
+    bus = _RecordingBus()
+    mailbox = await _mailbox_with_bus(provider, bus)
+    await mailbox.landing("INBOX")
+    provider.changed_threads_since = AsyncMock(return_value=None)
+    provider.get_thread_summary = AsyncMock()
+    provider.messages_since = AsyncMock(side_effect=httpx.HTTPError("backlog search failed"))
+
+    bundle = await mailbox.reconcile("INBOX")
+
+    assert [t.id for t in bundle.threads] == ["t1"]
     assert bus.envelopes_of_type("mail.received") == []
 
 

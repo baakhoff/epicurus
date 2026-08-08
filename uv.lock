@@ -950,7 +950,7 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.108.0"
+version = "0.110.0"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },
@@ -1033,7 +1033,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-mail"
-version = "0.17.0"
+version = "0.18.0"
 source = { editable = "services/mail" }
 dependencies = [
     { name = "asyncpg" },

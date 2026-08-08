@@ -12,6 +12,22 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A bare weekday name landed the event exactly one week late** (#793) — the `now` built-in
+  handed the model the current date, time and weekday *name*, leaving weekday-to-date
+  conversion as head arithmetic: count forward from today's weekday, carry the month or year
+  boundary, hope. Nothing anywhere downstream could catch a slip, because the calendar accepts
+  any well-formed ISO date — a date a week out is a perfectly valid event, not an error — so
+  the failure was silent and self-confident, and "Wednesday" reliably meant the Wednesday after
+  the one that was asked for. `now` resolves it in the tool now rather than describing it: the
+  payload gains `today` and `tomorrow` as ISO dates, plus an `upcoming` map from every weekday
+  name to its next date, strictly in the future — asked on a Friday, `upcoming.Friday` is next
+  Friday, not today. All three are computed from the same zone-resolved instant the rest of the
+  payload already uses, so the operator's configured timezone decides what "today" is rather
+  than UTC, the same trap #559 closed for calendar read paths. The tool description now tells
+  the model to take `upcoming` verbatim and never to count days itself, and to ask rather than
+  guess when phrasing like "next Monday" is genuinely ambiguous *and* the difference matters.
+  `core-app` 0.108.0→0.109.0 (MINOR).
+
 - **Cold-switching documents in the editor could save the outgoing note's content over the
   newly-opened one — data loss** (#781) — every `EditorView` host (Notes, Knowledge, the chat
   document pane) shares the same Preview surface: Milkdown's Crepe (#377), deliberately

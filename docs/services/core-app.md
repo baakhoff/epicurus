@@ -333,10 +333,18 @@ dispatched in-process (no module round-trip). They're registered on the `McpHost
 per-tool disable filter as module tools.
 
 - **`now(timezone?)`** — the current date/time. The agent has no inherent clock, so it
-  calls this for anything date/time-relative ("tomorrow", "at 19:00"). Returns the time
-  in the operator's configured timezone (or the `timezone` argument) plus UTC and the
-  weekday; when a connected calendar uses a *different* timezone, that is reported with a
-  note so events land in the intended zone. The configured timezone is read from:
+  calls this for anything date/time-relative ("tomorrow", "at 19:00", a bare weekday name
+  like "monday"). Returns the time in the operator's configured timezone (or the
+  `timezone` argument) plus UTC and the weekday; when a connected calendar uses a
+  *different* timezone, that is reported with a note so events land in the intended zone.
+  The payload also resolves bare weekday names to dates (#793), so the model never does
+  the arithmetic itself: `today`, `tomorrow`, and `upcoming` — a map from each weekday
+  name to its next date **strictly in the future** (asked on a Friday, `upcoming.Friday`
+  is next Friday, not today) — all computed from the same zone-resolved instant as the
+  rest of the payload, so the operator's zone (not UTC) decides what "today" is, the same
+  care #559 took for calendar read paths. The tool description tells the model to use
+  `upcoming` verbatim and to `ask_user` rather than guess when phrasing like "next Monday"
+  is genuinely ambiguous. The configured timezone is read from:
 
 | Method · Path | Purpose |
 | --- | --- |

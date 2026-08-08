@@ -72,6 +72,7 @@ from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.document_sinks import make_kb_sink, make_notes_sink
 from epicurus_core_app.automations.feed import RunFeed
 from epicurus_core_app.automations.migration import migrate_scheduled_turns
+from epicurus_core_app.automations.push_sink import make_push_sink
 from epicurus_core_app.automations.review import (
     PROPOSE_AUTOMATION_SPEC,
     AutomationProposalStore,
@@ -376,9 +377,11 @@ def create_app() -> FastAPI:
     # Which chat session each chat-sink automation writes into (#672) — the chat list reads this
     # to badge automation sessions and group a per-run automation's chats under it.
     automation_sessions = AutomationSessionStore(engine)
-    # The sink seam. Push/chat/notes/kb are companion issues, so nothing is registered yet:
-    # a configured-but-unregistered sink is recorded as unavailable and the run's output
-    # still lands on the ledger, which is what makes the degradation graceful (ADR-0105).
+    # The sink seam (ADR-0105). `chat` is realized at turn time by the runner itself and is
+    # never registered here; push/notes/kb are registered below, once their dependencies
+    # (`push_service`, `registry`) exist. A configured-but-unregistered sink still degrades
+    # gracefully — recorded as unavailable, the run's output still lands on the ledger — which
+    # matters again the day a fifth sink ships ahead of its own registration.
     automation_sinks = SinkDispatcher()
     # Named playbooks (ADR-0093 §3): independent, enable-able blocks of guidance beside the base
     # prompt, versioned ADR-0046-style. Composed into the prompt by the instructions store below.
@@ -657,8 +660,8 @@ def create_app() -> FastAPI:
     automation_run_feed = RunFeed(automations)
     # Notes/KB sinks (#672): a run's output routed into a module document through the *existing*
     # document API (registry.save_page_doc), never a second write path (the #541 rule). The chat
-    # sink is turn-time (handled in the runner), and push is its own issue — neither is registered
-    # here. Timezone-aware so a `{date}` in a target path is the operator's local date.
+    # sink is turn-time (handled in the runner) and is never registered here. Timezone-aware so a
+    # `{date}` in a target path is the operator's local date.
     automation_sinks.register(
         "notes",
         make_notes_sink(registry, lambda: timezone_prefs.get_timezone(settings.default_tenant_id)),
@@ -667,6 +670,9 @@ def create_app() -> FastAPI:
         "kb",
         make_kb_sink(registry, lambda: timezone_prefs.get_timezone(settings.default_tenant_id)),
     )
+    # Push sink (#723): goes through push_service.notify() itself, so quiet hours / the rate
+    # cap / category+automation toggles all apply exactly as they do for any other caller.
+    automation_sinks.register("push", make_push_sink(push_service))
     automation_runner = AutomationRunner(
         automations,
         automation_queue,

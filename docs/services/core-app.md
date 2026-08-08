@@ -1079,15 +1079,22 @@ windows) and firing schedule triggers; it **replaces** the scheduled-turns loop.
 `AutomationRunner` runs one automation: an agent turn, then a deterministic sink fan-out,
 then a ledger entry — always a ledger entry.
 
-**The sinks (#672).** The **chat** sink is *turn-time*: the run persists into a session — so a
+**The sinks (#672, #723).** The **chat** sink is *turn-time*: the run persists into a session — so a
 rolling chat is reply-able and the next run sees the reply — **only** when chat is configured,
 never otherwise (the owner rule: an unchecked chat sink makes zero sessions). Its session→automation
 mapping (`automation_sessions`) is what badges and groups automation chats in the list; the post-run
 dispatcher therefore **skips** chat and the runner records it fired. The **notes**/**kb** sinks route
 a run's output into a module document through the *existing* `ModuleRegistry.save_page_doc` (the #541
 no-second-write-path rule), at a per-automation `DocumentTarget` (`{path_pattern, mode}`), recording
-an `EntityRef` on the run's `artifacts` so the runs feed links what was written. **push** stays its
-own issue.
+an `EntityRef` on the run's `artifacts` so the runs feed links what was written. The **push** sink
+(`automations/push_sink.py`, #723) closes the last gap the seam left open: it calls
+[`PushService.notify`](#push-notifications-adr-0102) under the `"automation"` category (with
+`automation_id`, so a per-automation override can silence just one), title the automation's own
+name, body the run's raw output — quiet hours, the rate cap, and the push/center toggles all apply
+exactly as for any other caller. When `notify()`'s `center` toggle wrote a notification-center row,
+the sink records its id as an `EntityRef` (`module="core"`, `kind="notification"`) on the run's
+`artifacts`, the same field notes/kb already populate — so a `sinks=["push"]` template (all ten
+#717 shipped with) now delivers something visible instead of silently completing.
 
 **Agent-gated delivery (#706).** The sink fan-out above is deterministic by default — but a
 per-automation toggle (`agent_gated_delivery`, off by default) lets the run's own turn decide.
@@ -1141,22 +1148,26 @@ path but new work creates an automation.
 ### Push notifications (ADR-0102)
 
 `PushService.notify(tenant, category=..., title=..., body=...)` (`push/service.py`) is the
-core-internal send path a future caller — the automations engine's push sink, a
-core-originated system notice — calls in-process (#670). Every call first records a
-notification-center row (`notifications.py`) if the category/automation's `center` toggle is
-on, regardless of what push delivery does below (#671, ADR-0102 §4). Push delivery then
-resolves, in order: the effective push toggle (off skips delivery entirely), quiet hours in the
-tenant's timezone (ADR-0039 — queues for a digest instead of sending), and an in-memory
-per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`, single-instance v1 — the same disposable-cache
-trade the live-run registry makes, ADR-0055). Delivery fans out to every device via
-VAPID-signed webpush (RFC 8291/8292), pruning any subscription the push service reports Gone
-(404/410) as expected churn (uninstalled PWA, cleared site data), not an error.
+core-internal send path a category-based caller uses in-process (#670) — today, the settings
+UI's test button and the [automations engine's push sink](#automations-engine-adr-0105)
+(#723). Every call first records a notification-center row (`notifications.py`) if the
+category/automation's `center` toggle is on, regardless of what push delivery does below
+(#671, ADR-0102 §4); `NotifyResult.notification_id` carries that row's id back to the caller
+(`None` when `center` was off), so a caller like the push sink can build an `EntityRef`
+without a second lookup. Push delivery then resolves, in order: the effective push toggle (off
+skips delivery entirely), quiet hours in the tenant's timezone (ADR-0039 — queues for a digest
+instead of sending), and an in-memory per-tenant rate cap (`PUSH_RATE_CAP_PER_HOUR`,
+single-instance v1 — the same disposable-cache trade the live-run registry makes, ADR-0055).
+Delivery fans out to every device via VAPID-signed webpush (RFC 8291/8292) — the outgoing
+payload's `body` is capped at 500 characters (an automation's full report should not be able
+to blow a push service's own size ceiling), independent of the untruncated text already
+written to the notification-center row above — pruning any subscription the push service
+reports Gone (404/410) as expected churn (uninstalled PWA, cleared site data), not an error.
 
 `/platform/v1/push/*` (`push/routes.py`) is the subscription/preference surface the PWA's
 service worker and Settings page drive: `GET /vapid-public-key`, `GET`/`POST`/`DELETE
 /subscriptions[/{sub_id}]`, `GET`/`PUT /prefs`, `GET`/`PUT /event-subscriptions` (below), and
-`POST /test` (the settings UI's "send test notification" button — the only caller of
-category-based `notify` today; the automations engine's push sink is still deferred).
+`POST /test` (the settings UI's "send test notification" button, category `"system"`).
 `/platform/v1/notifications/*` (`notifications_routes.py`) is the notification-center half:
 `GET ""` (list), `GET /unread-count`, `POST /{id}/read`, `POST /read-all`. See
 [the reference page](../reference/notifications.md) for the full contract and the web-side

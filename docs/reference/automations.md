@@ -209,7 +209,19 @@ cost the others.
   (`create` overwrites, `append` accretes). Each write records an `EntityRef` on the run's ledger
   entry (`artifacts`), so the [runs feed](#the-run-ledger) links what was produced. A notes/kb sink
   with no target is a **400** at write time, and a runtime miss degrades to a recorded failure.
-- **`push`** — its own issue; still unregistered here, so it records to the ledger only.
+- **`push` (#723)** — deterministic post-run delivery through
+  [`PushService.notify`](notifications.md#pushservicenotify-core-internal): quiet hours, the
+  tenant-wide rate cap, and the `"automation"` category's push/center toggle (or a
+  per-automation override, `PushPrefs.automation_overrides`) all apply exactly as they do for
+  any other caller — the sink never bypasses them. Title is the automation's own name; body is
+  the run's raw output (the notification-center row keeps it in full — only the outgoing push
+  payload is shortened for wire limits). When the category's `center` toggle is on, `notify()`
+  hands back the center row's id and the sink records it as an `EntityRef` on the run's
+  `artifacts` (`module="core"`, `kind="notification"`) — the same ledger field the notes/kb
+  sinks use, so a run's push shows up in the [runs feed](#the-run-ledger) too. Deep-links to
+  `/observability?tab=runs&automation=<id>`. See
+  [notifications → Automations push sink](notifications.md#automations-push-sink-723) for the
+  full contract.
 
 ### Agent-gated delivery (#706)
 
@@ -305,7 +317,7 @@ runner's `on_recorded` hook the moment an entry is written, skips included.
 | `duration_ms` · `outcome` · `error` | `ok` · `error` · `skipped` · `quiet` (#706). |
 | `output` | The turn's answer — recorded even when no sink fires. |
 | `sinks_fired` | Which sinks actually delivered. |
-| `artifacts` | `EntityRef`s for documents the notes/kb sinks produced (#672) — the feed links them. |
+| `artifacts` | `EntityRef`s the notes/kb/push sinks produced (#672, #723) — a document written or a notification recorded — so the feed links them. |
 | `quiet_reason` | The model's own reason for an `outcome == "quiet"` run ([agent-gated delivery](#agent-gated-delivery-706)); `null` otherwise. |
 
 Gateway usage carries the same dual attribution: `UsageEvent.automation_id` alongside

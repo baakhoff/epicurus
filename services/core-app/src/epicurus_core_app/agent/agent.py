@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from collections.abc import AsyncIterator, Coroutine
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -40,6 +40,11 @@ from epicurus_core_app.agent.activity import (
 )
 from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
 from epicurus_core_app.agent.builtins import ASK_USER_TOOL
+from epicurus_core_app.agent.doc_preview import (
+    DocumentPreviewTracker,
+    DocumentToolLookup,
+    PreviewFrame,
+)
 from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
@@ -271,10 +276,19 @@ def _tool_detail(arguments: dict[str, Any]) -> str | None:
     return rendered[:_TOOL_DETAIL_CAP]
 
 
-#: Resolves a tool name to ``(module_name, annotation)`` when the tool declares
-#: ``writes_document``, else ``None`` (#541, ADR-0100). Backed by the module registry's
-#: manifests; injected so the agent loop needn't know the registry exists.
-DocumentToolLookup = Callable[[str], Awaitable[tuple[str, WritesDocument] | None]]
+def _preview_event(frame: PreviewFrame) -> AgentEvent:
+    """One ``doc_preview`` SSE event for a slice of a document being typed (#654, ADR-0121).
+
+    ``text`` is the delta; ``preview`` names the document it belongs to. ``target``/``title`` are
+    omitted until their argument has fully arrived — the client merges what it is given, so a
+    header fills in as the model gets there rather than flickering through half a title.
+    """
+    meta: dict[str, Any] = {"module": frame.module}
+    if frame.target:
+        meta["target"] = frame.target
+    if frame.title:
+        meta["title"] = frame.title
+    return AgentEvent(type="doc_preview", tool=frame.tool, text=frame.text, preview=meta)
 
 
 def _document_payload(
@@ -561,9 +575,15 @@ class AgentEvent(BaseModel):
     approved/rejected via ``POST /runs/{run_id}/approval``. Reusing the existing event type
     (rather than a new one) keeps a stale, service-worker-cached PWA parsing the stream — every
     new field is additive (ADR-0055).
+
+    ``doc_preview`` (#654, ADR-0121) carries a slice of a document *as the model types it*: the
+    coalesced ``text`` delta plus the ``preview`` metadata naming which document it belongs to.
+    It is the one event kind that is purely ephemeral — see the field's own note.
     """
 
-    type: str  # "delta" | "tool" | "done" | "error" | "readiness" | "awaiting_input"
+    # "readiness" | "delta" | "thinking" | "tool" | "doc_preview" | "awaiting_input" |
+    # "done" | "error" | "gone" (the last emitted by the re-attach route, not the loop).
+    type: str
     text: str | None = None
     tool: str | None = None
     status: str | None = None
@@ -589,6 +609,13 @@ class AgentEvent(BaseModel):
     # off the persisted ``ToolStep``: a document body is unbounded, and ADR-0041's activity
     # caps are not the place to store one.
     document: dict[str, Any] | None = None
+    # ``doc_preview`` events only (#654, ADR-0121): which document the ``text`` delta belongs to —
+    # ``{module, target?, title?}``, repeated on every frame so each one stands alone. The body
+    # itself streams in ``text``, one coalesced delta per frame, and the frames concatenate to
+    # what the model typed. The same ADR-0041 discipline as ``document`` above, only more so: a
+    # preview reads an *unfinished* call, so it never reaches the timeline and the authoritative
+    # ``tool`` frame overwrites whatever it drew.
+    preview: dict[str, Any] | None = None
 
 
 def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -894,6 +921,9 @@ class Agent:
             for _ in range(max_steps):
                 result: ChatResult | None = None
                 answer_before = len(parts)
+                # One tracker per gateway call: fragment slots are only unique within a stream,
+                # and a fresh tracker is how this step forgets the last one's calls (#654).
+                previews = DocumentPreviewTracker(self._documents)
                 async for event in self._gateway.stream_chat(
                     convo, model=model, tools=offer, tenant_id=tenant_id
                 ):
@@ -904,8 +934,17 @@ class Agent:
                         reasoned = True
                         append_thinking(timeline, event.reasoning)
                         yield AgentEvent(type="thinking", text=event.reasoning)
+                    if event.tool_call is not None:
+                        # The document typewriter (#654, ADR-0121). Coalesced by the tracker, so
+                        # a long write can't crowd the deltas above off this same stream, and
+                        # ephemeral: nothing here is appended to `timeline`.
+                        frame = await previews.feed(event.tool_call)
+                        if frame is not None:
+                            yield _preview_event(frame)
                     if event.result is not None:
                         result = event.result
+                for frame in previews.flush():  # the last window's tail, never withheld
+                    yield _preview_event(frame)
                 if result is None or not result.tool_calls:
                     # The model answered (text streamed) or it produced nothing. If nothing — a
                     # reasoning model that thought but never answered — nudge it once and retry,

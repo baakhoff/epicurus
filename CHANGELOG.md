@@ -12,6 +12,62 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
+  `writes_document` call *lands*, by which point the model has already written the whole body;
+  v2 shows it arriving. The blocker was never the pane: tool-call fragments were assembled
+  **inside** `LlmGateway.stream_chat` and surfaced only on the final `result`, so the agent loop
+  could not observe a call being written at all. So this starts with a gateway streaming-contract
+  change — a new optional `StreamEvent.tool_call` carrying `ToolCallFragment{slot, id?, name?,
+  arguments?}`, emitted as each fragment arrives. It is strictly additive: the accumulation and
+  the final `result` are untouched, and `slot` is the accumulator's *own* slot rather than a
+  second guess at it, so #324's hard-won index discipline (OpenAI shares an `index` across a
+  call's fragments; LiteLLM leaves it unset for Ollama's complete-per-fragment calls, and
+  honouring `index or 0` once fused two calls into invalid JSON that crashed the next turn on
+  replay) is inherited rather than duplicated — `arguments` is the fragment's delta, `id`/`name`
+  are the call's values as resolved so far, and the whole-dict provider flavour reports no delta
+  because it is replaced rather than appended. Reading the body out of that stream needs a value
+  extracted from JSON that is still an unterminated fragment, which `json.loads` can only reject:
+  `agent/partial_json.py` is a hand-rolled resumable scanner rather than a tolerant-parser
+  dependency, because the job is narrower than "parse partial JSON" and its real failure modes
+  are the ones a general parser does not solve for us — it hands out the *delta* since last time
+  rather than re-decoding the document per fragment, it matches only top-level keys with a real
+  scanner (so `{"title": "content", "content": "real"}` cannot confuse the two), and it holds back
+  anything a fragment boundary cut in half: a `\` split from what it escapes, a `\uXXXX` split
+  from its digits, a surrogate pair split down the middle. That last one is not cosmetic — a lone
+  surrogate lives happily in a Python `str` and then fails to encode into the SSE frame carrying
+  it, so the pane would have killed its own stream. Malformed JSON marks the reader broken and
+  keeps what it decoded; a preview is never worth an exception in a turn. On top sits the throttle,
+  the answer to #541's "a large document must never starve the chat deltas": since the document
+  and the answer share one stream, what protects the answer is bounding the document, so a
+  `doc_preview` frame goes out at most every **100 ms** per call (`PREVIEW_INTERVAL_S`) or sooner
+  once **4096** characters have piled up (`PREVIEW_MAX_CHARS`) — the interval bounds the frame
+  rate at ~10/s whatever the model's token rate, the cap bounds frame size, the first slice goes
+  out immediately so the pane appears at once, and the tracker is flushed when the gateway stream
+  ends so the tail is never withheld. The new `doc_preview` SSE kind is the first top-level kind
+  added since the protocol settled, and the only **purely ephemeral** one: `{tool, text, preview}`,
+  where `text` is the coalesced body delta and `preview` is `{module, target?, title?}`, repeated
+  on every frame so a frame stands alone. It never reaches the timeline — live or persisted — for
+  the same reason v1's finished `document` payload doesn't (ADR-0041), only more so, because a
+  preview reads an *unfinished* call; `target`/`title` are reported only once their argument has
+  closed, so the header fills in instead of flickering through a half-typed title. **Re-attach
+  needed a decision and got the smaller one:** previews ride the same seq-tagged live-run buffer
+  as every other frame, so `GET /runs/{id}/stream?after_seq=N` replays them in order — from 0 a
+  reload rebuilds the body from its deltas, from N a resume gets only what it missed. Holding the
+  latest coalesced snapshot and re-sending *that* would make the run carry document state it has
+  no other reason to keep, and would hand a resuming client a prefix it already has. On the web
+  the pane opens on the first character the model types and steers on every one after it: the
+  store concatenates deltas into `liveDocument` (`streaming: true`), a caret marks text still
+  arriving, and the panel's `replace(payload, title)` finally has its first caller (#659's
+  affordance) so a title that finishes typing late reaches the header instead of leaving it
+  reading "Document" for the whole write. The hand-off is v1's settle path unchanged and is what
+  keeps ADR-0101's promise that the pane never lies about whether a write happened: the following
+  `tool` frame carries the arguments as actually *parsed* and replaces the previewed body
+  wholesale, so a preview that drifted cannot outlive the real thing. The pane stays **read-only**
+  from the first previewed character through the settle, so #541's edit/write conflict — the one
+  v1 sidestepped structurally — stays impossible rather than becoming live; closing the pane
+  mid-typewriter stays closed for the rest of that write. `core-app` 0.113.0→0.114.0 (MINOR),
+  `web` 0.136.0→0.137.0 (MINOR).
+
 - **Send it any link and the agent can actually read it** (#739) — `web_search` could *find* a
   page; nothing in the platform could *open* one. No URL-fetch tool existed anywhere, in
   websearch or in the agent's built-ins, so "save the substance of this article to my knowledge

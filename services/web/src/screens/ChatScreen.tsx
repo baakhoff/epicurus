@@ -1113,16 +1113,23 @@ export function ChatScreen() {
   // rather than being re-opened, and only a write to a *different* document opens it again.
   // Best-effort throughout: the pane never gates the turn. A draft review outranks it (that
   // pane is waiting on the user), so it yields while one is up.
+  //
+  // The typewriter (#654, ADR-0121) rides this unchanged: every `doc_preview` frame is a later
+  // frame of the same write, so the pane opens on the first character the model types and
+  // steers on each one after it. The one thing it *does* need is the title — that argument may
+  // finish typing long after the pane opened, so pass it on replace (#659's affordance, whose
+  // first adopter this is) or the header would keep saying "Document" for the whole write.
   const liveDocument = chat.liveDocument;
   useEffect(() => {
     const panel = usePanel.getState();
     const show = liveDocument !== null && !liveDocument.dismissed && !chat.awaitingDraft;
     if (show) {
+      const title = liveDocument.title || "Document";
       if (panelTop !== "document") {
         panel.close();
-        panel.open("document", liveDocument, liveDocument.title || "Document");
+        panel.open("document", liveDocument, title);
       } else {
-        panel.replace(liveDocument); // same pane, later frame of the same write
+        panel.replace(liveDocument, title); // same pane, later frame of the same write
       }
     } else if (panelTop === "document") {
       panel.back();

@@ -169,6 +169,11 @@ archetype hosted in a pane — so the artifact is visible while it is written an
 moment it lands. Generic by design: the shell reads the annotation, never the module's name
 (ADR-0018/0019).
 
+The same three names also drive the **typewriter** (#654, ADR-0121): the core reads
+`content_arg`'s value incrementally out of the call's still-unfinished JSON and streams it to the
+pane as the model types it, filling in `target_arg`/`title_arg` once each has finished arriving.
+Nothing to adopt — a tool already carrying this annotation gets it.
+
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `content_arg` | `str` | — | **required** — the argument holding the document body |

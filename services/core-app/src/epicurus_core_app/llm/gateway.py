@@ -38,6 +38,7 @@ from epicurus_core_app.llm.models import (
     ModelInfo,
     ProviderInfo,
     StreamEvent,
+    ToolCallFragment,
     UsageEvent,
 )
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
@@ -526,8 +527,11 @@ class LlmGateway:
         """Stream a completion: ``delta`` events per token, then one ``result`` event.
 
         Tool-call fragments are assembled across chunks, so the final event's
-        ``result.tool_calls`` is complete — the agent loop streams every round.
-        Uses the first available candidate (no mid-stream fallback).
+        ``result.tool_calls`` is complete — the agent loop streams every round. Each fragment
+        is *also* surfaced as it arrives, as a ``tool_call`` event (#654, ADR-0121), for a
+        consumer that wants to watch a call being written; the assembly and the final
+        ``result`` are untouched by that, so ignoring those events is the old behaviour
+        exactly. Uses the first available candidate (no mid-stream fallback).
         """
         resolved = model or await self.effective_default(tenant_id)
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
@@ -588,15 +592,31 @@ class LlmGateway:
                 )
                 if fragment.id:
                     entry["id"] = fragment.id
-                if function is None:
-                    continue
-                if name:
-                    entry["function"]["name"] = name
-                arguments = function.arguments
-                if isinstance(arguments, str):
-                    entry["function"]["arguments"] += arguments
-                elif arguments is not None:  # some providers send whole args as a dict
-                    entry["function"]["arguments"] = arguments
+                argument_delta: str | None = None
+                if function is not None:
+                    if name:
+                        entry["function"]["name"] = name
+                    arguments = function.arguments
+                    if isinstance(arguments, str):
+                        entry["function"]["arguments"] += arguments
+                        argument_delta = arguments or None
+                    elif arguments is not None:  # some providers send whole args as a dict
+                        # Replaced, not appended — so there is no *delta* to report; such a call
+                        # only ever surfaces whole, on the final result.
+                        entry["function"]["arguments"] = arguments
+                # Surface the fragment as it arrives (#654), reusing the slot the accumulator
+                # just chose rather than re-deriving it — the index discipline above is the
+                # single source of truth for "which call is this". A fragment that carried
+                # nothing new (no id, no name, no argument text) is not an event.
+                if fragment.id or name or argument_delta:
+                    yield StreamEvent(
+                        tool_call=ToolCallFragment(
+                            slot=slot,
+                            id=entry["id"] or None,
+                            name=entry["function"]["name"] or None,
+                            arguments=argument_delta,
+                        )
+                    )
         # Release any tail the splitter was holding back in case it began a <think> tag.
         answer_tail, think_tail = splitter.flush()
         if think_tail:

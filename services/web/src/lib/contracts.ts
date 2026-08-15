@@ -490,10 +490,25 @@ export const WrittenDocument = z.object({
 });
 export type WrittenDocument = z.infer<typeof WrittenDocument>;
 
+/** Which document a `doc_preview` delta belongs to (#654, ADR-0121).
+ *
+ *  The body itself is not here — it streams in the event's `text`, one coalesced delta per
+ *  frame, and the frames concatenate to what the model typed. This is only the identity, and it
+ *  repeats on every frame so a client that re-attaches mid-write needs no earlier frame to make
+ *  sense of the one it gets. `target`/`title` appear once their argument has fully arrived, so a
+ *  header fills in rather than flickering through a half-typed title. */
+export const DocumentPreview = z.object({
+  module: z.string(),
+  target: z.string().nullish(),
+  title: z.string().nullish(),
+});
+export type DocumentPreview = z.infer<typeof DocumentPreview>;
+
 export const AgentEvent = z.object({
   // `thinking` carries a chain-of-thought token, shown in the activity timeline (ADR-0041).
   // `awaiting_input` ends the stream when the model asks a question (ADR-0053); `gone` is the
-  // re-attach endpoint's sentinel for a run that has finished and been reaped (#376).
+  // re-attach endpoint's sentinel for a run that has finished and been reaped (#376);
+  // `doc_preview` is a slice of a document as the model types it (#654, ADR-0121).
   type: z.enum([
     "delta",
     "tool",
@@ -501,6 +516,7 @@ export const AgentEvent = z.object({
     "error",
     "readiness",
     "thinking",
+    "doc_preview",
     "awaiting_input",
     "gone",
   ]),
@@ -528,6 +544,10 @@ export const AgentEvent = z.object({
   // ADR-0100/0101): what the call is writing, so the shell can open the document pane. Rides
   // both the `running` and terminal frames. Additive, like the draft fields above.
   document: WrittenDocument.nullish(),
+  // Present on a `doc_preview` event (#654, ADR-0121): which document the `text` delta belongs
+  // to. Ephemeral — a preview reads an unfinished call, so it is never persisted and the `tool`
+  // frame's `document` above overwrites whatever it drew.
+  preview: DocumentPreview.nullish(),
 });
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

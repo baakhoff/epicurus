@@ -23,8 +23,39 @@ __all__ = [
     "ProviderInfo",
     "Role",
     "StreamEvent",
+    "ToolCallFragment",
     "UsageEvent",
 ]
+
+
+class ToolCallFragment(BaseModel):
+    """One increment of a tool call, as the provider streams it (#654).
+
+    The gateway has always assembled tool-call fragments internally and surfaced them only on
+    the final ``result``; a consumer that wants to watch a call *being written* — the document
+    pane's typewriter (ADR-0121) — needs them as they arrive. This is that view, and it is
+    strictly additive: the accumulation and the final ``result`` are unchanged, so a consumer
+    that ignores ``StreamEvent.tool_call`` behaves exactly as before.
+
+    ``slot`` is the gateway's own accumulator slot — the *same* number the assembly used, not a
+    second guess at it, so the hard-won index/slot discipline (#324: OpenAI shares an ``index``
+    across a call's fragments, LiteLLM leaves it unset for Ollama's complete-per-fragment calls)
+    is honoured here for free. Fragments of one call always carry one ``slot``, and two calls
+    never share one within a stream.
+
+    ``id`` and ``name`` are the call's values **as known so far** (the accumulator resolves each
+    once, so a continuation fragment that carried neither still reports both) — a consumer can
+    therefore act on the tool's identity from the first fragment that names it, without tracking
+    state of its own. ``arguments`` is the opposite: strictly the *delta* this fragment added to
+    the arguments JSON, never the accumulation. It is ``None`` when the fragment added no
+    argument text, including the provider flavour that sends the whole argument object as a dict
+    (nothing incremental to report — such a call has no typewriter, only the final ``result``).
+    """
+
+    slot: int
+    id: str | None = None
+    name: str | None = None
+    arguments: str | None = None
 
 
 class StreamEvent(BaseModel):
@@ -32,12 +63,14 @@ class StreamEvent(BaseModel):
 
     ``delta`` events carry a content token; ``reasoning`` events carry a chain-of-thought
     token (kept separate so the UI shows thinking without polluting the answer, ADR-0041);
-    the final event carries the assembled ``result`` (full content, reasoning, and any tool
-    calls accumulated from the stream).
+    ``tool_call`` events carry a partial tool call as it streams (#654, ADR-0121); the final
+    event carries the assembled ``result`` (full content, reasoning, and any tool calls
+    accumulated from the stream).
     """
 
     delta: str | None = None
     reasoning: str | None = None
+    tool_call: ToolCallFragment | None = None
     result: ChatResult | None = None
 
 

@@ -81,6 +81,20 @@ async def test_default_encodes_the_source_grounding_ladder() -> None:
     assert "guess" in text  # the never-guess rule
 
 
+async def test_default_encodes_the_link_rung_of_the_ladder() -> None:
+    """#739 adds a rung to #703's ladder: a link in the message is read, not guessed at.
+
+    Pins the policy — read before acting, keep the source URL and retrieval date on anything
+    filed, and say what the link did *not* yield — rather than the prose.
+    """
+    text = DEFAULT_AGENT_INSTRUCTIONS.lower()
+    assert "read the link itself before you act on it" in text
+    assert "source url and the date you retrieved it" in text
+    assert "login wall" in text
+    # The rung sits inside the grounding ladder, after the web-search rung.
+    assert text.index("search the web") < text.index("read the link itself")
+
+
 async def test_default_encodes_verify_before_mutate() -> None:
     """#742: an entity known only from earlier turns must be re-checked before a mutating
     call relies on it — pins the policy, not the prose (mirrors #703's ladder test)."""

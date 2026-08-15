@@ -5,6 +5,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 from epicurus_core.contracts import ToolEnvelope
+from epicurus_websearch.ingest import IngestResult, LinkIngestor
+from epicurus_websearch.refs import decode_source_ref
 from epicurus_websearch.searxng import SearchResult, SearXNGClient
 from epicurus_websearch.service import build_module
 
@@ -111,6 +113,7 @@ async def test_manifest_declares_tool_ui_and_resolver() -> None:
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
     assert "web_search" in tool_names
+    assert "link_ingest" in tool_names
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
     assert manifest.ui.icon == "globe"
@@ -149,3 +152,109 @@ async def test_custom_num_results_overrides_default() -> None:
     module = build_module(client, max_results=5)
     await module.call_tool("web_search", {"query": "q", "num_results": 2})
     client.search.assert_called_once_with("q", 2)  # type: ignore[attr-defined]
+
+
+# ── link_ingest (#739) ─────────────────────────────────────────────────────────────────
+
+
+def _stub_ingestor(result: IngestResult) -> LinkIngestor:
+    """A LinkIngestor that returns *result* — the real one is covered in test_ingest.py."""
+    ingestor = AsyncMock(spec=LinkIngestor)
+    ingestor.ingest = AsyncMock(return_value=result)
+    return ingestor  # type: ignore[return-value]
+
+
+ARTICLE_RESULT = IngestResult(
+    kind="article",
+    url="https://example.com/a/tidal",
+    title="Tidal turbines feed a village",
+    site="The Coastal Review",
+    author="Marit Halvorsen",
+    published="2025-11-14",
+    text="A five-turbine array ran a village of 340 through the winter.",
+    retrieved_at="2026-08-15",
+)
+
+
+async def test_link_ingest_returns_the_extract_in_the_envelope_text() -> None:
+    module = build_module(_make_client([]), ingestor=_stub_ingestor(ARTICLE_RESULT))
+    content, _ = await module.call_tool("link_ingest", {"url": "https://example.com/a/tidal"})
+    text = _parse_envelope(content).text
+    assert "Tidal turbines feed a village" in text
+    assert "Marit Halvorsen" in text
+    assert "source: https://example.com/a/tidal" in text
+    assert "A five-turbine array" in text
+
+
+async def test_link_ingest_emits_one_source_entity_ref() -> None:
+    module = build_module(_make_client([]), ingestor=_stub_ingestor(ARTICLE_RESULT))
+    content, _ = await module.call_tool("link_ingest", {"url": "https://example.com/a/tidal"})
+    (ref,) = _parse_envelope(content).entity_refs
+    assert ref.module == "websearch"
+    assert ref.kind == "source"
+    assert ref.title == "Tidal turbines feed a village"
+    decoded = decode_source_ref(ref.ref_id)
+    assert decoded["url"] == "https://example.com/a/tidal"
+    assert decoded["kind"] == "article"
+    assert decoded["site"] == "The Coastal Review"
+
+
+async def test_link_ingest_surfaces_an_unreachable_link_as_a_normal_result() -> None:
+    """#739's honesty rule: a refusal is a well-formed answer, never a failed turn."""
+    unreachable = IngestResult(
+        kind="unreachable",
+        url="http://127.0.0.1:8080/health",
+        ok=False,
+        notes=["refused: 127.0.0.1 is a private or reserved address"],
+    )
+    module = build_module(_make_client([]), ingestor=_stub_ingestor(unreachable))
+    content, _ = await module.call_tool("link_ingest", {"url": "http://127.0.0.1:8080/health"})
+    envelope = _parse_envelope(content)
+    assert "private or reserved address" in envelope.text
+    assert len(envelope.entity_refs) == 1
+
+
+async def test_link_ingest_without_an_ingestor_says_so_rather_than_failing() -> None:
+    module = build_module(_make_client([]))
+    content, _ = await module.call_tool("link_ingest", {"url": "https://example.com/"})
+    envelope = _parse_envelope(content)
+    assert "not configured" in envelope.text
+    assert envelope.entity_refs == []
+
+
+async def test_manifest_link_ingest_describes_its_url_param() -> None:
+    module = build_module(_make_client([]))
+    manifest = await module.manifest()
+    (tool,) = [t for t in manifest.tools if t.name == "link_ingest"]
+    assert "url" in tool.input_schema.get("properties", {})
+
+
+async def test_manifest_link_ingest_description_steers_and_states_the_limits() -> None:
+    """The docstring is the agent's primary lever (McpHost.discover reads it) — pin the policy.
+
+    Anchors on the load-bearing phrases so the prose can be rewritten, but a rewrite cannot
+    quietly drop the reach-for-it cue, the honesty rules, or the hand-off to knowledge.
+    """
+    module = build_module(_make_client([]))
+    manifest = await module.manifest()
+    (tool,) = [t for t in manifest.tools if t.name == "link_ingest"]
+    description = (tool.description or "").lower()
+    assert "reach for this" in description
+    assert "snippet is not the page" in description  # read it before summarising
+    assert "never signs in" in description  # no login walls, no credentials
+    assert "knowledge_propose_edit" in description  # the agent's next step, not ours
+    assert "not transcribed yet" in description  # ASR is out of scope, stated to the model
+
+
+async def test_manifest_version_matches_the_packaged_version() -> None:
+    """The hardcoded manifest version drifted from ``pyproject.toml`` once already (0.2.1 vs
+    0.2.2) — read the declared version rather than the installed metadata, which a stale
+    editable install can lie about."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    module = build_module(_make_client([]))
+    manifest = await module.manifest()
+    assert manifest.version == declared

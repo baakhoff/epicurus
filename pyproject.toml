@@ -77,6 +77,11 @@ ignore_missing_imports = true
 module = ["aioboto3.*", "aiobotocore.*", "botocore.*"]
 ignore_missing_imports = true
 
+# link_ingest's extraction stack (#739): neither ships a py.typed marker.
+[[tool.mypy.overrides]]
+module = ["trafilatura.*", "yt_dlp.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["libs", "services", "tests"]

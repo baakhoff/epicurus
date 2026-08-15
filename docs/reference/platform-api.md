@@ -99,7 +99,7 @@ model.  (The gateway's former `POST /platform/v1/llm/chat` was removed in
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `messages` | `list[object]` | Yes | Conversation history.  Each item is a `ChatMessage`-shaped object (`role`, `content`, optional `tool_calls` / `tool_call_id` / `name`). |
+| `messages` | `list[object]` | Yes | Conversation history.  Each item is a `ChatMessage`-shaped object (`role`, `content`, optional `tool_calls` / `tool_call_id` / `name`).  `content` takes a plain string **or** an OpenAI-style content-parts array to send an image — see [Sending images](#sending-images-the-vision-gate-739). |
 | `model` | `str \| null` | No | Override the model (e.g. `"claude/claude-3-5-sonnet-latest"`).  Omit to use the core default and fallback chain. |
 | `tools` | `list[object] \| null` | No | OpenAI-format tool descriptors for function calling. |
 | `tenant_id` | `str \| null` | No | Tenant scope.  Defaults to the core's configured tenant. |
@@ -124,10 +124,60 @@ model.  (The gateway's former `POST /platform/v1/llm/chat` was removed in
 | `prompt_tokens` | `int \| null` | Input token count (when reported by the provider). |
 | `completion_tokens` | `int \| null` | Output token count (when reported by the provider). |
 
+### Sending images: the vision gate (#739)
+
+A module sends an image by giving one message an OpenAI-style content-parts array. The wire
+contract already allowed this — `ChatMessage.content` is `str | list[dict] | None`, the same
+shape the agent's own image attachments use (#633) — so no new field is involved, and
+LiteLLM's provider adapters translate the array per provider on the far side.
+
+```json
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "Describe this image." },
+        { "type": "image_url",
+          "image_url": { "url": "data:image/png;base64,iVBORw0KGgo…" } }
+      ]
+    }
+  ]
+}
+```
+
+**The core gates it.** Before any provider call, a request carrying image parts is checked
+against `LlmGateway.supports_vision` for the resolved model. If the model cannot see images,
+the request is refused with **400** and a structured body the caller can branch on:
+
+```json
+{
+  "detail": {
+    "error": "unsupported_media",
+    "message": "The selected model can't see images — switch to a vision-capable model to send image content.",
+    "model": "ollama_chat/llama3.2"
+  }
+}
+```
+
+`model` names the resolved model (the request's override, else the core's default; an empty
+string if that lookup itself failed — a hiccup there never turns a clean 400 into a 500).
+Both `image_url` (OpenAI, what LiteLLM canonicalises on) and `image` (Anthropic-native) parts
+trigger the gate, so it cannot be sidestepped by choosing the other spelling, and an image
+anywhere in the history counts, not only in the last message.
+
+Before #739 this endpoint had **no** gate — only the interactive agent turn did — so a module
+sending an image to a text-only model got a silent ignore or a raw provider error. A caller
+should branch on `detail.error == "unsupported_media"` and degrade honestly: return what it
+*did* extract plus a note saying the description was skipped and why.
+`epicurus_websearch.vision` is the worked example. A text-only request is untouched and costs
+no extra capability lookup.
+
 **Error responses**
 
 | Status | Condition |
 | --- | --- |
+| 400 | Request carries image content-parts and the resolved model has no vision support (#739). Body: `{"detail": {"error": "unsupported_media", "message": …, "model": …}}`. |
 | 503 | Gateway is paused with no hosted fallback available. |
 
 ## `GET /platform/v1/timezone` · `PUT /platform/v1/timezone`
@@ -725,11 +775,15 @@ Chat completion.
 
 | Param | Type | Meaning |
 | --- | --- | --- |
-| `messages` | `list[PlatformMessage]` | Conversation history. |
+| `messages` | `list[PlatformMessage]` | Conversation history.  A message's `content` may be an OpenAI-style content-parts array to send an image — see [Sending images](#sending-images-the-vision-gate-739). |
 | `model` | `str \| None` | Model override. |
 | `tools` | `list[dict] \| None` | Tool descriptors for function calling. |
 
-Raises `httpx.HTTPStatusError` on non-2xx.
+Raises `httpx.HTTPStatusError` on non-2xx — including the **400** a module gets when it
+sends an image to a model without vision (#739). Branch on
+`exc.response.json()["detail"]["error"] == "unsupported_media"` and degrade rather than
+failing the whole operation; `epicurus_websearch.vision._note_for_status` is the reference
+handling.
 
 ### `PlatformMessage` and `PlatformChatResponse`
 

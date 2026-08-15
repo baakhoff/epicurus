@@ -68,6 +68,158 @@ images to GHCR.
   mid-typewriter stays closed for the rest of that write. `core-app` 0.113.0→0.114.0 (MINOR),
   `web` 0.136.0→0.137.0 (MINOR).
 
+- **Send it any link and the agent can actually read it** (#739) — `web_search` could *find* a
+  page; nothing in the platform could *open* one. No URL-fetch tool existed anywhere, in
+  websearch or in the agent's built-ins, so "save the substance of this article to my knowledge
+  base" bottomed out at a search snippet plus whatever the model happened to remember about the
+  site. The save half was already done (`knowledge_propose_edit`, #220/#722) and so was gateway
+  vision (#633/#711) — but only for a chat attachment, never for an image behind a URL. The
+  missing piece was the reading. websearch gains a second tool, **`link_ingest(url)`**,
+  returning `{kind, title, site, author?, published?, text, image_descriptions?, transcript,
+  notes}` across three tiers: articles and ordinary pages (readability-grade body text plus
+  OpenGraph/JSON-LD metadata), direct images (described by the core's vision model), and public
+  video/reel/audio links (metadata plus the uploader's own subtitles). It stays **inside
+  websearch** rather than becoming a module of its own — the roadmap forbids new modules before
+  1.0, and metadata-only ingestion needs no ffmpeg and no OS packages, so the image is
+  unchanged. It calls **no other module** (ADR-0004): the tool returns an extract, and composing
+  it into a document and filing it is the agent's own next step through the knowledge tools —
+  which is why the steering lives in the tool docstring and in a new rung on #703's grounding
+  ladder in the default agent instructions (read the link, work from what came back, keep the
+  source URL and retrieval date on anything filed). Extraction is `trafilatura`, chosen over
+  `readability-lxml` + `beautifulsoup4` because one dependency covers both the body text and the
+  metadata the contract needs; `yt-dlp` is a lazily-imported, failure-tolerant extra that
+  degrades to oEmbed + OpenGraph when it is absent or an extractor breaks overnight.
+
+  Two things are deliberately refused rather than approximated. **Transcription**: `transcript`
+  is reserved and always empty — ASR is a new gateway modality (milestone 5.0.0) — and the
+  platform's own machine captions are not used either, since passing a platform's speech
+  recognition off as the video's text would blur exactly the line the contract draws;
+  uploader-published subtitles *are* included, in `text`, labelled as captions.
+  **Authentication**: no sign-in, no credentials, no cookie jar, no CAPTCHA circumvention —
+  structurally rather than as a promise, since the extractor is handed no credential source at
+  all and a URL carrying `user:pass@` is refused outright. A private or login-walled link comes
+  back as `kind: "unreachable"` with a note saying so, and the same is true of a dead host, a
+  PDF, a captionless video, or an image no model could see: every failure is a well-formed
+  result carrying an honest note, never a raised exception. The agent's job is to relay the
+  gaps, not to fill them.
+
+  This is the first tool in the platform that fetches an **arbitrary, operator-supplied URL from
+  inside the Docker network**, where the core, Postgres, Valkey, Qdrant, OpenBao, and the docker
+  proxy all answer without authentication — and nothing server-side existed to reuse. So it
+  ships a purpose-built SSRF guard: `http(s)` only; no credentials in the URL; single-label
+  hosts refused (on this network a dotless name *is* a service name) along with `.localhost`,
+  `.local`, `.internal`, `.localdomain`, `.home.arpa`, and `.onion`; the host resolved and
+  **every** returned address checked against the private, loopback, link-local, reserved,
+  multicast, and CGNAT ranges in both families, with IPv4-mapped and 6to4-wrapped IPv6 unwrapped
+  first so `::ffff:127.0.0.1` cannot smuggle a loopback through; and — the part that matters
+  most — redirects followed **by hand** so every hop is re-validated before it is requested,
+  because a public URL that 302s to `169.254.169.254` is the classic exploit and the hop is what
+  it turns on. Bytes, wall-clock across all hops, redirect count, and content types are all
+  capped, tunable through new `LINK_INGEST_*` settings with conservative defaults. yt-dlp does
+  its own HTTP outside that client, so it is confined to an allow-list of known public media
+  platforms and only ever sees a URL that already passed the guard. One residual gap is stated
+  rather than papered over: the guard resolves the host and httpx resolves it again to connect,
+  so DNS rebinding between the two is not caught — closing it needs connect-time address
+  pinning, which httpx does not expose without a custom transport.
+
+  Tier 2 forced a gap in the core into the open. `POST /platform/v1/chat` had **no vision
+  gate**: `supports_vision` guarded only the interactive agent turn (#633), so a module sending
+  image content-parts to a text-only model got either a silent ignore or a raw provider error —
+  precisely the two outcomes that gate exists to prevent — and `link_ingest` would have been the
+  first module-initiated vision inference to hit it. The endpoint now applies the same check
+  before any provider call and refuses with a structured **400**
+  (`{"error": "unsupported_media", "message": …, "model": …}`) a caller can branch on; both the
+  OpenAI `image_url` and the Anthropic-native `image` spelling trigger it, and an image anywhere
+  in the history counts, not only in the last message. websearch catches exactly that 400 and
+  degrades to metadata plus a note naming the model and the fix, so an operator with no
+  vision-capable model configured still gets the article — just without the picture described.
+  Text-only requests are untouched and pay no extra capability lookup. No new client helper was
+  added to `epicurus_core`: `ChatMessage.content` has accepted `str | list[dict] | None` since
+  #633, so the module builds content parts over the existing `PlatformClient.chat` and the wire
+  contract is unchanged. `websearch` 0.2.2→0.3.0 (MINOR), `core-app` 0.112.0→0.113.0 (MINOR).
+
+- **Going Google-free is now a first-class path, per module and platform-wide** (#764) — the
+  operator's instinct was that it wasn't possible at all, and the shell had been quietly proving
+  them right. Everything needed already existed: the ADR-0030 collections panel could untick a
+  Google list, and Settings could disconnect the account outright. But "stop using Google in
+  tasks" was N individual unticks, after which the Google block kept its full visual weight and
+  nothing anywhere said the module was now local-only — configuration archaeology dressed as a
+  setting. The panel now offers **"Stop using Google in this module"**: one write against the
+  existing prefs API that disables every one of that account's collections, clears the write
+  target back to the built-in local default (and only when the active collection belonged to
+  that account — a second provider's target is never collateral), and collapses the block to a
+  single quiet row, *"Google — not used · Use again"*. Tokens are untouched, so it is per module
+  by construction: every other module keeps working, nothing at Google changes, and one click
+  undoes it. Two deliberate decisions, recorded as ADR-0122. The collapsed state is **derived,
+  never stored** — "not used" *is* "none of this account's collections are enabled", the only
+  place it could live given `CollectionPrefs` holds `{enabled, active}` and nothing else, so it
+  can never disagree with the toggles it replaces (safe as a default because connecting an
+  account seeds every collection enabled, #209, making a connected account with nothing ticked
+  always a deliberate act). And **"Use again" re-seeds rather than replays**: it enables all of
+  the account's collections and makes the first writable one active — exactly what a fresh
+  connect does — because restoring a hand-picked subset would need hidden session state that
+  silently stops working after a reload, i.e. two behaviours behind one button; the toggles show
+  what is on, so re-narrowing is one tick.
+
+  The other half was the global disconnect, which worked but didn't *look* like it had.
+  Disconnecting deletes the tokens and strips the provider from every module's stored selection
+  (#209), yet the web kept several deliberately long-lived caches describing what modules can
+  see — the calendar's account view holds Google calendar names and colours for five minutes,
+  the mailbox its thread list for thirty — so the next page the operator opened still painted a
+  connected account. The disconnect mutation now invalidates the module-facing keys by prefix
+  alongside its own status. And mail, the one module with **no local provider** (ADR-0032: no
+  collections, no fallback mailbox), had no story at all for the disconnected state: the page
+  relayed a raw `httpx.HTTPStatusError` under a scope hint that didn't apply, and the tools
+  re-raised it at the agent. The token seam now distinguishes the case —
+  `GmailProvider._get_token` maps the core's documented 404/400 to `MailNotConnected`, translated
+  *there* precisely so it can never be confused with Gmail's own "no such message" 404 — and
+  every surface answers honestly: each MCP tool returns one model-actionable sentence naming both
+  ways out (connect it in Settings, or disable the module) instead of raising, `mail_send`
+  refuses to compose a draft that could never be delivered, the page returns a valid empty list
+  carrying `disconnected` that the shell renders as an honest empty state with a tap to each
+  exit, a leftover message chip answers 503 rather than a 404 claiming the message was deleted,
+  and `mail.sync_failed` is no longer emitted — an absence the operator chose is not a failure to
+  alert on. The local cache is kept but not served, so a reconnect restores the mailbox with no
+  resync and no restart. Not in scope, and deliberately so: local-first replacements for the
+  Google-backed capabilities themselves (no local mailbox, no richer local calendar) — going
+  Google-free means keeping the local half, not re-implementing the other one. New operator note,
+  `docs/user/running-without-google.md`. `web` 0.135.0→0.136.0 (MINOR), `mail` 0.18.1→0.19.0
+  (MINOR).
+
+- **Folded the Can into the Tasks page as a Show → Backlog option, instead of a second nav
+  entry** (#820) — the Can's own **partition** (#766, the board shows only dated tasks, the
+  backlog holds the rest) was right; its **placement** wasn't. A second left-nav page gave
+  the backlog the visual weight of its own module and split one workflow — triage the
+  backlog, schedule things onto the board — across two pages. The *Show* control (already
+  shared by the board and the Can, open/completed/all) gains a fourth value, **`backlog`**:
+  a page-level dated-ness partition, deliberately **not** a widened `TaskScope` — the app
+  branches on it before the provider fetch rather than teaching the providers a fourth read
+  scope. The Can's own `PageSpec` and its `GET /pages/can` route are gone (`can` now 404s
+  like any other unknown page id); its data now comes back from
+  `GET /pages/board?show=backlog`, rendered by a new `build_tasks_backlog` that keeps the
+  Can's exact shape — a flat column, an Add with no due/repeat field, and each card's
+  leading Schedule action. *Group by* is omitted whenever Show is Backlog (a flat backlog
+  has nothing to group, the same dead-knob rule #767 already gives List/Calendar), and the
+  **Calendar** view drops `backlog` from Show's own options entirely — a backlog has no due
+  dates to place on a grid — correcting a stale or explicit `show=backlog` back to Open
+  whenever `view=calendar`, so the control's echoed value is always inside its own offered
+  options. One axis nuance needed a decision: Show used to mean *status scope* on the board
+  and, independently, the Can page's *own* Show filter over the backlog; folded onto a
+  single control, only one Show value can be active at a time, so the backlog can no longer
+  carry that second, independent filter. The chosen rule fetches every status for the
+  backlog regardless and splits internally — open and in-progress tasks lead in a flat
+  **Backlog** column, any completed undated task follows in its own muted **Completed**
+  column (an ordinary struck-through card) — rather than making completed/all leak undated
+  items onto the dated board, which would have broken its "dated tasks only, no 'No date'
+  bucket" invariant. Either column is dropped when empty, neither is ever omitted, which is
+  what keeps the acceptance bar: no undated task, open or completed, becomes unreachable.
+  Agent- and web-form-facing copy was swept from "the Can" to "the backlog" / "Show →
+  Backlog" throughout — `tasks_add`'s tool description, both `due` parameter descriptions,
+  and a task's hover-card `href` (now a `?show=backlog` deep link on the one Tasks route
+  rather than a separate page's URL) — so the words the agent uses match what the operator
+  sees.
+  `tasks` 0.22.1→0.23.0 (MINOR).
+
 - **Disabling a connected calendar account silently emptied the Calendar page** (#814) —
   `CollectionRouter` resolved a *missing provider* in exactly opposite ways on the write and
   read paths. The trigger is a stale `enabled`/`active` collection reference: nothing prunes

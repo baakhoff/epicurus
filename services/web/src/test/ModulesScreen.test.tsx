@@ -10,6 +10,8 @@ const mockModules = vi.fn();
 const mockModuleConfig = vi.fn();
 const mockRemoveModule = vi.fn();
 const mockDockerStatus = vi.fn();
+const mockGetCollections = vi.fn();
+const mockSaveCollections = vi.fn();
 
 vi.mock("@/lib/api", () => ({
   api: {
@@ -17,6 +19,8 @@ vi.mock("@/lib/api", () => ({
     moduleConfig: (name: string) => mockModuleConfig(name),
     removeModule: (name: string) => mockRemoveModule(name),
     dockerStatus: () => mockDockerStatus(),
+    getModuleCollections: (name: string) => mockGetCollections(name),
+    saveModuleCollections: (name: string, prefs: unknown) => mockSaveCollections(name, prefs),
   },
 }));
 
@@ -50,6 +54,9 @@ beforeEach(() => {
   mockModuleConfig.mockReset();
   mockRemoveModule.mockReset();
   mockDockerStatus.mockReset();
+  mockGetCollections.mockReset();
+  mockSaveCollections.mockReset();
+  mockSaveCollections.mockResolvedValue({ status: "ok" });
   mockModules.mockResolvedValue([ECHO]);
   mockModuleConfig.mockResolvedValue({});
   mockDockerStatus.mockResolvedValue({ available: true, reason: null });
@@ -134,5 +141,166 @@ describe("ModulesScreen refresh (#478)", () => {
     fireEvent.click(screen.getByRole("button", { name: /refresh module health/i }));
 
     await waitFor(() => expect(mockModules).toHaveBeenCalledWith({ refresh: true }));
+  });
+});
+
+/* ── one-step provider removal per module (#764, ADR-0030/ADR-0122) ─────────── */
+// Going Google-free in one module must be one action against the existing prefs API —
+// not N unticks, and never a token change: other modules keep their connection.
+
+const TASKS = ModuleSnapshot.parse({
+  manifest: {
+    name: "tasks",
+    version: "0.1.0",
+    collections: { noun: "list", multi: true, providers: ["google"] },
+  },
+  status: { healthy: true, version: "0.1.0" },
+  enabled: true,
+  disabled_tools: [],
+});
+
+/** The module's `/accounts` view, merged with the stored selection (ADR-0030). */
+function googleAccount(opts: { enabled: boolean; activeCollection?: string }) {
+  return {
+    noun: "list",
+    multi: true,
+    accounts: [
+      {
+        account: "google",
+        provider: "google",
+        label: "Google",
+        connected: true,
+        collections: [
+          {
+            account: "google",
+            collection: "work",
+            title: "Work",
+            writable: true,
+            enabled: opts.enabled,
+            active: opts.activeCollection === "work",
+          },
+          {
+            account: "google",
+            collection: "home",
+            title: "Home",
+            writable: true,
+            enabled: opts.enabled,
+            active: opts.activeCollection === "home",
+          },
+        ],
+      },
+    ],
+  };
+}
+
+async function openTasksCard() {
+  mockModules.mockResolvedValue([TASKS]);
+  render(<ModulesScreen />, { wrapper });
+  fireEvent.click(await screen.findByRole("button", { name: /expand/i }));
+}
+
+describe("ModulesScreen per-module provider removal (#764)", () => {
+  it("disables every one of the provider's collections in one write", async () => {
+    mockGetCollections.mockResolvedValue(googleAccount({ enabled: true, activeCollection: "work" }));
+    await openTasksCard();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Stop using Google in this module/ }));
+
+    // One PUT, not one per collection — and the active falls back to the local default
+    // because the collection it pointed at belonged to the account being dropped.
+    await waitFor(() => expect(mockSaveCollections).toHaveBeenCalledTimes(1));
+    expect(mockSaveCollections).toHaveBeenCalledWith("tasks", { enabled: [], active: null });
+  });
+
+  it("collapses the provider block to one quiet row once nothing is enabled", async () => {
+    mockGetCollections.mockResolvedValue(googleAccount({ enabled: false }));
+    await openTasksCard();
+
+    expect(await screen.findByText("Google — not used")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Use again" })).toBeInTheDocument();
+    // The full-weight block is gone: no per-collection switches, no "connected" badge.
+    expect(screen.queryByLabelText("Toggle Work")).not.toBeInTheDocument();
+    expect(screen.queryByText("connected")).not.toBeInTheDocument();
+    // …and the removal action isn't offered twice.
+    expect(
+      screen.queryByRole("button", { name: /Stop using Google in this module/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says the module is local-only, rather than merely 'nothing active'", async () => {
+    mockGetCollections.mockResolvedValue(googleAccount({ enabled: false }));
+    await openTasksCard();
+    expect(
+      await screen.findByText(/Not using any connected account/),
+    ).toBeInTheDocument();
+  });
+
+  it("restores the account in one click, seeded exactly as a fresh connect would", async () => {
+    mockGetCollections.mockResolvedValue(googleAccount({ enabled: false }));
+    await openTasksCard();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Use again" }));
+
+    await waitFor(() => expect(mockSaveCollections).toHaveBeenCalledTimes(1));
+    expect(mockSaveCollections).toHaveBeenCalledWith("tasks", {
+      enabled: [
+        { account: "google", collection: "work" },
+        { account: "google", collection: "home" },
+      ],
+      // The first writable collection becomes the write target — the same seeding the core
+      // performs on connect, so "use again" and "connect" leave the module in one state.
+      active: { account: "google", collection: "work" },
+    });
+  });
+
+  it("round-trips: stop, collapse, use again, expanded with the toggles back on", async () => {
+    // The reversibility the issue asks for, end to end — the panel reflects each write after
+    // the mutation's refetch, so the operator sees the state they just chose.
+    mockGetCollections
+      .mockResolvedValueOnce(googleAccount({ enabled: true, activeCollection: "work" }))
+      .mockResolvedValue(googleAccount({ enabled: false }));
+    await openTasksCard();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Stop using Google/ }));
+    expect(await screen.findByText("Google — not used")).toBeInTheDocument();
+
+    mockGetCollections.mockResolvedValue(googleAccount({ enabled: true, activeCollection: "work" }));
+    fireEvent.click(screen.getByRole("button", { name: "Use again" }));
+
+    expect(await screen.findByLabelText("Toggle Work")).toBeInTheDocument();
+    expect(screen.queryByText("Google — not used")).not.toBeInTheDocument();
+  });
+
+  it("keeps an ordinary block for a connected account that simply has no collections", async () => {
+    // Nothing to stop using — "not used" would be a non-sequitur, and the operator still
+    // needs to see that the account is connected.
+    mockGetCollections.mockResolvedValue({
+      noun: "list",
+      multi: true,
+      accounts: [
+        { account: "google", provider: "google", label: "Google", connected: true, collections: [] },
+      ],
+    });
+    await openTasksCard();
+
+    expect(await screen.findByText(/No lists found in this account/)).toBeInTheDocument();
+    expect(screen.queryByText("Google — not used")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Stop using Google in this module/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never offers removal for an account that isn't connected", async () => {
+    mockGetCollections.mockResolvedValue({
+      noun: "list",
+      multi: true,
+      accounts: [
+        { account: "google", provider: "google", label: "Google", connected: false, collections: [] },
+      ],
+    });
+    await openTasksCard();
+
+    expect(await screen.findByRole("button", { name: "Connect" })).toBeInTheDocument();
+    expect(screen.queryByText("Google — not used")).not.toBeInTheDocument();
   });
 });

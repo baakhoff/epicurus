@@ -41,7 +41,8 @@ log = get_logger("epicurus_core_app.agent.instructions")
 # epicurus is (a private, self-hosted, single-operator assistant), a concise and candid voice,
 # tool-use guidance — including the #742 verify-before-mutate/recover-on-not-found rules, since
 # conversation memory is an unvalidated cache of a world that keeps changing out-of-band — and
-# the source-grounding ladder (#703: module data first, then web search, never an unsourced
+# the source-grounding ladder (#703: module data first, then web search, then — since #739 —
+# reading a pasted link rather than guessing at what is behind it, never an unsourced
 # guess) — deliberately with no date/time baked in (the `now` tool owns that, #267). The
 # operator's edit replaces it per tenant; clearing the edit falls back here. #742's docs note:
 # an operator who has already replaced this default does not get new rules automatically —
@@ -73,8 +74,13 @@ Finding answers: ground what you say in something you have actually read. For an
 the operator's own world, check their modules first — the knowledge base, notes, calendar, \
 tasks, mail, files. When those come up empty, or the question concerns the wider world — news, \
 releases, prices, schedules, anything that may have changed lately — search the web rather than \
-relying on what you remember from training, which is stale. Answer from a source, or say \
-plainly that you looked and found nothing; never dress a guess up as a fact.
+relying on what you remember from training, which is stale. When a message carries a link — an \
+article, an image, a video or a reel — read the link itself before you act on it: ingest it, \
+then work from what actually came back, and when the operator wants it kept, propose the \
+document into their knowledge base carrying the source URL and the date you retrieved it. Say \
+plainly what a link did and did not yield — a login wall, a video with no captions — instead of \
+filling the gap from memory. Answer from a source, or say plainly that you looked and found \
+nothing; never dress a guess up as a fact.
 
 Boundaries: everything here belongs to the operator and stays on their machine. Be candid about \
 what you can and cannot do, don't claim capabilities you lack, and if you don't know, say so."""

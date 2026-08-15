@@ -1340,6 +1340,13 @@ export const MailboxListData = z.object({
   threads: z.array(MailThreadSummary).default([]),
   /** Opaque next-page token; absent at the end of the mailbox. */
   next_cursor: z.string().nullish(),
+  /** No mail account is connected (#764) — the module has no local provider to fall back to
+   *  (ADR-0032), so it answers with an otherwise-valid *empty* list carrying this flag rather
+   *  than an error: a self-host that never connected Google, and one where the operator just
+   *  disconnected it, are normal states, and plain navigation to Mail must not look broken.
+   *  The shell renders the honest empty state naming both ways out. Defaults false, so a
+   *  connected mailbox — and any payload predating the flag — renders exactly as before. */
+  disconnected: z.boolean().default(false),
 });
 export type MailboxListData = z.infer<typeof MailboxListData>;
 

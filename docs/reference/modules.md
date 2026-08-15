@@ -337,13 +337,18 @@ params, lays out the columns, and echoes the resolved selection back in each con
 `value`. The vocabulary is archetype-generic, so any board module reuses it.
 
 A module may declare **several pages of the same archetype** — nothing about a `PageSpec` is
-one-per-archetype. Tasks declares two boards (#766): the **Tasks** board (dated tasks,
-grouped) and the **Can** (`id: "can"` — the undated backlog, one flat column, whose only
-control is its own *Show* filter and whose per-card **Schedule** action is an ordinary
-form action over `tasks_update` narrowed to the `due` field). Each page is a full, separate
-`GET /pages/{id}` payload; the shell renders each nav entry with the same `BoardView` and
-never knows they partition one underlying collection — that split lives module-side, where
-the domain does.
+one-per-archetype; each page is a full, separate `GET /pages/{id}` payload, and the shell
+renders each nav entry with the same archetype view, never knowing whether they partition one
+underlying collection — that split, if any, lives module-side, where the domain does. Tasks
+originally shipped this way (#766): a **Tasks** board (dated tasks, grouped) plus a second
+**Can** board (`id: "can"` — the undated backlog, one flat column) for the same underlying
+task collection. #820 folded the Can back into the Tasks page instead — a **`backlog`** value
+on the board's own *Show* control (whose only extra control is the Schedule action, an
+ordinary form action over `tasks_update` narrowed to the `due` field) — trading the extra nav
+entry for one more Show option; see [tasks.md](../services/tasks.md) for the full rationale.
+Both techniques are legitimate: two pages give a partition its own nav weight and URL, while
+folding it onto a control (as tasks now does) keeps one workflow on one page. Pick per how
+much visual and navigational weight the partition deserves.
 
 **View modes — the reserved `view` control (#767).** One control id is reserved: a board
 page declaring a control with `id: "view"` (option values from `board` / `list` /

@@ -85,6 +85,19 @@ never reaches the provider at all — it ends immediately with a canned explanat
 normal answer), just skipping the extraction hand-off (a canned rejection is nothing to learn
 facts from).
 
+**The module-facing chat path is gated the same way since #739.** `POST /platform/v1/chat`
+had no vision check at all: the rule above guarded only the interactive agent turn, so a
+*module* sending image content-parts to a text-only model hit exactly the silent-ignore /
+provider-error pair the gate exists to prevent. `websearch`'s `link_ingest` (#739) is the
+first module-initiated vision inference in the codebase, and it needs a refusal it can read.
+The endpoint now runs the same `supports_vision` check before any provider call and answers
+**400** with a structured detail — `{"error": "unsupported_media", "message": …, "model": …}`
+— so a module can branch on `detail.error` and degrade honestly rather than parsing a
+provider error string. Both `image_url` (OpenAI) and `image` (Anthropic-native) parts trigger
+it, and an image anywhere in the history counts, not just in the last message; a text-only
+request is untouched and pays no extra capability lookup. Shape and caller guidance:
+[platform API](../reference/platform-api.md#sending-images-the-vision-gate-739).
+
 **A PDF attachment gets a real reader, not a naive decode (#738).** Before this, every
 non-image file — including a PDF — was decoded as UTF-8 (`errors="replace"`), which for a
 PDF meant `[file: report.pdf]` followed by thousands of replacement characters: the same
@@ -1448,7 +1461,10 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   now, gets re-checked — list/stat/read/search — before a mutating call relies on it) and its
   recover-on-not-found counterpart (a tool reporting something missing means re-ground and
   report reality, never blind-retry the same call); and the source-grounding
-  ladder (module data first, then web search, never an unsourced guess, #703); resolved per turn
+  ladder (module data first, then web search, then — since #739 — *reading* a link the message
+  carries instead of guessing at what is behind it, keeping the source URL and retrieval date
+  on anything filed into the knowledge base, and saying plainly what the link did not yield;
+  never an unsourced guess, #703); resolved per turn
   and injected first in `Agent._assemble`. **Porting note (#742):** these are prompt *text*,
   not code — a tenant that has already replaced the default via `PUT /agent/instructions` does
   not pick up new rules automatically. An operator running a heavily customized prompt should

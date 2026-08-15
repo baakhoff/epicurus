@@ -9,8 +9,18 @@
  * uses); sends go through the gated, operator-only send proxy (never the agent — ADR-0085).
  */
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChevronLeft, ChevronRight, Mail, PenSquare, Search, WifiOff } from "lucide-react";
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Link2,
+  Mail,
+  PenSquare,
+  Search,
+  WifiOff,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { MailMessageView } from "@/components/MailMessageView";
 import { Button, EmptyState, Select, Spinner, TextArea, TextInput, cn } from "@/components/ui";
@@ -387,6 +397,7 @@ function ConfirmSend({ onCancel, onConfirm }: { onCancel: () => void; onConfirm:
 
 export function MailboxView({ module, pageId }: { module: string; pageId: string }) {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [label, setLabel] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [submitted, setSubmitted] = useState("");
@@ -451,6 +462,10 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
     [listData],
   );
   const activeLabel = label ?? list?.active_label ?? "INBOX";
+  // No account connected (#764). Everything the toolbar offers — folders, search, compose —
+  // needs a mailbox, so the whole page reduces to the empty state and its two exits rather
+  // than a row of controls that can only fail.
+  const disconnected = list?.disconnected ?? false;
 
   const threadQuery = useQuery({
     queryKey: ["module-page", module, pageId, "thread", openThreadId],
@@ -524,9 +539,13 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
 
   return (
     <div className="flex h-full min-h-0">
-      <LabelRail labels={list?.labels ?? []} active={activeLabel} onSelect={selectLabel} />
+      {!disconnected && (
+        <LabelRail labels={list?.labels ?? []} active={activeLabel} onSelect={selectLabel} />
+      )}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* toolbar: mobile label picker + search + compose */}
+        {/* toolbar: mobile label picker + search + compose — hidden entirely while
+            disconnected (#764): a search box over no mailbox is furniture, not an affordance. */}
+        {!disconnected && (
         <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
           <Select
             size="sm"
@@ -564,6 +583,7 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
             <span className="hidden sm:inline">New message</span>
           </Button>
         </div>
+        )}
 
         {/* Gmail-style category tabs over the Inbox (#765) — present only when the module
             supplied them, and only over the list (a thread or the composer owns the pane). */}
@@ -617,6 +637,28 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
             <div className="flex h-full items-center justify-center p-6">
               <EmptyState quote="Couldn't reach your mail.">
                 <p className="text-sm text-ink-dim">{(listQuery.error as Error).message}</p>
+              </EmptyState>
+            </div>
+          ) : disconnected ? (
+            // Not an error — an absence, named (#764). Mail is provider-only (ADR-0032), so
+            // with Google gone there is nothing local to show and no point pretending the
+            // Inbox is merely empty. Both ways out are one tap away, and neither is "figure
+            // out where the setting lives".
+            <div className="flex h-full items-center justify-center p-6">
+              <EmptyState quote="Google is not connected.">
+                <p className="text-sm text-ink-dim">
+                  Connect it in Settings, or disable the mail module if you don&apos;t use
+                  Gmail. Nothing here is lost — reconnecting brings your mailbox straight
+                  back.
+                </p>
+                <div className="mt-3 flex items-center justify-center gap-2">
+                  <Button variant="primary" onClick={() => navigate("/settings")}>
+                    <Link2 size={15} /> Open Settings
+                  </Button>
+                  <Button variant="ghost" onClick={() => navigate("/modules")}>
+                    Modules
+                  </Button>
+                </div>
               </EmptyState>
             </div>
           ) : list && list.threads.length > 0 ? (

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from epicurus_core import CONTRACT_VERSION, __version__
@@ -25,6 +25,47 @@ from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.settings import CoreAppSettings
+
+# Vision gating for the module-facing chat path (#739). The interactive agent turn has gated
+# image input since #633; this endpoint did not — so a module sending image content-parts to a
+# model without vision got either a silent ignore or a raw provider error, the two outcomes
+# that gate exists to prevent. The wording mirrors `agent.agent._VISION_UNSUPPORTED_MESSAGE`,
+# put in the third person: the caller here is a module, which relays the text to the operator
+# rather than speaking it itself.
+UNSUPPORTED_MEDIA = "unsupported_media"
+VISION_UNSUPPORTED_MESSAGE = (
+    "The selected model can't see images — switch to a vision-capable model to send image content."
+)
+# ``image_url`` is the OpenAI-style part LiteLLM canonicalises on (and what the agent's own
+# ``_attach_images`` emits); ``image`` is the Anthropic-native spelling. Both are recognised so
+# the gate cannot be sidestepped by picking the other shape.
+_IMAGE_PART_TYPES = frozenset({"image_url", "image"})
+
+
+def _carries_image(messages: list[ChatMessage]) -> bool:
+    """Whether any message's content is a parts array holding an image part."""
+    for message in messages:
+        content = message.content
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES:
+                return True
+    return False
+
+
+async def _named_model(gateway: LlmGateway, model: str | None, tenant_id: str | None) -> str:
+    """The model to *name* in the refusal — the request's override, else the core's default.
+
+    Never raises: it runs only on the refusal path, and a store hiccup while resolving the
+    default must not turn a clean 400 into a 500. An empty string means "couldn't say".
+    """
+    if model:
+        return model
+    try:
+        return await gateway.effective_default(tenant_id)
+    except Exception:
+        return ""
 
 
 class PlatformInfo(BaseModel):
@@ -98,7 +139,31 @@ def create_platform_router(
         selection, fallback, key management, and usage accounting — the module
         provides only messages and optional overrides. Returns the shared
         ``ChatResult``.
+
+        **Vision gate (#739).** A request carrying image content-parts is refused
+        with **400** when the resolved model has no vision support, before any
+        provider call — the same rule the interactive agent turn has applied since
+        #633, now on the module path too. The body is a structured detail the
+        caller can branch on::
+
+            {"detail": {"error": "unsupported_media",
+                        "message": "...", "model": "ollama_chat/llama3.2"}}
+
+        so a module can degrade honestly (return what it *did* extract, plus a note
+        saying the caption was skipped and why) rather than guess from a provider
+        error string. A text-only request is untouched.
         """
+        if _carries_image(request.messages) and not await gateway.supports_vision(
+            request.model, request.tenant_id
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": UNSUPPORTED_MEDIA,
+                    "message": VISION_UNSUPPORTED_MESSAGE,
+                    "model": await _named_model(gateway, request.model, request.tenant_id),
+                },
+            )
         return await gateway.chat(
             request.messages,
             model=request.model,

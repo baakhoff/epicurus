@@ -1,5 +1,5 @@
-"""Tests for build_tasks_board / build_tasks_can — the `board` archetype payloads
-(ADR-0018 / ADR-0049 / #766).
+"""Tests for build_tasks_board / build_tasks_backlog — the `board` archetype payloads
+(ADR-0018 / ADR-0049 / #766 / #820).
 
 Pure and deterministic given ``today``, so the grouping, the dated/undated partition,
 view controls, and filter echo are exercised here without a database or a clock.
@@ -11,13 +11,14 @@ from typing import Any
 
 from epicurus_tasks.models import Task
 from epicurus_tasks.service import (
-    CAN_PAGE_ID,
+    BACKLOG_SHOW,
     TASKS_PAGE_ID,
+    build_tasks_backlog,
     build_tasks_board,
-    build_tasks_can,
     calendar_feed_items,
     coerce_group,
     coerce_scope,
+    coerce_show,
     coerce_view,
 )
 
@@ -53,7 +54,7 @@ def _task(
 
 def test_page_id_is_board() -> None:
     assert TASKS_PAGE_ID == "board"
-    assert CAN_PAGE_ID == "can"
+    assert BACKLOG_SHOW == "backlog"
 
 
 def test_groups_open_tasks_by_due_bucket() -> None:
@@ -61,12 +62,12 @@ def test_groups_open_tasks_by_due_bucket() -> None:
         _task("1", "Overdue thing", due="2026-06-01"),
         _task("2", "Today thing", due="2026-06-14"),
         _task("3", "Future thing", due="2026-12-25"),
-        _task("4", "Someday thing"),  # undated → the Can, never the board (#766)
+        _task("4", "Someday thing"),  # undated → the backlog, never the board (#766)
     ]
     board = build_tasks_board(tasks, today=TODAY)
 
     # Columns appear in canonical order, empty ones dropped — and there is no
-    # "No date" bucket any more: the undated task belongs to the Can (#766).
+    # "No date" bucket any more: the undated task belongs to the backlog (#766).
     assert [c["title"] for c in board["columns"]] == ["Overdue", "Today", "Upcoming"]
     by_title = {c["title"]: c for c in board["columns"]}
     assert by_title["Overdue"]["cards"][0]["title"] == "Overdue thing"
@@ -151,23 +152,23 @@ def test_due_badge_tone_tracks_bucket() -> None:
 
 
 def test_no_due_card_has_no_badge() -> None:
-    # An undated task lives in the Can (#766); with no due there is no due badge.
-    can = build_tasks_can([_task("a", "whenever")], today=TODAY)
-    assert can["columns"][0]["cards"][0]["badges"] == []
+    # An undated task lives in the backlog (#766); with no due there is no due badge.
+    backlog = build_tasks_backlog([_task("a", "whenever")], today=TODAY)
+    assert backlog["columns"][0]["cards"][0]["badges"] == []
 
 
 def test_priority_badge_added_and_toned() -> None:
     high = Task(id="h", title="Urgent", priority="high")
     med = Task(id="m", title="Moderate", priority="medium")
     low = Task(id="l", title="Someday", priority="low")
-    # Undated → the Can (#766); the badge logic is the shared card builder either way.
-    can_h = build_tasks_can([high], today=TODAY)
-    can_m = build_tasks_can([med], today=TODAY)
-    can_l = build_tasks_can([low], today=TODAY)
+    # Undated → the backlog (#766); the badge logic is the shared card builder either way.
+    backlog_h = build_tasks_backlog([high], today=TODAY)
+    backlog_m = build_tasks_backlog([med], today=TODAY)
+    backlog_l = build_tasks_backlog([low], today=TODAY)
 
-    badges_h = can_h["columns"][0]["cards"][0]["badges"]
-    badges_m = can_m["columns"][0]["cards"][0]["badges"]
-    badges_l = can_l["columns"][0]["cards"][0]["badges"]
+    badges_h = backlog_h["columns"][0]["cards"][0]["badges"]
+    badges_m = backlog_m["columns"][0]["cards"][0]["badges"]
+    badges_l = backlog_l["columns"][0]["cards"][0]["badges"]
 
     assert badges_h == [{"label": "High", "tone": "danger"}]
     assert badges_m == [{"label": "Medium", "tone": "warn"}]
@@ -305,7 +306,13 @@ def test_board_declares_view_group_and_show_controls() -> None:
     assert group_values == ["due", "status", "priority", "none"]
     assert controls["show"]["label"] == "Show"
     assert controls["show"]["value"] == "open"
-    assert [o["value"] for o in controls["show"]["options"]] == ["open", "done", "all"]
+    # Backlog is a fourth Show option (#820), appended after the three status scopes.
+    assert [o["value"] for o in controls["show"]["options"]] == [
+        "open",
+        "done",
+        "all",
+        "backlog",
+    ]
 
 
 def test_group_control_offers_list_option_only_with_lists() -> None:
@@ -332,6 +339,20 @@ def test_list_and_calendar_views_hide_the_group_control() -> None:
         board = build_tasks_board([], today=TODAY, view=view, scope="done")
         values = {c["id"]: c["value"] for c in board["controls"]}
         assert values == {"view": view, "show": "done"}, view
+
+
+def test_calendar_view_drops_backlog_from_the_show_options() -> None:
+    # A backlog has no due dates to place on a calendar grid, so Calendar drops the option
+    # from Show entirely (#820) — the same dead-knob treatment #767 gives Group by under
+    # List/Calendar. Board and List keep all four options.
+    for view in ("board", "list"):
+        board = build_tasks_board([], today=TODAY, view=view)
+        show = next(c for c in board["controls"] if c["id"] == "show")
+        assert "backlog" in [o["value"] for o in show["options"]], view
+
+    calendar = build_tasks_board([], today=TODAY, view="calendar")
+    show = next(c for c in calendar["controls"] if c["id"] == "show")
+    assert [o["value"] for o in show["options"]] == ["open", "done", "all"]
 
 
 def test_view_does_not_change_the_columns_payload() -> None:
@@ -375,19 +396,37 @@ def test_cards_carry_structured_fields_for_alternate_views() -> None:
 
 
 def test_structured_fields_default_to_none_or_empty() -> None:
-    can = build_tasks_can([_task("t1", "Bare")], today=TODAY)
-    card = can["columns"][0]["cards"][0]
+    backlog = build_tasks_backlog([_task("t1", "Bare")], today=TODAY)
+    card = backlog["columns"][0]["cards"][0]
     assert card["due"] is None
     assert card["priority"] is None
     assert card["tags"] == []
     assert card["list_title"] is None
 
 
-def test_can_declares_no_view_control() -> None:
-    # The Can is a backlog: nothing dated to place on a calendar, and it is already a flat
-    # list — the *View* switcher belongs to the board page only (#767).
-    can = build_tasks_can([], today=TODAY)
-    assert [c["id"] for c in can["controls"]] == ["show"]
+def test_backlog_declares_view_and_show_but_no_group() -> None:
+    # Folded onto the Tasks page in #820: the backlog keeps the *View* switcher (Board/List
+    # both render it sensibly — nothing dated to place on a Calendar, but that combination
+    # never reaches here, see coerce_show) — it just never offers *Group by* (a flat backlog
+    # plus its muted Completed section has nothing to group, #767's dead-knob rule).
+    backlog = build_tasks_backlog([], today=TODAY)
+    assert [c["id"] for c in backlog["controls"]] == ["view", "show"]
+    controls = {c["id"]: c for c in backlog["controls"]}
+    assert controls["view"]["value"] == "board"
+    assert controls["show"]["value"] == "backlog"
+    assert [o["value"] for o in controls["show"]["options"]] == [
+        "open",
+        "done",
+        "all",
+        "backlog",
+    ]
+
+
+def test_backlog_echoes_the_list_view() -> None:
+    backlog = build_tasks_backlog([], today=TODAY, view="list")
+    view = next(c for c in backlog["controls"] if c["id"] == "view")
+    assert view["value"] == "list"
+    assert "group" not in {c["id"] for c in backlog["controls"]}
 
 
 # ── grouping strategies (ADR-0049) ────────────────────────────────────────────
@@ -479,7 +518,7 @@ def test_open_card_is_not_done_and_offers_complete() -> None:
     assert primary["label"] == "Complete"
 
 
-# ── the Can: the undated backlog + the dated/undated partition (#766) ─────────
+# ── the backlog: the undated partition, folded onto Show (#766 / #820) ────────
 
 
 def _card_ids(page: dict[str, Any]) -> list[str]:
@@ -500,36 +539,41 @@ def test_board_excludes_undated_tasks_under_every_grouping() -> None:
         assert "No date" not in [c["title"] for c in board["columns"]]
 
 
-def test_can_and_board_partition_the_same_fetch() -> None:
-    # Both builders take the same full task list; every task lands on exactly one page.
+def test_backlog_and_board_partition_the_same_fetch() -> None:
+    # Both builders take the same full task list; every task lands behind exactly one
+    # Show value.
     tasks = [
         _task("a", "Scheduled", due="2026-06-01"),
         _task("b", "Backlog one"),
         _task("c", "Backlog two"),
     ]
     board_ids = set(_card_ids(build_tasks_board(tasks, today=TODAY)))
-    can_ids = set(_card_ids(build_tasks_can(tasks, today=TODAY)))
+    backlog_ids = set(_card_ids(build_tasks_backlog(tasks, today=TODAY)))
     assert board_ids == {"a"}
-    assert can_ids == {"b", "c"}
-    assert board_ids | can_ids == {"a", "b", "c"}
-    assert board_ids & can_ids == set()
+    assert backlog_ids == {"b", "c"}
+    assert board_ids | backlog_ids == {"a", "b", "c"}
+    assert board_ids & backlog_ids == set()
 
 
-def test_can_is_a_single_flat_column() -> None:
-    can = build_tasks_can([_task("1", "x"), _task("2", "y")], today=TODAY)
-    assert can["title"] == "Can"
-    assert [c["title"] for c in can["columns"]] == ["Backlog"]
-    assert len(can["columns"][0]["cards"]) == 2
+def test_backlog_is_a_single_flat_column_when_all_open() -> None:
+    backlog = build_tasks_backlog([_task("1", "x"), _task("2", "y")], today=TODAY)
+    # The page heading stays "Tasks" — Backlog is a Show option on the same page, not a
+    # separately titled page any more (#820).
+    assert backlog["title"] == "Tasks"
+    assert [c["title"] for c in backlog["columns"]] == ["Backlog"]
+    assert len(backlog["columns"][0]["cards"]) == 2
 
 
-def test_can_with_no_undated_tasks_has_no_columns() -> None:
-    can = build_tasks_can([_task("1", "Scheduled", due=TODAY)], today=TODAY)
-    assert can["columns"] == []
+def test_backlog_with_no_undated_tasks_has_no_columns() -> None:
+    backlog = build_tasks_backlog([_task("1", "Scheduled", due=TODAY)], today=TODAY)
+    assert backlog["columns"] == []
 
 
-def test_can_card_leads_with_a_schedule_action() -> None:
-    can = build_tasks_can([_task("t1", "Someday", list_id="work", list_title="Work")], today=TODAY)
-    card = can["columns"][0]["cards"][0]
+def test_backlog_card_leads_with_a_schedule_action() -> None:
+    backlog = build_tasks_backlog(
+        [_task("t1", "Someday", list_id="work", list_title="Work")], today=TODAY
+    )
+    card = backlog["columns"][0]["cards"][0]
     tools = [a["tool"] for a in card["actions"]]
     assert tools == ["tasks_update", "tasks_complete", "tasks_update", "tasks_delete"]
     schedule = card["actions"][0]
@@ -548,24 +592,24 @@ def test_board_cards_have_no_schedule_action() -> None:
     assert tools == ["tasks_complete", "tasks_update", "tasks_delete"]
 
 
-def test_can_add_offers_no_due_or_repeat_field() -> None:
-    can = build_tasks_can([], today=TODAY)
-    add = next(a for a in can["actions"] if a["tool"] == "tasks_add")
-    # The Can's Add creates an undated task by construction: no due to fill in, and no
+def test_backlog_add_offers_no_due_or_repeat_field() -> None:
+    backlog = build_tasks_backlog([], today=TODAY)
+    add = next(a for a in backlog["actions"] if a["tool"] == "tasks_add")
+    # The backlog's Add creates an undated task by construction: no due to fill in, and no
     # repeat either (a rule needs a due date to anchor it).
     assert add["fields"] == ["title", "notes", "priority", "tags"]
     assert add["form"] is True
     assert add["field_options"]["priority"] == ["low", "medium", "high"]
 
 
-def test_can_add_offers_list_picker_when_lists_given() -> None:
-    can = build_tasks_can(
+def test_backlog_add_offers_list_picker_when_lists_given() -> None:
+    backlog = build_tasks_backlog(
         [],
         today=TODAY,
         lists=[("@default", "My Tasks"), ("work", "Work")],
         default_list_id="work",
     )
-    add = can["actions"][0]
+    add = backlog["actions"][0]
     # No tags field with a (Google-only) list picker — same honesty rule as the board (#763).
     assert add["fields"] == ["title", "list_id", "notes", "priority"]
     assert add["field_choices"]["list_id"] == [
@@ -573,53 +617,77 @@ def test_can_add_offers_list_picker_when_lists_given() -> None:
         {"value": "work", "label": "Work"},
     ]
     assert add["form_values"]["list_id"] == "work"
-    # "New list" stays a board affordance — the Can keeps a single Add action.
-    assert [a["tool"] for a in can["actions"]] == ["tasks_add"]
+    # "New list" stays a board-view affordance — the backlog keeps a single Add action.
+    assert [a["tool"] for a in backlog["actions"]] == ["tasks_add"]
 
 
-def test_can_declares_only_the_show_control() -> None:
-    # Completed undated tasks stay reachable via the Can's own Show filter; there is no
-    # Group-by (one flat column) — the control set is just Show, echoing the selection.
-    can = build_tasks_can([], today=TODAY, scope="done")
-    assert [c["id"] for c in can["controls"]] == ["show"]
-    show = can["controls"][0]
-    assert show["value"] == "done"
-    assert [o["value"] for o in show["options"]] == ["open", "done", "all"]
+# ── the axis nuance (#820): Show used to be status scope *and* the Can's own filter;
+# folded onto one control, a completed undated task stays reachable by splitting the
+# backlog itself into a Backlog (open/in-progress) column and a muted Completed one,
+# rather than by a second, independent status filter. Pinning this is the acceptance
+# bar: "no undated task, open or completed, becomes unreachable".
 
 
-def test_can_keeps_list_badge_and_move_picker() -> None:
-    task = _task("t1", "Someday", list_id="work", list_title="Work")
-    can = build_tasks_can([task], today=TODAY, lists=[("@default", "My Tasks"), ("work", "Work")])
-    card = can["columns"][0]["cards"][0]
-    assert {"label": "Work", "tone": "dim"} in card["badges"]  # category badge preserved
-    edit = next(a for a in card["actions"] if a.get("form") and "title" in (a["fields"] or []))
-    assert "to_list_id" in edit["fields"]  # the ADR-0038 move picker, same as the board
+def test_backlog_splits_open_and_completed_undated_into_two_columns() -> None:
+    tasks = [
+        _task("open1", "Still open"),
+        _task("doing", "In progress", status="in_progress"),
+        _task("done1", "Finished", status="done"),
+    ]
+    backlog = build_tasks_backlog(tasks, today=TODAY)
+    assert [c["title"] for c in backlog["columns"]] == ["Backlog", "Completed"]
+    cols = {c["title"]: [card["id"] for card in c["cards"]] for c in backlog["columns"]}
+    # "open" scope's own convention (ADR-0049's TaskScope) includes in-progress alongside
+    # open — the Backlog column follows the same rule, only "done" moves to Completed.
+    assert cols["Backlog"] == ["open1", "doing"]
+    assert cols["Completed"] == ["done1"]
 
 
-def test_can_completed_card_is_done_and_offers_reopen() -> None:
-    can = build_tasks_can([_task("d", "Done backlog", status="done")], today=TODAY, scope="done")
-    card = can["columns"][0]["cards"][0]
+def test_backlog_completed_only_yields_just_the_completed_column() -> None:
+    # No undated task is unreachable, open or completed (#820's acceptance bar): an
+    # all-completed backlog still renders — as a lone Completed column, not an empty page.
+    backlog = build_tasks_backlog([_task("d", "Done backlog", status="done")], today=TODAY)
+    assert [c["title"] for c in backlog["columns"]] == ["Completed"]
+    assert _card_ids(backlog) == ["d"]
+
+
+def test_backlog_completed_card_is_done_and_offers_reopen() -> None:
+    backlog = build_tasks_backlog([_task("d", "Done backlog", status="done")], today=TODAY)
+    card = backlog["columns"][0]["cards"][0]
     assert card["done"] is True
-    # Schedule still leads; the primary complete/reopen slot follows it.
+    # Schedule still leads; the primary complete/reopen slot follows it — the muted
+    # Completed section is an ordinary card set, not a stripped-down view.
     reopen = card["actions"][1]
     assert reopen["label"] == "Reopen"
     assert reopen["args"]["status"] == "open"
 
 
-def test_schedule_round_trip_moves_a_task_between_can_and_board() -> None:
-    # Scheduling = giving the task a due date; clearing it sends the task back. The pages
-    # partition on `due` alone, so the round trip is expressible purely through the builders.
+def test_backlog_keeps_list_badge_and_move_picker() -> None:
+    task = _task("t1", "Someday", list_id="work", list_title="Work")
+    backlog = build_tasks_backlog(
+        [task], today=TODAY, lists=[("@default", "My Tasks"), ("work", "Work")]
+    )
+    card = backlog["columns"][0]["cards"][0]
+    assert {"label": "Work", "tone": "dim"} in card["badges"]  # category badge preserved
+    edit = next(a for a in card["actions"] if a.get("form") and "title" in (a["fields"] or []))
+    assert "to_list_id" in edit["fields"]  # the ADR-0038 move picker, same as the board
+
+
+def test_schedule_round_trip_moves_a_task_between_backlog_and_board() -> None:
+    # Scheduling = giving the task a due date; clearing it sends the task back. The Show
+    # partition is on `due` alone, so the round trip is expressible purely through the
+    # builders.
     undated = _task("t", "Buy a drill")
-    assert _card_ids(build_tasks_can([undated], today=TODAY)) == ["t"]
+    assert _card_ids(build_tasks_backlog([undated], today=TODAY)) == ["t"]
     assert build_tasks_board([undated], today=TODAY)["columns"] == []
 
     scheduled = undated.model_copy(update={"due": "2026-06-20"})
-    assert build_tasks_can([scheduled], today=TODAY)["columns"] == []
+    assert build_tasks_backlog([scheduled], today=TODAY)["columns"] == []
     assert _card_ids(build_tasks_board([scheduled], today=TODAY)) == ["t"]
 
     cleared = scheduled.model_copy(update={"due": None})
     assert build_tasks_board([cleared], today=TODAY)["columns"] == []
-    assert _card_ids(build_tasks_can([cleared], today=TODAY)) == ["t"]
+    assert _card_ids(build_tasks_backlog([cleared], today=TODAY)) == ["t"]
 
 
 # ── tags: grouping, suggestions, and Google honesty (#763) ────────────────────
@@ -663,10 +731,10 @@ def test_tags_group_option_offered_only_when_a_visible_task_has_tags() -> None:
     group2 = next(c for c in tagged["controls"] if c["id"] == "group")
     assert [o["value"] for o in group2["options"]] == ["due", "status", "priority", "tags", "none"]
 
-    # A tag on an *invisible* (undated → Can) task doesn't make the board offer the
+    # A tag on an *invisible* (undated → backlog) task doesn't make the board offer the
     # grouping — there would be nothing to group.
-    can_only = build_tasks_board([_task("1", "x", tags=["work"])], today=TODAY)
-    group3 = next(c for c in can_only["controls"] if c["id"] == "group")
+    backlog_only = build_tasks_board([_task("1", "x", tags=["work"])], today=TODAY)
+    group3 = next(c for c in backlog_only["controls"] if c["id"] == "group")
     assert "tags" not in [o["value"] for o in group3["options"]]
 
 
@@ -708,19 +776,19 @@ def test_add_and_edit_carry_known_tags_as_suggestions() -> None:
     assert edit["field_suggestions"] == {"tags": ["Alpha", "errand", "Work"]}
 
 
-def test_tag_suggestions_span_board_and_can() -> None:
-    # A tag used only on a Can (undated) task still autocompletes on the board, and vice
-    # versa — both builders compute suggestions over the full fetched set.
+def test_tag_suggestions_span_board_and_backlog() -> None:
+    # A tag used only on a backlog (undated) task still autocompletes on the board, and
+    # vice versa — both builders compute suggestions over the full fetched set.
     tasks = [
         _task("dated", "On the board", due=TODAY, tags=["planned"]),
-        _task("undated", "In the can", tags=["someday"]),
+        _task("undated", "In the backlog", tags=["someday"]),
     ]
     board_add = next(
         a for a in build_tasks_board(tasks, today=TODAY)["actions"] if a["tool"] == "tasks_add"
     )
-    can_add = build_tasks_can(tasks, today=TODAY)["actions"][0]
+    backlog_add = build_tasks_backlog(tasks, today=TODAY)["actions"][0]
     assert board_add["field_suggestions"] == {"tags": ["planned", "someday"]}
-    assert can_add["field_suggestions"] == {"tags": ["planned", "someday"]}
+    assert backlog_add["field_suggestions"] == {"tags": ["planned", "someday"]}
 
 
 def test_no_suggestions_key_without_any_tags() -> None:
@@ -784,6 +852,28 @@ def test_coerce_scope_clamps_unknown_to_open() -> None:
     assert coerce_scope("done") == "done"
     assert coerce_scope("bogus") == "open"
     assert coerce_scope(None) == "open"
+
+
+def test_coerce_show_accepts_the_three_scopes_and_backlog() -> None:
+    # `backlog` is a page-level Show value (#820) — a peer of the three status scopes,
+    # not a widened TaskScope; coerce_show clamps all four, unlike coerce_scope's three.
+    for view in ("board", "list"):
+        assert coerce_show("all", view=view) == "all"
+        assert coerce_show("done", view=view) == "done"
+        assert coerce_show("backlog", view=view) == "backlog"
+    assert coerce_show("bogus", view="board") == "open"
+    assert coerce_show(None, view="board") == "open"
+
+
+def test_coerce_show_corrects_backlog_to_open_under_calendar() -> None:
+    # A backlog has nothing dated to place on a calendar grid — an explicit or
+    # stale `show=backlog` under `view=calendar` is corrected back to the default (#820),
+    # the same dead-knob treatment #767 gives Group by under List/Calendar. Any other Show
+    # value is untouched under Calendar.
+    assert coerce_show("backlog", view="calendar") == "open"
+    assert coerce_show("all", view="calendar") == "all"
+    assert coerce_show("done", view="calendar") == "done"
+    assert coerce_show(None, view="calendar") == "open"
 
 
 # ── calendar-feed items (#469) ────────────────────────────────────────────────

@@ -12,6 +12,40 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Folded the Can into the Tasks page as a Show → Backlog option, instead of a second nav
+  entry** (#820) — the Can's own **partition** (#766, the board shows only dated tasks, the
+  backlog holds the rest) was right; its **placement** wasn't. A second left-nav page gave
+  the backlog the visual weight of its own module and split one workflow — triage the
+  backlog, schedule things onto the board — across two pages. The *Show* control (already
+  shared by the board and the Can, open/completed/all) gains a fourth value, **`backlog`**:
+  a page-level dated-ness partition, deliberately **not** a widened `TaskScope` — the app
+  branches on it before the provider fetch rather than teaching the providers a fourth read
+  scope. The Can's own `PageSpec` and its `GET /pages/can` route are gone (`can` now 404s
+  like any other unknown page id); its data now comes back from
+  `GET /pages/board?show=backlog`, rendered by a new `build_tasks_backlog` that keeps the
+  Can's exact shape — a flat column, an Add with no due/repeat field, and each card's
+  leading Schedule action. *Group by* is omitted whenever Show is Backlog (a flat backlog
+  has nothing to group, the same dead-knob rule #767 already gives List/Calendar), and the
+  **Calendar** view drops `backlog` from Show's own options entirely — a backlog has no due
+  dates to place on a grid — correcting a stale or explicit `show=backlog` back to Open
+  whenever `view=calendar`, so the control's echoed value is always inside its own offered
+  options. One axis nuance needed a decision: Show used to mean *status scope* on the board
+  and, independently, the Can page's *own* Show filter over the backlog; folded onto a
+  single control, only one Show value can be active at a time, so the backlog can no longer
+  carry that second, independent filter. The chosen rule fetches every status for the
+  backlog regardless and splits internally — open and in-progress tasks lead in a flat
+  **Backlog** column, any completed undated task follows in its own muted **Completed**
+  column (an ordinary struck-through card) — rather than making completed/all leak undated
+  items onto the dated board, which would have broken its "dated tasks only, no 'No date'
+  bucket" invariant. Either column is dropped when empty, neither is ever omitted, which is
+  what keeps the acceptance bar: no undated task, open or completed, becomes unreachable.
+  Agent- and web-form-facing copy was swept from "the Can" to "the backlog" / "Show →
+  Backlog" throughout — `tasks_add`'s tool description, both `due` parameter descriptions,
+  and a task's hover-card `href` (now a `?show=backlog` deep link on the one Tasks route
+  rather than a separate page's URL) — so the words the agent uses match what the operator
+  sees.
+  `tasks` 0.22.1→0.23.0 (MINOR).
+
 - **Disabling a connected calendar account silently emptied the Calendar page** (#814) —
   `CollectionRouter` resolved a *missing provider* in exactly opposite ways on the write and
   read paths. The trigger is a stale `enabled`/`active` collection reference: nothing prunes

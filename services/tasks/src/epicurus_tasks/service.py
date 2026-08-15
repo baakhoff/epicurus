@@ -1,19 +1,23 @@
 """Tasks module — provider-agnostic MCP tool surface (ADR-0016).
 
-Also serves two left-nav pages, both core-rendered ``board`` archetypes (ADR-0018).
-The module supplies data only — no markup ever leaves this module:
+Serves one left-nav page, a core-rendered ``board`` archetype (ADR-0018). The module
+supplies data only — no markup ever leaves this module:
 
-- **Tasks** (:func:`build_tasks_board`): the *scheduled* picture. Groups **dated** tasks
-  into columns by the operator's chosen dimension (due date / status / priority / list,
-  or a flat list) and *Show* filter (open / completed / all), declares those choices as
-  **view controls** (ADR-0049), and attaches per-card actions that invoke the module's
-  own MCP tools through the core (complete / reopen / edit) plus a board-level add.
-- **Can** (:func:`build_tasks_can`, #766): the backlog — every task **without** a due
-  date, in one flat column, partitioned out of the board entirely so the board is always
-  a clean picture of what's actually scheduled. Its Add creates undated tasks and each
-  card carries a one-tap **Schedule** action (a due-only form) that places the task on
-  the board; clearing a task's due date moves it back. A pure read-partition — no
-  provider contract change.
+- **Tasks** (:func:`build_tasks_board` / :func:`build_tasks_backlog`): the *Show*
+  control picks between two read partitions of the same fetch (open / completed / all /
+  **backlog**, #820). Open, Completed, and All render the *scheduled* picture — **dated**
+  tasks grouped into columns by the operator's chosen dimension (due date / status /
+  priority / list, or a flat list) — declared as **view controls** (ADR-0049) alongside
+  per-card actions that invoke the module's own MCP tools through the core (complete /
+  reopen / edit) plus a board-level add. **Backlog** instead renders every task
+  **without** a due date, in one flat column (plus a muted Completed section so a
+  finished backlog item stays reachable) — no Group by (a #767 dead knob with nothing to
+  group) and, under the Calendar view, no Backlog option on Show either (nothing dated to
+  place on a grid). Its Add creates undated tasks and each card carries a one-tap
+  **Schedule** action (a due-only form) that places the task on the board; clearing a
+  task's due date moves it back to the backlog. A pure read-partition — no provider
+  contract change. (Formerly a second **Can** left-nav page, #766 — folded into this
+  Show option, #820.)
 """
 
 from __future__ import annotations
@@ -59,9 +63,6 @@ log = get_logger("epicurus_tasks.service")
 MODULE_NAME = "tasks"
 TASKS_PAGE_ID = "board"
 """The id of the Tasks left-nav page; forms its nav route and data path."""
-
-CAN_PAGE_ID = "can"
-"""The id of the Can left-nav page (#766) — the undated-task backlog."""
 
 # An async hook returning the operator's enabled writable lists as ``(id, title)`` pairs.
 # Backs the ``tasks_lists`` tool so the chat agent can discover lists and pick one when
@@ -109,14 +110,15 @@ _Repeat = Annotated[
 # The due date rides the same `format` seam (ADR-0082's precedent): ``format: "date"`` makes
 # the shell's SchemaForm render a native date picker emitting a floating ``YYYY-MM-DD``. The
 # descriptions double as the form's field hint and the agent's parameter doc — both say where
-# an undated task goes (the Can, #766), so nothing ever vanishes silently from the board.
+# an undated task goes (the backlog, #766/#820), so nothing ever vanishes silently from the board.
 _ADD_DUE_DESCRIPTION = (
-    'Due date as an ISO date, e.g. "2026-01-15". A task without one is saved to the Can'
-    " — the undated backlog page — instead of the board, until it's scheduled."
+    'Due date as an ISO date, e.g. "2026-01-15". A task without one is saved to the backlog'
+    " — reachable on the Tasks page via Show → Backlog — instead of the board, until it's"
+    " scheduled."
 )
 _UPDATE_DUE_DESCRIPTION = (
     'New due date as an ISO date, e.g. "2026-01-15". Pass "" to clear it — the task then'
-    " moves off the board into the Can (the undated backlog page)."
+    " moves off the board into the backlog (Show → Backlog)."
 )
 _AddDue = Annotated[
     str, Field(json_schema_extra={"format": "date"}, description=_ADD_DUE_DESCRIPTION)
@@ -193,7 +195,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.21.0",
+        version="0.23.0",
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"
             " store (no account needed) plus any Google task lists the operator connects."
@@ -216,15 +218,6 @@ def build_module(
                 archetype="board",
                 icon="check",
                 nav_order=40,
-            ),
-            # The Can (#766): the undated-task backlog, right under the board in the nav.
-            # Same `board` archetype — one flat column, its own Add / Schedule actions.
-            PageSpec(
-                id=CAN_PAGE_ID,
-                title="Can",
-                archetype="board",
-                icon="inbox",
-                nav_order=41,
             ),
         ],
         resolver=True,
@@ -372,17 +365,17 @@ def build_module(
     ) -> Task:
         """Create a new task.
 
-        A task **without a due date is filed into the Can** — the undated backlog page —
-        rather than the board, so "note down: buy a drill" lands there until it's
-        scheduled (#766). Mention that when confirming an undated add. If more than one
-        task list exists and the user hasn't said which to use, call ``tasks_lists``
-        first and ask which list, then pass its id as ``list_id``.
+        A task **without a due date is filed into the backlog** — reachable on the Tasks
+        page via **Show → Backlog** — rather than the board, so "note down: buy a drill"
+        lands there until it's scheduled (#766). Mention that when confirming an undated
+        add. If more than one task list exists and the user hasn't said which to use, call
+        ``tasks_lists`` first and ask which list, then pass its id as ``list_id``.
 
         Args:
             title: Task title (required).
             notes: Optional free-text notes or description.
             due: Optional due date as an ISO date string, e.g. ``"2025-01-15"``.
-                Omit it to file the task in the Can (the undated backlog) instead of
+                Omit it to file the task in the backlog (Show → Backlog) instead of
                 the board.
             priority: Optional priority level — ``"low"``, ``"medium"``, or ``"high"``.
                 Google Tasks ignores this field.
@@ -480,10 +473,10 @@ def build_module(
             notes: New free-text notes.  Omit to leave them unchanged; pass ``""`` to clear.
             due: New due date as an ISO date string, e.g. ``"2025-01-15"``.  Omit
                 to leave it unchanged; pass ``""`` to clear it — the task then moves off
-                the board into the Can (the undated backlog, #766). Clearing is rejected
+                the board into the backlog (Show → Backlog, #766). Clearing is rejected
                 if the task has a live ``repeat`` rule and this call doesn't also touch
                 ``repeat``, since clearing the anchor would strand the recurrence (#534).
-                Setting a due date on a Can task schedules it onto the board.
+                Setting a due date on a backlog task schedules it onto the board.
             priority: New priority (``"low"``/``"medium"``/``"high"``).  Omit to
                 leave unchanged.  Google Tasks ignores this field.
             tags: New comma-separated tags, e.g. ``"work, urgent"``.  Omit to leave
@@ -669,7 +662,7 @@ async def enabled_write_lists(
     return lists, default
 
 
-# ── Tasks + Can pages: the `board` archetype data (ADR-0018 / ADR-0049 / #766) ────
+# ── The Tasks page: the `board` archetype data (ADR-0018 / ADR-0049 / #766 / #820) ────
 #
 # The module supplies data only; the core shell renders it. The board groups tasks into
 # columns by the operator's chosen *group-by* dimension and *Show* filter — declared as
@@ -677,10 +670,14 @@ async def enabled_write_lists(
 # actions that the shell turns into buttons, each invoking one of this module's MCP tools
 # through the core (validated against the manifest), so mutations never bypass the contract.
 #
-# The two pages partition every task by whether it has a due date (#766): the board shows
-# only *dated* tasks (under every grouping — there is no "No date" bucket any more) and the
-# Can holds the rest, so scheduling is exactly "give it a due date" and un-scheduling is
-# "clear it". The partition is read-side only; providers are untouched.
+# *Show* partitions every task by whether it has a due date (#766, folded onto this one
+# page's Show control as a fourth **Backlog** value in #820): Open/Completed/All render
+# only *dated* tasks (under every grouping — there is no "No date" bucket) via
+# :func:`build_tasks_board`, and Backlog renders the rest via :func:`build_tasks_backlog`,
+# so scheduling is exactly "give it a due date" and un-scheduling is "clear it". The
+# partition is read-side only; providers are untouched. `backlog` is a page-level value on
+# this control, never a widened :class:`TaskScope` — the branch happens before the
+# provider fetch (`app.py`'s ``page()``), not inside it.
 
 _BUCKET_ORDER = ("Overdue", "Today", "Upcoming")
 _BUCKET_TONE = {"Overdue": "danger", "Today": "accent"}
@@ -716,6 +713,17 @@ _SCOPE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("done", "Completed"),
     ("all", "All"),
 )
+
+# The fourth Show option (#820): a page-level dated-ness partition, not a provider TaskScope
+# — `app.py` branches on it before the provider fetch rather than widening `TaskScope`/
+# `VALID_TASK_SCOPES`. Offered after the three status scopes. Omitted from the Show control's
+# options under the Calendar view (`coerce_show`/`_show_control` below) — a backlog has no due
+# dates to place on a calendar grid, the same dead-knob rule #767 applies to Group by under
+# List/Calendar.
+BACKLOG_SHOW = "backlog"
+_SHOW_OPTIONS: tuple[tuple[str, str], ...] = (*_SCOPE_OPTIONS, (BACKLOG_SHOW, "Backlog"))
+_VALID_SHOWS: frozenset[str] = frozenset(value for value, _ in _SHOW_OPTIONS)
+_DEFAULT_SHOW = "open"
 
 # View-mode options the board's *View* switcher offers (#767): three client-side
 # representations of the same fetched payload. ``view`` is a **reserved control id** — a
@@ -757,13 +765,30 @@ def coerce_view(value: str | None) -> str:
     return value if value in _VALID_VIEWS else _DEFAULT_VIEW
 
 
+def coerce_show(value: str | None, *, view: str) -> str:
+    """Clamp a ``show`` query param to open/done/all/**backlog**, defaulting to open (#820).
+
+    ``backlog`` is a page-level dated-ness partition — a fourth value on the *Show* control,
+    not a widened :class:`TaskScope` — so this is intentionally its own clamp rather than
+    ``coerce_scope`` extended; a non-backlog result is still a valid ``TaskScope``. Under the
+    **Calendar** *view* a backlog has nothing dated to place on the grid, so an explicit or
+    stale ``show=backlog`` there is corrected back to the default (the same dead-knob rule
+    #767 already applies to *Group by* under List/Calendar).
+    """
+    show = value if value in _VALID_SHOWS else _DEFAULT_SHOW
+    if show == BACKLOG_SHOW and view == "calendar":
+        return _DEFAULT_SHOW
+    return show
+
+
 def _distinct_tags(tasks: list[Task]) -> list[str]:
     """The distinct tags across *tasks*, alphabetical (case-insensitive), first casing wins.
 
     The known-tags source for the add/edit forms' chips typeahead (#763,
     ``field_suggestions``): the module supplies the data, the shell renders the picker
-    (ADR-0018/0019). Computed over the full fetched set — both pages suggest the union,
-    so a tag used only on a Can task still autocompletes on the board and vice versa.
+    (ADR-0018/0019). Computed over the full fetched set — both Show partitions suggest the
+    union, so a tag used only on a backlog task still autocompletes on the board and vice
+    versa.
     """
     seen: dict[str, str] = {}
     for task in tasks:
@@ -816,7 +841,7 @@ def _bucket_for(task: Task, today: str) -> str:
 
     ISO date strings sort lexicographically, so the comparison needs no parsing.
     "No date" is unreachable as a *column* now — the board holds dated tasks only
-    (#766) — but the card builder still calls this for an undated Can card's badge
+    (#766) — but the card builder still calls this for an undated backlog card's badge
     tone (where no due badge is even added), so the branch stays for totality.
     """
     if not task.due:
@@ -944,9 +969,10 @@ def _task_card(
     **completed** card offers *Reopen* in place of *Complete* (both one-tap) and is marked
     ``done`` so the shell strikes it through. When *move_lists* is given (more than one
     writable list exists) the Edit form gains a **List** picker, prefilled to the task's
-    current list, that moves the task when changed (ADR-0038). With *schedule* (Can cards,
-    #766) the card leads with a **Schedule** action — a due-only ``tasks_update`` form,
-    prefilled to *today* — which is how a Can task is placed on the board.
+    current list, that moves the task when changed (ADR-0038). With *schedule* (backlog
+    cards, #766/#820) the card leads with a **Schedule** action — a due-only
+    ``tasks_update`` form, prefilled to *today* — which is how a backlog task is placed
+    on the board.
 
     Besides the rendered badges, the card carries its **structured fields** — ``due`` (an
     ISO date), ``priority``, ``tags``, ``list_title`` — as data (#767): the shell's List
@@ -1036,7 +1062,7 @@ def _task_card(
     }
     actions = [primary_action, edit_action, delete_action]
     if schedule:
-        # The Can's headline verb (#766): a one-tap form with just the due picker
+        # The backlog's headline verb (#766/#820): a one-tap form with just the due picker
         # (`format: "date"` renders the shell's native date field), prefilled to today so
         # opening and submitting schedules for today; picking another date wins. Setting
         # the due date is what moves the task onto the board.
@@ -1070,13 +1096,22 @@ def _task_card(
     }
 
 
-def _show_control(scope: str) -> dict[str, Any]:
-    """The *Show* (task scope) view control — shared by the board and the Can (#766)."""
+def _show_control(show: str, *, view: str) -> dict[str, Any]:
+    """The *Show* view control: status scope plus the ``backlog`` partition (#766/#820).
+
+    ``backlog`` is dropped from the offered *options* under the **Calendar** view — a
+    backlog has no due dates to place on a calendar grid, so offering it there would be a
+    dead option (the same rule #767 already applies to *Group by* under List/Calendar).
+    Board and List keep all four options. Callers are expected to have already run *show*
+    through :func:`coerce_show` with the same *view*, so a calendar request never echoes a
+    ``value`` absent from its own ``options``.
+    """
+    options = _SCOPE_OPTIONS if view == "calendar" else _SHOW_OPTIONS
     return {
         "id": "show",
         "label": "Show",
-        "value": scope,
-        "options": [{"value": value, "label": label} for value, label in _SCOPE_OPTIONS],
+        "value": show,
+        "options": [{"value": value, "label": label} for value, label in options],
     }
 
 
@@ -1084,20 +1119,22 @@ def _board_controls(
     *,
     view: str,
     group_by: str,
-    scope: str,
+    show: str,
     lists: list[tuple[str, str]] | None,
     has_tags: bool = False,
 ) -> list[dict[str, Any]]:
-    """The board's declarative view controls (ADR-0049 / #767): *View*, *Group by*, *Show*.
+    """The board's declarative view controls (ADR-0049 / #767 / #820): *View*, *Group by*, *Show*.
 
     The module declares the selectable options and the current value; the shell renders
     each as a labeled selector — except the reserved ``view`` control, which it renders as
     its standard view switcher — and re-fetches the page with ``?<id>=<value>`` on change.
     The *List* grouping is offered only when there are named lists to group by, and *Tags*
     (#763) only when a visible task actually carries a tag (*has_tags*) — both would
-    otherwise be dead options. The *Group by* control shows only under the **Board**
-    view — grouping shapes kanban columns; the List and Calendar representations are
-    flat/date-keyed and would render it as a dead knob (#767). *Show* applies everywhere.
+    otherwise be dead options. The *Group by* control shows only under the **Board** view
+    (grouping shapes kanban columns; the List and Calendar representations are flat/
+    date-keyed and would render it as a dead knob, #767) **and** only when *show* isn't
+    ``"backlog"`` — the backlog is always a flat column (plus its muted Completed section),
+    so grouping it would be a dead knob too (#820). *Show* applies everywhere.
     """
     controls: list[dict[str, Any]] = [
         {
@@ -1107,7 +1144,7 @@ def _board_controls(
             "options": [{"value": value, "label": label} for value, label in _VIEW_OPTIONS],
         }
     ]
-    if view == _DEFAULT_VIEW:
+    if view == _DEFAULT_VIEW and show != BACKLOG_SHOW:
         group_options = list(_GROUP_FIXED_OPTIONS)
         if lists:
             group_options.append(_GROUP_LIST_OPTION)
@@ -1122,7 +1159,7 @@ def _board_controls(
                 "options": [{"value": value, "label": label} for value, label in group_options],
             }
         )
-    controls.append(_show_control(scope))
+    controls.append(_show_control(show, view=view))
     return controls
 
 
@@ -1161,10 +1198,11 @@ def build_tasks_board(
     no path to do today. With two or more lists each task's Edit form also gains a List
     picker that moves it (ADR-0038).
 
-    The board shows **dated tasks only** (#766): undated ones are partitioned into the Can
-    (:func:`build_tasks_can`) under every grouping, so there is no "No date" bucket and the
-    board is always the picture of what's actually scheduled. Callers pass the full fetched
-    list; the partition happens here so no caller can accidentally leak backlog onto it.
+    The board shows **dated tasks only** (#766): undated ones are partitioned into the
+    backlog (:func:`build_tasks_backlog`, reached via Show → Backlog, #820) under every
+    grouping, so there is no "No date" bucket and the board is always the picture of
+    what's actually scheduled. Callers pass the full fetched list; the partition happens
+    here so no caller can accidentally leak backlog onto it.
 
     Tags (#763): *Group by → Tags* is offered only when a visible (dated) task actually
     carries one; the known tags across the **full** fetched set feed the add/edit chips
@@ -1173,7 +1211,7 @@ def build_tasks_board(
     list, where tags would be silently dropped (no such provider field), so the field is
     hidden rather than allowed to pretend (the same honesty rule as the per-card Edit).
     """
-    tag_suggestions = _distinct_tags(tasks)  # full set (#763): board + Can suggest the union
+    tag_suggestions = _distinct_tags(tasks)  # full set (#763): board + backlog suggest the union
     tasks = [t for t in tasks if t.due]
     has_tags = any(task.tags for task in tasks)
     # Grouping by list needs named lists, and by tags needs a visible tag; with none, fall
@@ -1235,37 +1273,62 @@ def build_tasks_board(
         "title": "Tasks",
         "columns": columns,
         "controls": _board_controls(
-            view=view, group_by=group_by, scope=scope, lists=lists, has_tags=has_tags
+            view=view, group_by=group_by, show=scope, lists=lists, has_tags=has_tags
         ),
         "actions": actions,
     }
 
 
-_CAN_COLUMN = "Backlog"
+_BACKLOG_COLUMN = "Backlog"
+_BACKLOG_COMPLETED_COLUMN = "Completed"
 
 
-def build_tasks_can(
+def build_tasks_backlog(
     tasks: list[Task],
     *,
     today: str,
-    scope: str = "open",
+    view: str = _DEFAULT_VIEW,
     lists: list[tuple[str, str]] | None = None,
     default_list_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build the ``board`` archetype payload for the **Can** page (#766).
+    """Build the ``board`` archetype payload for the Tasks page's **Backlog** Show option.
 
-    The Can is the backlog: every task **without** a due date, across the same enabled
-    lists the board aggregates (each card keeps its list/category badge), in one flat
-    column. It takes the same full fetched task list as :func:`build_tasks_board` and
-    keeps the complement — the two pages partition the tasks, so a task lives on exactly
-    one of them and moves between them purely by gaining or losing a due date.
+    Formerly a second **Can** left-nav page (#766); folded onto the Tasks page as a
+    fourth Show value in #820 — reached at ``GET /pages/board?show=backlog``, never its
+    own route. Every task **without** a due date, across the same enabled lists the board
+    aggregates (each card keeps its list/category badge). It takes the same full fetched
+    task list as :func:`build_tasks_board` — fetched at :class:`TaskScope` ``"all"``
+    regardless of any dated-board status filter, since ``show=backlog`` is a page-level
+    partition branched on *before* the provider fetch (``app.py``'s ``page()``), not a
+    widened ``TaskScope`` — and keeps the complement: the two builders partition one fetch,
+    so a task lives behind exactly one Show value and moves between them purely by gaining
+    or losing a due date.
+
+    **The axis nuance (#820).** Show used to double as *status scope* (open / completed /
+    all) on the board and, independently, the Can page's *own* Show filter — the Can could
+    apply open/completed/all to the backlog too. Folded onto one control, backlog can no
+    longer carry that second, independent status filter — only one Show value is active at
+    a time. So a completed undated task stays reachable by splitting on status **within**
+    the backlog instead of by a second control: open **and** in-progress tasks lead in the
+    flat **Backlog** column, and any **completed** undated task follows in its own,
+    visually muted **Completed** column (an ordinary card, ``done: true``, so the shell
+    strikes it through exactly like a completed dated card already does elsewhere) —
+    never omitted. Either column is dropped when empty; this is the simplest rule that
+    keeps "no undated task, open or completed, becomes unreachable" (the acceptance bar)
+    without inventing a second control.
 
     Cards are the ordinary task cards plus a leading **Schedule** action (a due-only
     ``tasks_update`` form, prefilled to *today*) that places the task on the board; the
-    board-level **Add** creates a task with *no* due field offered (and no ``repeat`` —
-    a rule needs a due date to anchor it), so new entries land here by construction.
-    The only view control is *Show* (open / completed / all — completed undated tasks
-    stay reachable, per the page's own filter); grouping would be noise in one column.
+    **Add** action creates a task with *no* due field offered (and no ``repeat`` — a rule
+    needs a due date to anchor it), so new entries land here by construction.
+
+    No *Group by* control — a flat backlog has nothing to group (#767's dead-knob rule
+    extended in #820) — and, under the **Calendar** view, no *Backlog* option on *Show* at
+    all (nothing dated to place on a grid): ``app.py``'s ``coerce_show`` clamps back to the
+    default there *before* this is ever reached, so *view* here is only ever ``"board"`` or
+    ``"list"``. It is still threaded through so the *View* control keeps echoing the
+    operator's choice between those two.
+
     When *lists* is given the Add form gains the same list picker as the board, and with
     two or more lists each card's Edit form gains the move picker (ADR-0038). Tags follow
     the board's honesty rule (#763): the Add offers the chips field (with the known-tags
@@ -1273,16 +1336,44 @@ def build_tasks_can(
     lands on Google, which silently drops tags — and each card's Edit offers it only for
     local tasks.
     """
-    tag_suggestions = _distinct_tags(tasks)  # full set (#763): board + Can suggest the union
+    tag_suggestions = _distinct_tags(tasks)  # full set (#763): board + backlog suggest the union
     undated = [t for t in tasks if not t.due]
+    open_undated = [t for t in undated if t.status != "done"]
+    done_undated = [t for t in undated if t.status == "done"]
     move_lists = lists if lists and len(lists) >= 2 else None
-    cards = [
-        _task_card(
-            t, today=today, move_lists=move_lists, schedule=True, tag_suggestions=tag_suggestions
+
+    def _cards(rows: list[Task]) -> list[dict[str, Any]]:
+        return [
+            _task_card(
+                t,
+                today=today,
+                move_lists=move_lists,
+                schedule=True,
+                tag_suggestions=tag_suggestions,
+            )
+            for t in rows
+        ]
+
+    columns: list[dict[str, Any]] = []
+    if open_undated:
+        columns.append(
+            {
+                "id": _slug(_BACKLOG_COLUMN),
+                "title": _BACKLOG_COLUMN,
+                "cards": _cards(open_undated),
+            }
         )
-        for t in undated
-    ]
-    columns = [{"id": _slug(_CAN_COLUMN), "title": _CAN_COLUMN, "cards": cards}] if cards else []
+    if done_undated:
+        # The muted completed section (#820): a distinct, always-second column rather than
+        # mixed into Backlog, so a finished backlog item reads as done at a glance while
+        # staying reachable — never silently dropped by the fold.
+        columns.append(
+            {
+                "id": _slug(_BACKLOG_COMPLETED_COLUMN),
+                "title": _BACKLOG_COMPLETED_COLUMN,
+                "cards": _cards(done_undated),
+            }
+        )
     add_action: dict[str, Any] = {
         "tool": "tasks_add",
         "label": "Add task",
@@ -1305,9 +1396,15 @@ def build_tasks_can(
         if default_list_id is not None:
             add_action["form_values"] = {"list_id": default_list_id}
     return {
-        "title": "Can",
+        "title": "Tasks",
         "columns": columns,
-        "controls": [_show_control(scope)],
+        "controls": _board_controls(
+            view=view,
+            group_by=_DEFAULT_GROUP,
+            show=BACKLOG_SHOW,
+            lists=lists,
+            has_tags=False,
+        ),
         "actions": [add_action],
     }
 
@@ -1363,10 +1460,12 @@ def task_hover_card(task: Task) -> dict[str, Any]:
         details.append(HoverCardDetail(label="Tags", value=", ".join(task.tags)))
     if task.repeat:
         details.append(HoverCardDetail(label="Repeat", value=_repeat_label(task.repeat)))
-    # The link leads to the page the task actually lives on (#766): the board for a dated
-    # task, the Can for an undated one — "appears in the Can and nowhere else" includes
-    # where we send the operator looking for it.
-    page_id = TASKS_PAGE_ID if task.due else CAN_PAGE_ID
+    # The link leads to where the task actually lives (#766/#820): the board for a dated
+    # task, or a Show=backlog deep link for an undated one — one page now (the Can folded
+    # into the Tasks page's Show control), so only the query string changes.
+    href_url = f"/m/{MODULE_NAME}/{TASKS_PAGE_ID}"
+    if not task.due:
+        href_url += f"?show={BACKLOG_SHOW}"
     return HoverCard(
         title=task.title,
         description=task.notes or "",
@@ -1374,7 +1473,7 @@ def task_hover_card(task: Task) -> dict[str, Any]:
         # A calendar-feed chip's hover-card needs a way back to the task (#469's own
         # acceptance criteria); every task hover-card gains it, not just those reached
         # from the calendar — consistent regardless of where the chip was clicked.
-        href=HoverCardLink(label="Open in Tasks", url=f"/m/{MODULE_NAME}/{page_id}"),
+        href=HoverCardLink(label="Open in Tasks", url=href_url),
     ).model_dump()
 
 

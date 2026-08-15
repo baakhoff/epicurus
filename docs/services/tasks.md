@@ -225,7 +225,11 @@ undated task files into the Can — the same text doubles as the web form's fiel
 task's hover-card `href` now points at the page it actually lives on (board or Can). Purely a
 read-partition: no provider or DB change; dateless tasks from any provider (Google allows
 them) appear in the Can, and lead-time notifications are untouched (they key on due dates,
-which Can items don't have — by design).
+which Can items don't have — by design). **Superseded by v0.23.0** (#820): the Can's second
+left-nav page folded into the Tasks page's *Show → Backlog* option — the partition, the
+Schedule flow, and the copy-honesty rule described above are unchanged; only the page moved,
+and completed-item reachability moved from the Can's own Show filter to a muted Completed
+section within the backlog (see v0.23.0 below).
 
 **v0.20.0** gives the Tasks board **three representations of the same data** (#767) —
 **Board** (kanban), **List** (sortable flat rows), and **Calendar** (a month grid placing
@@ -238,9 +242,11 @@ columns — the flat/date-keyed views would render it as a dead knob) while *Sho
 everywhere. Cards additionally carry their **structured fields** — `due` (bare ISO date),
 `priority`, `tags`, `list_title` — as data beside the rendered badges, which is what the
 List sorts by and the Calendar places by. The payload is identical across views; the chosen
-view persists per page shell-side (localStorage), with a `?view=` deep-link winning. The
-Can keeps no View control (a backlog has nothing dated to place, and it is already a flat
-list). The cross-module calendar *feed* (#469, v0.16.0 above) is untouched — this is a
+view persists per page shell-side (localStorage), with a `?view=` deep-link winning. (At the
+time of this release the Can kept no View control at all, being its own page — since
+superseded by v0.23.0, where the folded-in backlog keeps Board/List but the Calendar view has
+nothing dated to place, see below.) The cross-module calendar *feed* (#469, v0.16.0 above) is
+untouched — this is a
 tasks-page-local representation, not a replacement for the calendar page's overlay.
 
 **v0.21.0** finishes wiring **tags** into the board UX (#763) — the model and tools carried
@@ -251,7 +257,7 @@ grouping: a task appears under **each** of its tags, untagged tasks land in an *
 column, and columns sort alphabetically (case-insensitive, Untagged last, stable across
 reloads). **Chips input**: the add/edit forms' `tags` field now declares `format: "tags"`
 (the ADR-0082 seam), so the shell renders removable chips + a typeahead; the module supplies
-its distinct tags (across board *and* Can) as `field_suggestions` — a new `field_choices`
+its distinct tags (across board *and* backlog) as `field_suggestions` — a new `field_choices`
 sibling for open suggestions — and the submitted value stays the comma-separated string, so
 the MCP contract is unchanged. **Google honesty**: tags are local-only (Google Tasks has no
 such field and the provider ignores them on write), so the tags field is **hidden wherever
@@ -287,6 +293,40 @@ close either; making every read/write path tolerate a stale ref regardless of *w
 stale is the durable fix (ADR-0030's local-is-the-silent-default already implied this — the
 router just didn't fully honor it).
 
+**v0.23.0** folds **the Can into the Tasks page** (#820): the left nav goes back to one tasks
+entry, and the backlog is reached via **Show → Backlog** on the Tasks page instead of a
+second page. The Can's own `PageSpec` (and its `GET /pages/can` route) is gone —
+`GET /pages/can` now 404s like any other unknown page id; the backlog's data now comes back
+from `GET /pages/board?show=backlog`. `show` is clamped by the module (`coerce_show`) to
+open/done/all/**backlog**: the first three are unchanged — they still fetch that
+:class:`TaskScope` and render the dated board via `build_tasks_board` — and `backlog` is a
+**page-level partition value, not a widened `TaskScope`**: the app branches on it *before*
+the provider fetch (fetching every status, `scope="all"`) and renders the undated backlog via
+a new `build_tasks_backlog`, which keeps the Can's shape — one flat column, an Add with no
+due/repeat field, and each card's leading **Schedule** action. *Group by* is omitted whenever
+`show=backlog` (a flat backlog has nothing to group, the same #767 dead-knob rule already
+applied to List/Calendar), and the **Calendar** view drops `backlog` from Show's own options
+entirely — a backlog has no due dates to place on a grid, so `coerce_show` also corrects a
+stale or explicit `show=backlog` back to Open whenever `view=calendar`, keeping the Show
+control's echoed value always inside its own offered options.
+
+**The axis nuance.** Show used to mean two different things depending on the page: a *status
+scope* (open/completed/all) on the board, and, independently, the Can's *own* Show filter
+over the same three values applied to the backlog. Folded onto one control, only one Show
+value can be active at a time, so the backlog can no longer carry that second, independent
+status filter. The chosen rule: `build_tasks_backlog` always fetches every status and splits
+on it internally — open **and** in-progress tasks lead in a flat **Backlog** column, and any
+**completed** undated task follows in its own, visually muted **Completed** column (an
+ordinary struck-through card, exactly like a completed dated card elsewhere) — never omitted.
+This is the simplest rule that keeps the acceptance bar — **no undated task, open or
+completed, becomes unreachable** — without inventing a second control. Every other undated
+Can behavior (the partition itself, the Schedule round-trip, the per-card actions, the Google
+tags honesty rule, #766) is unchanged; only the page moved and completed reachability moved
+from a second Show filter to the muted Completed section. Copy sweep: agent- and
+web-form-facing text now says "the backlog" / "Show → Backlog" instead of "the Can" — the
+`tasks_add` tool description, both `due` param descriptions, and a task's hover-card `href`
+(now `/m/tasks/board?show=backlog` for an undated task rather than a separate page's URL).
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -296,9 +336,9 @@ router just didn't fully honor it).
 | `tasks_list(list_id?)` | `list_id`: optional list identifier (omit for default) | Open tasks as **entity-reference chips** (ADR-0019), newest first. |
 | `tasks_lists()` | none | The available lists (categories) as `- <title> — id: <id>` text, so the agent can pick one (or report only the default list exists). |
 | `tasks_create_list(title)` | `title`: the new list's display name | The created list as a `Collection` (`account`/`collection`/`title`/`writable`). **Google-only** (#474) — raises if no external account is connected; the local store has no lists of its own. |
-| `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?, repeat?)` | `title`: required; rest optional. `due`: omit it and the task files into the **Can** (the undated backlog page, #766) instead of the board — the tool description says so, so "note down: buy a drill" lands there knowingly. `list_id`: target list (from `tasks_lists`). `repeat`: RRULE making it recurring (needs a `due`) | The created `Task`. |
+| `tasks_add(title, notes?, due?, priority?, tags?, status?, list_id?, repeat?)` | `title`: required; rest optional. `due`: omit it and the task files into the **backlog** (Show → Backlog on the Tasks page, #766/#820) instead of the board — the tool description says so, so "note down: buy a drill" lands there knowingly. `list_id`: target list (from `tasks_lists`). `repeat`: RRULE making it recurring (needs a `due`) | The created `Task`. |
 | `tasks_complete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | The updated `Task` with `completed=True`. A recurring task also spawns its next instance (ADR-0082). |
-| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?, repeat?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` / `repeat=""` **clears** that field (`None`/omitted leaves it unchanged) — clearing `due` moves the task off the board into the **Can** (#766), and raises while a repeat rule is still live (#534; clear `repeat=""` too, or give it a new due, instead); setting a due date on a Can task schedules it onto the board. `to_list_id`: **move** the task to this list; `repeat`: an RRULE (`""` makes it one-off) | The updated `Task` (the moved task on a move). |
+| `tasks_update(task_id, title?, notes?, due?, priority?, tags?, status?, list_id?, to_list_id?, repeat?)` | `task_id`: provider task ID; pass **at least one** mutable field or `to_list_id` — a field-less call raises. `due=""` / `notes=""` / `repeat=""` **clears** that field (`None`/omitted leaves it unchanged) — clearing `due` moves the task off the board into the **backlog** (#766/#820), and raises while a repeat rule is still live (#534; clear `repeat=""` too, or give it a new due, instead); setting a due date on a backlog task schedules it onto the board. `to_list_id`: **move** the task to this list; `repeat`: an RRULE (`""` makes it one-off) | The updated `Task` (the moved task on a move). |
 | `tasks_delete(task_id, list_id?)` | `task_id`: provider task ID; `list_id`: optional — omit to have it looked up across your lists | A short confirmation string. **Permanent** — unlike `tasks_complete`, the task is removed. Idempotent on the local store (a missing id is a no-op). |
 
 All tools are **provider-agnostic** (ADR-0030/0036). `tasks_list` with no `list_id`
@@ -345,7 +385,7 @@ side table keyed by task id (ADR-0082).
 | `GET /manifest` | Module manifest (tools, UI declaration, `collections` spec). |
 | `GET /status` | `{"google_connected": bool}` (best-effort live OAuth check). |
 | `GET /accounts` | Connected accounts + their task lists for the picker (ADR-0030). The core proxies + merges this at `GET /platform/v1/modules/tasks/collections`. |
-| `GET /pages/{id}` | Page data for a manifest-declared page — `board` (the Tasks board) or `can` (the undated backlog, #766); both `board`-archetype payloads the core proxies (ADR-0018). Accepts forwarded `show` (open/done/all) on both pages, plus `group` (due/status/priority/list/none) and `view` (board/list/calendar, #767) on the board (ADR-0049), each clamped to a known value. 404 for an unknown id. |
+| `GET /pages/{id}` | Page data for the one manifest-declared page, `board` (the Tasks page); a `board`-archetype payload the core proxies (ADR-0018). `?show` (open/done/all/**backlog**, #766/#820) picks the dated board or the undated backlog partition; `?group` (due/status/priority/list/none, omitted under `show=backlog`) and `?view` (board/list/calendar, #767 — `backlog` drops off Show's own options under `view=calendar`) round out the view controls (ADR-0049), each clamped to a known value. 404 for an unknown id — including `can`, whose route retired with the page it served. |
 | `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
@@ -359,23 +399,23 @@ side table keyed by task id (ADR-0082).
 | **Status** | Whether Google is connected (polled from `GET /status`). |
 | **Lists** | Connected accounts + their task lists: per-list on/off toggles and a **default** picker for new tasks (ADR-0030/0036). |
 | **Actions** | None — `tasks_list` returns entity-reference chips (surfaced in chat), so it is not a card-action button. |
-| **Tasks page** | A left-nav `board` page of *scheduled* (dated) tasks (see below). |
-| **Can page** | A second left-nav `board` page — the undated backlog (#766, see below). |
+| **Tasks page** | A left-nav `board` page of *scheduled* (dated) tasks, with the undated backlog one Show selection away (**Show → Backlog**, #766/#820 — see below). |
 
-### The Tasks + Can pages — `board` archetype (ADR-0018, #766)
+### The Tasks page — `board` archetype (ADR-0018, #766/#820)
 
-The module declares two pages — `{id: "board", title: "Tasks"}` and `{id: "can", title:
-"Can"}`, both `archetype: "board"` — and serves their data at `GET /pages/board` /
-`GET /pages/can`. The core renders both; the module ships **no markup**. The two pages
-**partition every task by whether it has a due date**: the board shows only dated tasks
-(under every grouping) and the Can holds the undated backlog, so a task lives on exactly
-one page and moves between them purely by gaining or losing a due date. The partition is
-read-side only — no provider contract change; an undated task from any provider shows in
-the Can.
+The module declares one page — `{id: "board", title: "Tasks"}`, `archetype: "board"` — and
+serves its data at `GET /pages/board`. The core renders it; the module ships **no markup**.
+The **Show** control **partitions every task by whether it has a due date**, among other
+things: `open` / `done` / `all` render the board's dated tasks (under every grouping) and
+`backlog` renders the undated ones instead, so a task lives behind exactly one Show value
+and moves between them purely by gaining or losing a due date. The partition is read-side
+only — no provider contract change; an undated task from any provider shows in the backlog.
+(Formerly two pages — `board` and a second `can` — until #820 folded the Can into this one
+Show option; `GET /pages/can` now 404s like any other unknown id.)
 
 - **Columns** group the tasks **aggregated across every enabled list** by the operator's
   chosen **Group by** dimension (ADR-0049): **Due date** (default — Overdue / Today / Upcoming;
-  the "No date" bucket is gone, #766 — undated tasks live in the Can), **Status**, **Priority**,
+  the "No date" bucket is gone, #766 — undated tasks live in the backlog), **Status**, **Priority**,
   **List** (one column per category), **Tags** (#763 — offered only when a visible task has a
   tag; **multi-membership**: a task appears under each of its tags, untagged ones under
   **Untagged**, columns alphabetical with Untagged last), or **None** (a single flat list).
@@ -393,17 +433,24 @@ the Can.
 - **View controls** (`controls` in the board data) are a **View** switcher (#767 — Board /
   List / Calendar, the archetype's reserved `view` control; the shell renders the segmented
   switcher, the alternate representations, and the per-page persistence — see
-  [modules.md](../reference/modules.md)), a **Group by** selector, and a **Show** filter
-  (Open / Completed / All), rendered by the shell as a toolbar; changing one re-fetches the
-  page with a forwarded query param (`view` / `group` / `show`, each clamped to a known
-  value). *Group by* is offered only under the Board view — grouping shapes kanban columns;
-  the List and Calendar representations are flat/date-keyed. The *Show* filter chooses the
-  **scope** the providers read (`open` / `done` / `all`) and applies under every view, so
-  the operator can review completed work. Completing an open task removes it from the open
-  view; in the Completed/All views a completed card is struck through (`done: true`) and
-  offers **Reopen** (`tasks_update status=open`) in place of **Complete**. Each card also
-  carries its structured `due` / `priority` / `tags` / `list_title` fields as data (#767) —
-  what the List view sorts by and the Calendar view places by.
+  [modules.md](../reference/modules.md)), a **Group by** selector, and a **Show** filter —
+  **Open / Completed / All / Backlog** (#820, the fourth value folding in the former Can
+  page) — rendered by the shell as a toolbar; changing one re-fetches the page with a
+  forwarded query param (`view` / `group` / `show`, each clamped to a known value). *Group
+  by* is offered only under the Board view **and** only when Show isn't Backlog — grouping
+  shapes kanban columns, and a flat backlog has nothing to group either way (#767's
+  dead-knob rule, extended in #820). Open/Completed/All choose the **scope** the providers
+  read (`open` / `done` / `all`) and apply under every view, so the operator can review
+  completed work; **Backlog** instead branches to the undated partition (fetched at every
+  status internally — see below) *before* the provider fetch, rather than widening that
+  scope. A backlog has no due dates to place on a grid, so the **Calendar** view drops
+  `backlog` from Show's own options entirely, and the module corrects a stale or explicit
+  `show=backlog` back to Open whenever `view=calendar` — the echoed Show value is always
+  inside its own offered options. Completing an open task removes it from the open view;
+  in the Completed/All views a completed card is struck through (`done: true`) and offers
+  **Reopen** (`tasks_update status=open`) in place of **Complete**. Each card also carries
+  its structured `due` / `priority` / `tags` / `list_title` fields as data (#767) — what the
+  List view sorts by and the Calendar view places by.
 - **Mutations are declarative actions** that name an MCP tool; the shell invokes it through
   the core (validated against the manifest) and refetches. Each card offers **Complete**
   (`tasks_complete`, one-tap), **Edit** (`tasks_update`, a form prefilled from the card), and
@@ -424,17 +471,26 @@ the Can.
   list picker does — Google-only (#474); creating one still needs the operator's one-time
   enable toggle before it shows up as a category (see the version note above). The board never
   carries credentials or business logic — it is data plus tool references.
-- **The Can** (#766) is one flat **Backlog** column of the undated tasks, built by the pure
-  `build_tasks_can(tasks, today=…, scope=…, lists=…, default_list_id=…)` from the **same
-  fetched list** the board partitions. Cards are the ordinary task cards (category badge,
-  Complete/Reopen, Edit with the move picker, Delete) plus a leading **Schedule** action — a
-  due-only `tasks_update` form prefilled to today, rendered as the shell's native date picker
-  via the `format: "date"` hint — which is how a task is placed on the board; clearing the due
-  date (from any Edit form or the agent) sends it back. Its **Add** offers no due or `repeat`
-  field (a rule needs a due anchor), so new entries land in the Can by construction, and its
-  only view control is **Show** (open / completed / all) — grouping would be noise in one
-  column. The board's own Add still accepts an empty due; the `due` field's hint (the tool
-  parameter description) says the task is then saved to the Can, so nothing vanishes silently.
+- **The backlog** (`show=backlog`, #766/#820 — formerly the standalone Can page) is the
+  undated tasks, built by the pure
+  `build_tasks_backlog(tasks, today=…, view=…, lists=…, default_list_id=…)` from the **same
+  fetched list** (`scope="all"`) the board partitions. **The axis nuance**: Show used to mean
+  status scope on the board *and*, independently, the Can page's own Show filter over the
+  backlog — folded onto one control, only one Show value is active at a time, so the backlog
+  can't carry that second filter any more. The chosen rule instead splits the backlog by
+  status internally into up to two columns: open **and** in-progress tasks lead in a flat
+  **Backlog** column, and any **completed** undated task follows in its own, visually muted
+  **Completed** column (an ordinary struck-through card) — either column dropped when empty,
+  neither ever omitted. This is the simplest rule that keeps a completed undated task
+  reachable without a second control. Cards are otherwise the ordinary task cards (category
+  badge, Complete/Reopen, Edit with the move picker, Delete) plus a leading **Schedule**
+  action — a due-only `tasks_update` form prefilled to today, rendered as the shell's native
+  date picker via the `format: "date"` hint — which is how a task is placed on the board;
+  clearing the due date (from any Edit form or the agent) sends it back. Its **Add** offers
+  no due or `repeat` field (a rule needs a due anchor), so new entries land in the backlog by
+  construction. The board's own Add still accepts an empty due; the `due` field's hint (the
+  tool parameter description) says the task is then saved to the backlog, so nothing vanishes
+  silently.
 
 ### Connected accounts & collections (ADR-0030)
 
@@ -478,10 +534,11 @@ envelope (`title` · `description` · `details: [{label, value}]`): the task's n
 description, plus **Due** (when set) and **Status** (Open / Completed) detail rows. An unknown
 `kind` or a missing task is a `404`. The core proxies it at
 `GET /platform/v1/modules/tasks/resolve/{kind}/{ref_id}`. Every task hover-card also carries an
-`href` back to the page the task lives on — `/m/tasks/board` for a dated task, `/m/tasks/can`
-for an undated one (#469/#766) — added so a task reached from the calendar-feed overlay (below)
-has a way back to it; the same link shows regardless of where the chip was clicked (chat, the
-calendar, or elsewhere).
+`href` back to where the task lives — `/m/tasks/board` for a dated task, or
+`/m/tasks/board?show=backlog` for an undated one (#469/#766; one page and a query string since
+#820, previously a separate `/m/tasks/can`) — added so a task reached from the calendar-feed
+overlay (below) has a way back to it; the same link shows regardless of where the chip was
+clicked (chat, the calendar, or elsewhere).
 
 ### Calendar-feed: task due-dates on the calendar page (#469, ADR-0088)
 
@@ -695,6 +752,6 @@ Package `epicurus_tasks`:
 | `router.py` | `TasksRouter` — routes ops to the operator's active list across local + Google (ADR-0030); every read and write resolves a ref to a provider through the shared `_resolve_provider`, degrading a missing/disconnected one to local with a warning (#795), and a multi-ref read de-dupes through `_dedup_refs`; moves a task between lists by recreate+delete (ADR-0038); `_locate_task` resolves an existing-task mutation across lists when `list_id` is omitted (#475); `create_list` routes to the sole configured external provider (#474); `complete_task` **materializes** a recurring task's next instance via `_materialize_next` (#471, ADR-0082), and `list_tasks` sweeps overdue ones the same way (#515) — both funnel through the shared `_materialize`, guarded by an in-process `_claim_materialize`/`_release_materialize` pair against concurrent double-materialization and retire-failure amplification (#533); `operator_clock` resolves the sweep's "today" in the operator's timezone rather than UTC (#433, #535). |
 | `recurrence.py` | Pure RRULE math (#471, ADR-0082): `validate_rrule` (tool-boundary check) + `next_due` (the next occurrence, **skip-missed** policy), date-only (naive) parsing. |
 | `db.py` | `TaskStore` — SQLAlchemy ORM + CRUD helpers (list/add/complete/update/get/delete) for the local store (incl. the `repeat` column); `RepeatStore` — the `task_repeats` side table for external-provider recurrence rules (#471). |
-| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`, the last two taking `repeat`) + manifest UI (+ `collections` spec) + the Tasks + Can `board` pages (two `PageSpec`s + the pure `build_tasks_board` / `build_tasks_can` builders partitioning dated from undated (#766), group-by/scope **view controls**, the **New list** board action, the **Schedule** Can-card action, the `repeat` form field + badge, and `coerce_group`/`coerce_scope`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
-| `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}` (board + can), `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
+| `service.py` | MCP tools (`tasks_list`/`tasks_lists`/`tasks_create_list`/`tasks_add`/`tasks_complete`/`tasks_update`/`tasks_delete`, the last two taking `repeat`) + manifest UI (+ `collections` spec) + the Tasks `board` page (one `PageSpec` + the pure `build_tasks_board` / `build_tasks_backlog` builders partitioning dated from undated (#766, folded onto Show in #820), view controls — group-by/scope plus the `backlog` Show value and its Calendar-view interplay — the **New list** board action, the backlog card's **Schedule** action, the `repeat` form field + badge, and `coerce_group`/`coerce_scope`/`coerce_show`, ADR-0049) + entity-reference, hover-card & chat-attachment helpers + `tasks_accounts` (the `/accounts` view). |
+| `app.py` | Lifespan, provider router wiring, `GET /status`, `GET /accounts`, `GET /pages/{id}` (the one `board` page; `?show=backlog` for the undated partition — `can` 404s), `GET /attachments[/{ref_id}]`, `GET /resolve/{kind}/{ref_id}`, app factory. |
 | `settings.py` | `TasksSettings` (adds `platform_url`, `database_url`). |

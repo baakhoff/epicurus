@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, HTTPException, Request
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -24,22 +24,22 @@ from epicurus_tasks.db import RepeatStore, TaskStore
 from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
 from epicurus_tasks.lead_time_prefs import LeadTimePrefsStore
 from epicurus_tasks.local_provider import LocalTasksProvider
-from epicurus_tasks.models import Task
+from epicurus_tasks.models import Task, TaskScope
 from epicurus_tasks.providers import TasksProvider
 from epicurus_tasks.router import TasksRouter, operator_clock
 from epicurus_tasks.scheduler import FiredMarkerStore, run_periodic
 from epicurus_tasks.service import (
-    CAN_PAGE_ID,
+    BACKLOG_SHOW,
     MODULE_NAME,
     TASK_KIND,
     TASKS_PAGE_ID,
     TaskNotFound,
     build_module,
+    build_tasks_backlog,
     build_tasks_board,
-    build_tasks_can,
     calendar_feed_items,
     coerce_group,
-    coerce_scope,
+    coerce_show,
     coerce_view,
     enabled_write_lists,
     fetch_task,
@@ -182,28 +182,41 @@ def create_app() -> FastAPI:
 
     @app.get("/pages/{page_id}")
     async def page(page_id: str, request: Request) -> dict[str, Any]:
-        """Serve the Tasks / Can pages' `board` data (ADR-0018/0036/0047/#766); core-proxied.
+        """Serve the Tasks page's `board` data (ADR-0018/0036/0047/#766/#820); core-proxied.
 
         Tasks from every enabled list are aggregated, then **partitioned by due date**
-        (#766): the ``board`` page groups the dated ones into columns via
-        ``build_tasks_board`` (no "No date" bucket any more) and the ``can`` page holds
-        the undated backlog via ``build_tasks_can`` — same fetch, two read views. Each
-        card is tagged with its list (category). The **view controls** drive forwarded
-        query params (ADR-0049): ``group`` picks the board's column layout (due / status
-        / priority / list / none; the Can is a single flat column and ignores it),
-        ``view`` the board's client-side representation (board / list / calendar, #767 —
-        echoed so the *View* switcher shows the active choice and *Group by* hides off
-        the Board view), and ``show`` the task scope (open / completed / all) fetched
-        from the providers; all are clamped to known values. A single failing list is
-        skipped inside the router (#209), so the page degrades rather than blanking; the
-        ``(GoogleTasksError,
-        ValueError) → 502`` is a backstop. The Add forms offer a picker of the operator's
-        enabled writable lists.
+        (#766) via the ``show`` **view control**, folded onto this one page in #820 (a
+        second ``can`` page/route no longer exists — ``/pages/can`` now 404s like any
+        other unknown id). ``show`` is clamped by ``coerce_show`` to one of
+        open/done/all/**backlog**: the first three fetch that :class:`TaskScope` and
+        render the dated board via ``build_tasks_board`` (no "No date" bucket); ``backlog``
+        is a *page-level* partition, not a widened ``TaskScope`` — it is branched on here,
+        **before** the provider fetch, to fetch every status (``"all"``) and render the
+        undated backlog via ``build_tasks_backlog`` instead, which splits completed undated
+        tasks into their own muted section rather than needing a second, independent status
+        filter (same fetch either way — two read views). Each card is tagged with its list
+        (category). The other **view controls** drive forwarded query params (ADR-0049):
+        ``group`` picks the board's column layout (due / status / priority / list / none;
+        omitted under ``show=backlog`` — a flat backlog has nothing to group, #767's
+        dead-knob rule) and ``view`` the client-side representation (board / list /
+        calendar, #767 — echoed so the *View* switcher shows the active choice and *Group
+        by* hides off the Board view). ``view=calendar`` has nothing to place a backlog on,
+        so ``coerce_show`` corrects a ``show=backlog`` there back to the default *before*
+        the branch above ever sees it — the Show control's own options drop ``backlog``
+        under Calendar too, so the two always agree. A single failing list is skipped
+        inside the router (#209), so the page degrades rather than blanking; the
+        ``(GoogleTasksError, ValueError) → 502`` is a backstop. The Add forms offer a
+        picker of the operator's enabled writable lists.
         """
-        if page_id not in (TASKS_PAGE_ID, CAN_PAGE_ID):
+        if page_id != TASKS_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no page {page_id!r}")
         tenant = settings.default_tenant_id
-        scope = coerce_scope(request.query_params.get("show"))
+        view = coerce_view(request.query_params.get("view"))
+        show = coerce_show(request.query_params.get("show"), view=view)
+        # `backlog` fetches every status rather than a single TaskScope (#820) — see
+        # build_tasks_backlog's docstring for why that's what keeps a completed undated
+        # task reachable without a second, independent Show filter.
+        scope: TaskScope = "all" if show == BACKLOG_SHOW else cast(TaskScope, show)
         try:
             tasks = await provider.list_tasks(tenant, scope=scope)
         except (GoogleTasksError, ValueError) as exc:
@@ -220,20 +233,20 @@ def create_app() -> FastAPI:
         # request (#555). Core unreachable → this degrades to UTC exactly like the sweep's own
         # fallback (`operator_clock` → `_resolve_timezone`), so the two never disagree.
         today = await operator_today()
-        if page_id == CAN_PAGE_ID:
-            return build_tasks_can(
+        if show == BACKLOG_SHOW:
+            return build_tasks_backlog(
                 tasks,
                 today=today,
-                scope=scope,
+                view=view,
                 lists=lists,
                 default_list_id=default_list_id,
             )
         return build_tasks_board(
             tasks,
             today=today,
-            view=coerce_view(request.query_params.get("view")),
+            view=view,
             group_by=coerce_group(request.query_params.get("group")),
-            scope=scope,
+            scope=show,
             lists=lists,
             default_list_id=default_list_id,
         )

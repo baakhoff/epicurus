@@ -19,6 +19,17 @@ services:
       WEBSEARCH_MAX_RESULTS: ${WEBSEARCH_MAX_RESULTS:-5}
       # Comma-separated SearXNG engine names (empty = SearXNG defaults).
       WEBSEARCH_ENGINES: ${WEBSEARCH_ENGINES:-}
+      # link_ingest caps (#739). Each bounds a fetch of an *operator-supplied* URL made from
+      # inside this network, so they are conservative on purpose — raise them knowingly.
+      # Full policy: docs/services/websearch.md.
+      LINK_INGEST_MAX_BYTES: ${LINK_INGEST_MAX_BYTES:-5000000}
+      LINK_INGEST_TIMEOUT_S: ${LINK_INGEST_TIMEOUT_S:-20}
+      LINK_INGEST_MAX_REDIRECTS: ${LINK_INGEST_MAX_REDIRECTS:-5}
+      LINK_INGEST_MAX_TEXT_CHARS: ${LINK_INGEST_MAX_TEXT_CHARS:-20000}
+      # Metadata + uploader subtitles only; nothing is downloaded, so no ffmpeg is involved.
+      LINK_INGEST_YTDLP: ${LINK_INGEST_YTDLP:-true}
+      # Empty = the core's configured default model. The core owns keys, gating, metering.
+      LINK_INGEST_VISION_MODEL: ${LINK_INGEST_VISION_MODEL:-}
     ports:
       - "${BIND_ADDRESS:-127.0.0.1}:${WEBSEARCH_PORT:-8086}:8080"
     depends_on:

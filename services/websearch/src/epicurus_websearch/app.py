@@ -16,15 +16,19 @@ from epicurus_core import (
     HoverCard,
     HoverCardDetail,
     HoverCardLink,
+    PlatformClient,
     add_manifest_route,
     add_ops_routes,
     configure_logging,
     get_logger,
 )
-from epicurus_websearch.refs import decode_ref
+from epicurus_websearch.ingest import LinkIngestor
+from epicurus_websearch.refs import decode_ref, decode_source_ref
+from epicurus_websearch.safety import FetchLimits, GuardedFetcher, UrlGuard
 from epicurus_websearch.searxng import SearXNGClient
 from epicurus_websearch.service import MODULE_NAME, build_module
 from epicurus_websearch.settings import WebSearchSettings
+from epicurus_websearch.vision import VisionCaptioner
 
 
 def _service_version() -> str:
@@ -45,7 +49,31 @@ def create_app() -> FastAPI:
         engines=settings.websearch_engines,
     )
     bus = EventBus.from_settings(settings)
-    module = build_module(client, max_results=settings.websearch_max_results)
+    # link_ingest (#739): a guarded fetcher for operator-supplied URLs, and a captioner that
+    # asks the *core* to describe images — the module holds no model keys (constraint #8).
+    fetcher = GuardedFetcher(
+        guard=UrlGuard(),
+        limits=FetchLimits(
+            max_bytes=settings.link_ingest_max_bytes,
+            timeout_s=settings.link_ingest_timeout_s,
+            max_redirects=settings.link_ingest_max_redirects,
+            user_agent=settings.link_ingest_user_agent,
+        ),
+    )
+    ingestor = LinkIngestor(
+        fetcher=fetcher,
+        captioner=VisionCaptioner(
+            PlatformClient(
+                base_url=settings.platform_url,
+                tenant_id=settings.default_tenant_id,
+                module=MODULE_NAME,
+            ),
+            model=settings.link_ingest_vision_model,
+        ),
+        max_text_chars=settings.link_ingest_max_text_chars,
+        use_media_probe=settings.link_ingest_ytdlp,
+    )
+    module = build_module(client, max_results=settings.websearch_max_results, ingestor=ingestor)
     mcp_app = module.http_app()
 
     @asynccontextmanager
@@ -56,6 +84,8 @@ def create_app() -> FastAPI:
                 "websearch service ready",
                 searxng_url=settings.searxng_url,
                 max_results=settings.websearch_max_results,
+                ingest_max_bytes=settings.link_ingest_max_bytes,
+                ingest_ytdlp=settings.link_ingest_ytdlp,
                 tenant=settings.default_tenant_id,
             )
             try:
@@ -63,6 +93,7 @@ def create_app() -> FastAPI:
             finally:
                 await bus.close()
                 await client.aclose()
+                await fetcher.aclose()
 
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
@@ -95,6 +126,29 @@ def create_app() -> FastAPI:
                 HoverCardDetail(label="Domain", value=domain),
             ],
             href=HoverCardLink(label="Open page", url=result["url"]),
+        )
+
+    @app.get("/resolve/source/{ref_id}", response_model=HoverCard)
+    async def resolve_source(ref_id: str) -> HoverCard:
+        """Hover-card resolver for an ingested link (#739, ADR-0019).
+
+        Stateless in exactly the way the search-result resolver is: everything is decoded
+        out of the self-describing ``ref_id``, so the chip on a months-old turn still
+        resolves even though the module never stored the ingest. What differs is the
+        details — a *kind* (article / image / video / page / unreachable) and the site,
+        rather than the search engine that surfaced it.
+        """
+        source = decode_source_ref(ref_id)
+        return HoverCard(
+            title=source["title"],
+            description=source["summary"],
+            details=[
+                HoverCardDetail(label="Kind", value=source["kind"]),
+                HoverCardDetail(
+                    label="Site", value=source["site"] or urlsplit(source["url"]).netloc
+                ),
+            ],
+            href=HoverCardLink(label="Open page", url=source["url"]),
         )
 
     app.mount("/mcp", mcp_app)

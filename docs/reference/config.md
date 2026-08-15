@@ -175,6 +175,26 @@ The on-disk file tree is **tenant-scoped** (constraint #1): the core indexes
 `<files-root>/<tenant>/knowledge/<project>/` (`<tenant>` = `DEFAULT_TENANT_ID`, default
 `local`; each project is a top-level folder) so they appear as knowledge bases.
 
+## `link_ingest` fetch caps (#739)
+
+Not `CoreSettings` fields — they live on `WebSearchSettings` (`services/websearch`) — but
+listed here because they are the only env vars in the platform that bound a fetch of an
+**operator-supplied URL made from inside the stack network**. Everything else the stack
+fetches is a URL it chose itself. The defaults are deliberately conservative; raise them
+knowingly. The full policy (SSRF guard, per-hop redirect re-validation, content-type
+allow-list) is on the
+[websearch page](../services/websearch.md#link_ingest-safety-policy-ssrf).
+
+| Env var | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `LINK_INGEST_MAX_BYTES` | `5000000` | websearch | Bytes read per fetch. A longer body is truncated and flagged, not failed; a truncated *image* is refused rather than described. |
+| `LINK_INGEST_TIMEOUT_S` | `20.0` | websearch | Wall-clock budget for one fetch **including every redirect hop**; also bounds the yt-dlp probe. |
+| `LINK_INGEST_MAX_REDIRECTS` | `5` | websearch | Redirect hops followed. Each is re-validated by the SSRF guard before it is taken — an SSRF exploits the hop, not the entry point. |
+| `LINK_INGEST_MAX_TEXT_CHARS` | `20000` | websearch | Characters of extracted text (and captions) kept per ingest. |
+| `LINK_INGEST_YTDLP` | `true` | websearch | Run yt-dlp for metadata/subtitles on allow-listed public media platforms; `false` keeps tier 3 on oEmbed + OpenGraph only. Metadata only either way — nothing is ever downloaded, so no ffmpeg or OS packages are involved. |
+| `LINK_INGEST_VISION_MODEL` | _(empty)_ | websearch | Model for image descriptions; empty means the core's configured default. The module holds no key — the core resolves, gates, and meters the call (constraint #8). |
+| `LINK_INGEST_USER_AGENT` | `epicurus-websearch (+https://github.com/baakhoff/epicurus)` | websearch | Sent on every ingest fetch; identifies the requests rather than impersonating a browser. Name plus a contact URL is what site bot policies ask for — some hosts reject a contactless agent outright. |
+
 ## Docker-socket opt-in (#622, ADR-0099)
 
 Not a `CoreAppSettings` field — read directly by `services/core-app/docker-entrypoint.py`

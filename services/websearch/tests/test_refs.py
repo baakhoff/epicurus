@@ -1,4 +1,4 @@
-"""Tests for the stateless search-result ref codec (refs.py, #551)."""
+"""Tests for the stateless ref codecs (refs.py, #551 search results, #739 ingested links)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,13 @@ import base64
 import pytest
 from fastapi import HTTPException
 
-from epicurus_websearch.refs import canonical_url, decode_ref, encode_ref
+from epicurus_websearch.refs import (
+    canonical_url,
+    decode_ref,
+    decode_source_ref,
+    encode_ref,
+    encode_source_ref,
+)
 
 
 @pytest.mark.parametrize(
@@ -91,4 +97,64 @@ def test_decode_rejects_non_http_scheme(scheme_payload: bytes) -> None:
     bad = base64.urlsafe_b64encode(scheme_payload).decode("ascii").rstrip("=")
     with pytest.raises(HTTPException) as err:
         decode_ref(bad)
+    assert err.value.status_code == 400
+
+
+# ── ingested-link refs (#739) ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("url", "title", "summary", "kind", "site"),
+    [
+        ("https://example.com/a", "A title", "A summary.", "article", "Example"),
+        ("https://youtu.be/x?t=90", "Café ☕ — a clip", "naïve", "video", "YouTube"),
+        ("https://example.com/i/x.png", "x.png", "", "image", "example.com"),
+        ("https://example.com/private", "", "refused: nope", "unreachable", "example.com"),
+    ],
+)
+def test_source_ref_round_trip(url: str, title: str, summary: str, kind: str, site: str) -> None:
+    ref = encode_source_ref(url=url, title=title, summary=summary, kind=kind, site=site)
+    assert "/" not in ref
+    assert "=" not in ref
+    decoded = decode_source_ref(ref)
+    assert decoded["url"] == canonical_url(url)
+    assert decoded["title"] == title
+    assert decoded["summary"] == summary
+    assert decoded["kind"] == kind
+    assert decoded["site"] == site
+
+
+def test_source_ref_is_deterministic_so_the_core_can_dedupe_across_calls() -> None:
+    args = {
+        "url": "https://example.com/a",
+        "title": "T",
+        "summary": "S",
+        "kind": "article",
+        "site": "Example",
+    }
+    assert encode_source_ref(**args) == encode_source_ref(**args)  # type: ignore[arg-type]
+
+
+def test_source_and_result_refs_of_the_same_url_are_distinct() -> None:
+    """Two kinds, two payloads: an ingest chip must not collide with a search-result chip."""
+    source = encode_source_ref(
+        url="https://example.com/a", title="T", summary="S", kind="article", site="Example"
+    )
+    result = encode_ref(url="https://example.com/a", title="T", snippet="S", engine="google")
+    assert source != result
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"url": "javascript:alert(1)", "kind": "article"}',
+        b'{"kind": "article"}',
+        b"[1,2,3]",
+        b"not json",
+    ],
+)
+def test_source_ref_decode_rejects_the_same_tampering_as_a_result_ref(payload: bytes) -> None:
+    bad = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    with pytest.raises(HTTPException) as err:
+        decode_source_ref(bad)
     assert err.value.status_code == 400

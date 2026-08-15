@@ -12,6 +12,76 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Send it any link and the agent can actually read it** (#739) — `web_search` could *find* a
+  page; nothing in the platform could *open* one. No URL-fetch tool existed anywhere, in
+  websearch or in the agent's built-ins, so "save the substance of this article to my knowledge
+  base" bottomed out at a search snippet plus whatever the model happened to remember about the
+  site. The save half was already done (`knowledge_propose_edit`, #220/#722) and so was gateway
+  vision (#633/#711) — but only for a chat attachment, never for an image behind a URL. The
+  missing piece was the reading. websearch gains a second tool, **`link_ingest(url)`**,
+  returning `{kind, title, site, author?, published?, text, image_descriptions?, transcript,
+  notes}` across three tiers: articles and ordinary pages (readability-grade body text plus
+  OpenGraph/JSON-LD metadata), direct images (described by the core's vision model), and public
+  video/reel/audio links (metadata plus the uploader's own subtitles). It stays **inside
+  websearch** rather than becoming a module of its own — the roadmap forbids new modules before
+  1.0, and metadata-only ingestion needs no ffmpeg and no OS packages, so the image is
+  unchanged. It calls **no other module** (ADR-0004): the tool returns an extract, and composing
+  it into a document and filing it is the agent's own next step through the knowledge tools —
+  which is why the steering lives in the tool docstring and in a new rung on #703's grounding
+  ladder in the default agent instructions (read the link, work from what came back, keep the
+  source URL and retrieval date on anything filed). Extraction is `trafilatura`, chosen over
+  `readability-lxml` + `beautifulsoup4` because one dependency covers both the body text and the
+  metadata the contract needs; `yt-dlp` is a lazily-imported, failure-tolerant extra that
+  degrades to oEmbed + OpenGraph when it is absent or an extractor breaks overnight.
+
+  Two things are deliberately refused rather than approximated. **Transcription**: `transcript`
+  is reserved and always empty — ASR is a new gateway modality (milestone 5.0.0) — and the
+  platform's own machine captions are not used either, since passing a platform's speech
+  recognition off as the video's text would blur exactly the line the contract draws;
+  uploader-published subtitles *are* included, in `text`, labelled as captions.
+  **Authentication**: no sign-in, no credentials, no cookie jar, no CAPTCHA circumvention —
+  structurally rather than as a promise, since the extractor is handed no credential source at
+  all and a URL carrying `user:pass@` is refused outright. A private or login-walled link comes
+  back as `kind: "unreachable"` with a note saying so, and the same is true of a dead host, a
+  PDF, a captionless video, or an image no model could see: every failure is a well-formed
+  result carrying an honest note, never a raised exception. The agent's job is to relay the
+  gaps, not to fill them.
+
+  This is the first tool in the platform that fetches an **arbitrary, operator-supplied URL from
+  inside the Docker network**, where the core, Postgres, Valkey, Qdrant, OpenBao, and the docker
+  proxy all answer without authentication — and nothing server-side existed to reuse. So it
+  ships a purpose-built SSRF guard: `http(s)` only; no credentials in the URL; single-label
+  hosts refused (on this network a dotless name *is* a service name) along with `.localhost`,
+  `.local`, `.internal`, `.localdomain`, `.home.arpa`, and `.onion`; the host resolved and
+  **every** returned address checked against the private, loopback, link-local, reserved,
+  multicast, and CGNAT ranges in both families, with IPv4-mapped and 6to4-wrapped IPv6 unwrapped
+  first so `::ffff:127.0.0.1` cannot smuggle a loopback through; and — the part that matters
+  most — redirects followed **by hand** so every hop is re-validated before it is requested,
+  because a public URL that 302s to `169.254.169.254` is the classic exploit and the hop is what
+  it turns on. Bytes, wall-clock across all hops, redirect count, and content types are all
+  capped, tunable through new `LINK_INGEST_*` settings with conservative defaults. yt-dlp does
+  its own HTTP outside that client, so it is confined to an allow-list of known public media
+  platforms and only ever sees a URL that already passed the guard. One residual gap is stated
+  rather than papered over: the guard resolves the host and httpx resolves it again to connect,
+  so DNS rebinding between the two is not caught — closing it needs connect-time address
+  pinning, which httpx does not expose without a custom transport.
+
+  Tier 2 forced a gap in the core into the open. `POST /platform/v1/chat` had **no vision
+  gate**: `supports_vision` guarded only the interactive agent turn (#633), so a module sending
+  image content-parts to a text-only model got either a silent ignore or a raw provider error —
+  precisely the two outcomes that gate exists to prevent — and `link_ingest` would have been the
+  first module-initiated vision inference to hit it. The endpoint now applies the same check
+  before any provider call and refuses with a structured **400**
+  (`{"error": "unsupported_media", "message": …, "model": …}`) a caller can branch on; both the
+  OpenAI `image_url` and the Anthropic-native `image` spelling trigger it, and an image anywhere
+  in the history counts, not only in the last message. websearch catches exactly that 400 and
+  degrades to metadata plus a note naming the model and the fix, so an operator with no
+  vision-capable model configured still gets the article — just without the picture described.
+  Text-only requests are untouched and pay no extra capability lookup. No new client helper was
+  added to `epicurus_core`: `ChatMessage.content` has accepted `str | list[dict] | None` since
+  #633, so the module builds content parts over the existing `PlatformClient.chat` and the wire
+  contract is unchanged. `websearch` 0.2.2→0.3.0 (MINOR), `core-app` 0.112.0→0.113.0 (MINOR).
+
 - **Going Google-free is now a first-class path, per module and platform-wide** (#764) — the
   operator's instinct was that it wasn't possible at all, and the shell had been quietly proving
   them right. Everything needed already existed: the ADR-0030 collections panel could untick a

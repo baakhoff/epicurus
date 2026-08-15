@@ -65,6 +65,15 @@ This is the **only** way a module should obtain a connected-account token — do
 endpoint directly or add a bespoke client method, so the credential boundary stays single
 and owned by the core.
 
+**Translate that 404/400 at the token seam, not further up (#764).** "Nobody connected this
+provider" is a *normal* state — a fresh self-host, or the aftermath of a Disconnect — and a
+module owes it an honest answer rather than a traceback. Catch it where you fetch the token
+and re-raise your own named exception; a bare 404 caught further up is ambiguous, since the
+provider's own API answers 404 for "no such record". The mail module is the reference
+(`GmailProvider._get_token` → `MailNotConnected`): its tools then return one model-actionable
+sentence instead of raising, and its page returns an empty state instead of an error. A module
+that *has* a local fallback should degrade to it silently instead.
+
 ### `await client.get_module_model(slot) -> str | None`
 
 The operator's chosen model for one of this module's manifest **model slots** (#128,

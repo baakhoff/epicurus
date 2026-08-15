@@ -20,6 +20,7 @@ from epicurus_mail.provider import (
     MailCursor,
     MailLabel,
     MailMessage,
+    MailNotConnected,
     MailProvider,
     MailThread,
     MailThreadSummary,
@@ -658,3 +659,104 @@ class TestMailboxAttachmentRoute:
         disposition = resp.headers["content-disposition"]
         assert "\r" not in disposition and "\n" not in disposition
         assert 'filename="evil.pdf"' in disposition
+
+
+class TestGoogleNotConnected:
+    """Every HTTP surface when no Google account is connected (#764).
+
+    Mail has no local provider to fall back to (ADR-0032), so this is not an error state to
+    be swallowed — it is a state to be *named*. The list read answers honestly and 200s (plain
+    navigation to Mail must never error); everything that genuinely cannot proceed answers 503
+    with the one reconnect sentence, never a raw traceback and never a misleading 404.
+    """
+
+    NOT_CONNECTED = 503
+
+    def _provider(self) -> MailProvider:
+        provider = AsyncMock(spec=MailProvider)
+        for method in ("read", "get_thread", "transmit", "set_unread", "get_attachment"):
+            setattr(provider, method, AsyncMock(side_effect=MailNotConnected("not connected")))
+        provider.compose_reply = AsyncMock(side_effect=MailNotConnected("not connected"))
+        provider.is_available = AsyncMock(return_value=False)
+        return provider  # type: ignore[return-value]
+
+    def _assert_reconnect_hint(self, resp: httpx.Response) -> None:
+        assert resp.status_code == self.NOT_CONNECTED
+        detail = resp.json()["detail"]
+        assert "not connected" in detail and "Settings" in detail
+
+    def test_status_reports_disconnected(self) -> None:
+        resp = _client_with_provider(self._provider()).get("/status")
+        assert resp.status_code == 200
+        assert resp.json() == {"gmail_connected": False}
+
+    def test_the_page_is_an_honest_empty_state_not_an_error(self) -> None:
+        with _client_with_provider(self._provider()) as client:
+            resp = client.get("/pages/mailbox")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["disconnected"] is True
+        assert body["threads"] == []
+        assert body["labels"] == []
+
+    def test_the_page_never_serves_cached_mail_after_a_disconnect(self) -> None:
+        """The regression the flag exists for: a warm cache would render mail we can't refresh."""
+        provider = self._provider()
+        with _client_with_provider(provider) as client:
+            client.get("/pages/mailbox")
+            resp = client.get("/pages/mailbox?reconcile=1")
+        assert resp.json()["disconnected"] is True
+        # Not one provider call: the gate runs before both the cached and the live read path.
+        provider.list_threads.assert_not_awaited()  # type: ignore[attr-defined]
+        provider.changed_threads_since.assert_not_awaited()  # type: ignore[attr-defined]
+
+    def test_opening_a_thread_is_503_with_the_hint(self) -> None:
+        client = TestClient(
+            _client_with_provider(self._provider()).app, raise_server_exceptions=False
+        )
+        self._assert_reconnect_hint(client.get("/pages/mailbox?thread_id=t1"))
+
+    def test_reading_a_message_is_503_not_a_misleading_404(self) -> None:
+        """A leftover chip must not claim the message was deleted (#764)."""
+        client = TestClient(
+            _client_with_provider(self._provider()).app, raise_server_exceptions=False
+        )
+        self._assert_reconnect_hint(client.get("/messages/msg1"))
+
+    def test_resolving_a_hover_card_is_503_not_a_misleading_404(self) -> None:
+        client = TestClient(
+            _client_with_provider(self._provider()).app, raise_server_exceptions=False
+        )
+        self._assert_reconnect_hint(client.get("/resolve/message/msg1"))
+
+    def test_confirming_a_draft_is_503_with_the_hint(self) -> None:
+        client = TestClient(
+            _client_with_provider(self._provider()).app, raise_server_exceptions=False
+        )
+        self._assert_reconnect_hint(
+            client.post("/send", json={"to": "b@x.com", "subject": "s", "body": "b"})
+        )
+
+    def test_page_send_is_503_with_the_hint(self) -> None:
+        client = TestClient(
+            _client_with_provider(self._provider()).app, raise_server_exceptions=False
+        )
+        self._assert_reconnect_hint(
+            client.post("/pages/mailbox/send", json={"to": "b@x.com", "subject": "s", "body": "b"})
+        )
+
+    def test_mark_read_is_503_with_the_hint(self) -> None:
+        client = TestClient(
+            _client_with_provider(self._provider()).app, raise_server_exceptions=False
+        )
+        self._assert_reconnect_hint(
+            client.post("/pages/mailbox/mark-read", json={"thread_id": "t1", "message_ids": ["m1"]})
+        )
+
+    def test_attachment_download_is_503_not_a_misleading_404(self) -> None:
+        client = TestClient(
+            _client_with_provider(self._provider()).app, raise_server_exceptions=False
+        )
+        self._assert_reconnect_hint(
+            client.get("/pages/mailbox/attachment?message_id=m1&attachment_id=a1")
+        )

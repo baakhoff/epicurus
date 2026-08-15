@@ -12,6 +12,54 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Going Google-free is now a first-class path, per module and platform-wide** (#764) — the
+  operator's instinct was that it wasn't possible at all, and the shell had been quietly proving
+  them right. Everything needed already existed: the ADR-0030 collections panel could untick a
+  Google list, and Settings could disconnect the account outright. But "stop using Google in
+  tasks" was N individual unticks, after which the Google block kept its full visual weight and
+  nothing anywhere said the module was now local-only — configuration archaeology dressed as a
+  setting. The panel now offers **"Stop using Google in this module"**: one write against the
+  existing prefs API that disables every one of that account's collections, clears the write
+  target back to the built-in local default (and only when the active collection belonged to
+  that account — a second provider's target is never collateral), and collapses the block to a
+  single quiet row, *"Google — not used · Use again"*. Tokens are untouched, so it is per module
+  by construction: every other module keeps working, nothing at Google changes, and one click
+  undoes it. Two deliberate decisions, recorded as ADR-0122. The collapsed state is **derived,
+  never stored** — "not used" *is* "none of this account's collections are enabled", the only
+  place it could live given `CollectionPrefs` holds `{enabled, active}` and nothing else, so it
+  can never disagree with the toggles it replaces (safe as a default because connecting an
+  account seeds every collection enabled, #209, making a connected account with nothing ticked
+  always a deliberate act). And **"Use again" re-seeds rather than replays**: it enables all of
+  the account's collections and makes the first writable one active — exactly what a fresh
+  connect does — because restoring a hand-picked subset would need hidden session state that
+  silently stops working after a reload, i.e. two behaviours behind one button; the toggles show
+  what is on, so re-narrowing is one tick.
+
+  The other half was the global disconnect, which worked but didn't *look* like it had.
+  Disconnecting deletes the tokens and strips the provider from every module's stored selection
+  (#209), yet the web kept several deliberately long-lived caches describing what modules can
+  see — the calendar's account view holds Google calendar names and colours for five minutes,
+  the mailbox its thread list for thirty — so the next page the operator opened still painted a
+  connected account. The disconnect mutation now invalidates the module-facing keys by prefix
+  alongside its own status. And mail, the one module with **no local provider** (ADR-0032: no
+  collections, no fallback mailbox), had no story at all for the disconnected state: the page
+  relayed a raw `httpx.HTTPStatusError` under a scope hint that didn't apply, and the tools
+  re-raised it at the agent. The token seam now distinguishes the case —
+  `GmailProvider._get_token` maps the core's documented 404/400 to `MailNotConnected`, translated
+  *there* precisely so it can never be confused with Gmail's own "no such message" 404 — and
+  every surface answers honestly: each MCP tool returns one model-actionable sentence naming both
+  ways out (connect it in Settings, or disable the module) instead of raising, `mail_send`
+  refuses to compose a draft that could never be delivered, the page returns a valid empty list
+  carrying `disconnected` that the shell renders as an honest empty state with a tap to each
+  exit, a leftover message chip answers 503 rather than a 404 claiming the message was deleted,
+  and `mail.sync_failed` is no longer emitted — an absence the operator chose is not a failure to
+  alert on. The local cache is kept but not served, so a reconnect restores the mailbox with no
+  resync and no restart. Not in scope, and deliberately so: local-first replacements for the
+  Google-backed capabilities themselves (no local mailbox, no richer local calendar) — going
+  Google-free means keeping the local half, not re-implementing the other one. New operator note,
+  `docs/user/running-without-google.md`. `web` 0.135.0→0.136.0 (MINOR), `mail` 0.18.1→0.19.0
+  (MINOR).
+
 - **Folded the Can into the Tasks page as a Show → Backlog option, instead of a second nav
   entry** (#820) — the Can's own **partition** (#766, the board shows only dated tasks, the
   backlog holds the rest) was right; its **placement** wasn't. A second left-nav page gave

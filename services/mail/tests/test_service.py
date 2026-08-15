@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib.metadata import version as pkg_version
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -16,18 +17,21 @@ from epicurus_mail.provider import (
     MailCategoryPreview,
     MailLabel,
     MailMessage,
+    MailNotConnected,
     MailProvider,
     MailThread,
     MailThreadSummary,
     ThreadPage,
 )
 from epicurus_mail.service import (
+    _NOT_CONNECTED_HINT,
     _SCOPE_HINT,
     _describe_403,
     _describe_gmail_error,
     build_mailbox_list,
     build_mailbox_thread,
     build_module,
+    mailbox_disconnected,
     message_payload,
     tab_payload,
 )
@@ -524,10 +528,14 @@ async def test_manifest_declares_resolver() -> None:
 
 
 async def test_manifest_version_matches_the_packaged_version() -> None:
+    # Compare against the distribution metadata, not a literal (#764): the literal is what let
+    # the two drift — pyproject reached 0.18.1 while the in-code manifest still said 0.17.0 and
+    # this test, pinned to the same stale string, passed the whole way. Now bumping one without
+    # the other fails here, which is what the test name always claimed to check.
     provider = _make_provider()
     module = build_module(provider)
     manifest = await module.manifest()
-    assert manifest.version == "0.17.0"
+    assert manifest.version == pkg_version("epicurus-mail")
 
 
 async def test_manifest_declares_propose_tool_side_effects() -> None:
@@ -1005,3 +1013,146 @@ def test_message_payload_read_message_offers_mark_unread() -> None:
     )
     payload = message_payload(message)
     assert payload["actions"][0]["tool"] == "mail_mark_unread"
+
+
+# ── no Google connected (#764) ───────────────────────────────────────────────
+# Mail is provider-only (ADR-0032: no collections, no local fallback), so "nobody has
+# connected Google" is a *normal* state — a fresh self-host, or the aftermath of a
+# Settings → Disconnect — and every tool owes it one model-actionable sentence rather
+# than a provider traceback the agent can only relay as a failure.
+
+# Every tool, and the provider call each one makes first. mail_send is the odd one out: it
+# composes locally and touches no provider, so it is gated on the availability probe instead
+# (asserted separately below).
+_TOOLS_REACHING_THE_PROVIDER = [
+    ("mail_search", {"query": "x"}, "search"),
+    ("mail_read", {"message_id": "m1"}, "read"),
+    ("mail_reply", {"message_id": "m1", "body": "b"}, "compose_reply"),
+    ("mail_mark_read", {"message_id": "m1"}, "set_unread"),
+    ("mail_mark_unread", {"message_id": "m1"}, "set_unread"),
+    ("mail_archive", {"message_id": "m1"}, "archive"),
+    ("mail_trash", {"message_id": "m1"}, "trash"),
+]
+
+
+def _disconnected_provider() -> MailProvider:
+    """A provider whose every call fails the way a vanished Google connection actually does."""
+    provider = AsyncMock(spec=MailProvider)
+    for method in ("search", "read", "compose_reply", "set_unread", "archive", "trash", "transmit"):
+        setattr(provider, method, AsyncMock(side_effect=MailNotConnected("not connected")))
+    provider.is_available = AsyncMock(return_value=False)
+    return provider  # type: ignore[return-value]
+
+
+@pytest.mark.parametrize("tool,args,_method", _TOOLS_REACHING_THE_PROVIDER)
+async def test_tool_returns_the_not_connected_hint(
+    tool: str, args: dict[str, str], _method: str
+) -> None:
+    module = build_module(_disconnected_provider())
+    content, _ = await module.call_tool(tool, args)
+    assert content[0].text == _NOT_CONNECTED_HINT  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("tool,args,_method", _TOOLS_REACHING_THE_PROVIDER)
+async def test_tool_never_raises_when_google_is_not_connected(
+    tool: str, args: dict[str, str], _method: str
+) -> None:
+    # The guarantee behind the hint: a disconnected mailbox must never surface as an
+    # `isError` tool result. `call_tool` raises on a tool exception (the #697 mechanism), so
+    # simply completing is the assertion.
+    module = build_module(_disconnected_provider())
+    await module.call_tool(tool, args)
+
+
+def test_the_not_connected_hint_names_both_ways_out() -> None:
+    # The wording is the contract here — an operator reading it in a chat turn must be able to
+    # act without going hunting. Connect *or* disable; nothing about missing permissions,
+    # which is the other (and very different) Google failure the module already reports.
+    assert "not connected" in _NOT_CONNECTED_HINT
+    assert "Settings" in _NOT_CONNECTED_HINT
+    assert "disable the mail module" in _NOT_CONNECTED_HINT
+    assert "permission" not in _NOT_CONNECTED_HINT
+
+
+async def test_mail_send_refuses_to_compose_when_google_is_not_connected() -> None:
+    # Composing is pure local work, so without the availability gate mail_send would hand back
+    # a perfectly good draft that can never be delivered — the operator would only find out at
+    # Confirm time. No DraftReview envelope may be produced.
+    provider = _disconnected_provider()
+    module = build_module(provider)
+    content, _ = await module.call_tool("mail_send", {"to": "b@x.com", "subject": "s", "body": "b"})
+    assert content[0].text == _NOT_CONNECTED_HINT  # type: ignore[attr-defined]
+    with pytest.raises(ValueError):
+        _parse_draft(content)
+
+
+async def test_mail_send_still_composes_when_google_is_connected() -> None:
+    # The gate must not cost the happy path its draft (ADR-0085).
+    provider = _make_provider()
+    provider.is_available = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    module = build_module(provider)
+    content, _ = await module.call_tool("mail_send", {"to": "b@x.com", "subject": "s", "body": "b"})
+    assert _parse_draft(content).kind == "mail"
+
+
+async def test_a_gmail_404_is_not_reported_as_a_missing_connection() -> None:
+    # The regression this whole exception exists to prevent: Gmail answers 404 for a message
+    # that doesn't exist, and the *token* endpoint answers 404 for a provider with no tokens.
+    # Only the latter is "Google is not connected"; conflating them would tell an operator to
+    # reconnect a perfectly healthy account because the model guessed a message id.
+    provider = _make_provider()
+    request = httpx.Request("GET", "https://gmail.googleapis.com/x")
+    provider.read = AsyncMock(  # type: ignore[method-assign]
+        side_effect=httpx.HTTPStatusError(
+            "404", request=request, response=httpx.Response(404, request=request)
+        )
+    )
+    module = build_module(provider)
+    with pytest.raises(Exception):  # noqa: B017 — FastMCP wraps it; the point is "not the hint"
+        await module.call_tool("mail_read", {"message_id": "nope"})
+
+
+def test_mailbox_disconnected_is_a_valid_empty_list_payload() -> None:
+    payload = mailbox_disconnected("STARRED")
+    assert payload["disconnected"] is True
+    assert payload["threads"] == [] and payload["labels"] == [] and payload["tabs"] == []
+    assert payload["next_cursor"] is None
+    # The rail selection is echoed back so the shell doesn't jump the operator to the Inbox.
+    assert payload["active_label"] == "STARRED"
+
+
+def test_mailbox_disconnected_defaults_to_the_inbox() -> None:
+    assert mailbox_disconnected()["active_label"] == "INBOX"
+
+
+async def test_build_mailbox_list_reports_disconnected_instead_of_serving_the_cache() -> None:
+    # The honest-over-convenient rule: a warm cache would happily render yesterday's mail with
+    # no provider call at all. The gate runs *before* either read path, so a disconnected
+    # module shows nothing it can no longer refresh — and never touches the orchestrator.
+    provider = _disconnected_provider()
+    mailbox = AsyncMock(spec=CachedMailbox)
+    data = await build_mailbox_list(provider, mailbox=mailbox)
+    assert data["disconnected"] is True
+    assert data["threads"] == []
+    mailbox.landing.assert_not_awaited()
+    mailbox.reconcile.assert_not_awaited()
+
+
+async def test_build_mailbox_list_reports_disconnected_on_the_live_path_too() -> None:
+    # No cache orchestrator (a stateless build): the provider must not be fanned out to.
+    provider = _disconnected_provider()
+    data = await build_mailbox_list(provider)
+    assert data["disconnected"] is True
+    provider.list_threads.assert_not_awaited()  # type: ignore[attr-defined]
+    provider.list_labels.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_a_connected_mailbox_never_claims_to_be_disconnected() -> None:
+    provider = AsyncMock(spec=MailProvider)
+    provider.is_available = AsyncMock(return_value=True)
+    provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox")])
+    provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[], next_cursor=None))
+    provider.list_categories = AsyncMock(return_value=[])
+    provider.category_query = MagicMock(return_value=None)
+    data = await build_mailbox_list(provider)  # type: ignore[arg-type]
+    assert "disconnected" not in data

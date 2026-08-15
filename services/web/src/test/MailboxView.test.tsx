@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, expect, it, vi } from "vitest";
 
 import { MailboxView } from "@/components/archetypes/MailboxView";
@@ -23,7 +24,14 @@ vi.mock("@/lib/api", () => ({
 
 function wrapper({ children }: { children: ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  // A router, because the disconnected empty state (#764) routes the operator straight to the
+  // two switches that fix it. In the app the view always mounts inside the shell's router;
+  // MemoryRouter is that context without a URL bar (the Panel tests' pattern).
+  return (
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>{children}</MemoryRouter>
+    </QueryClientProvider>
+  );
 }
 
 const LIST = {
@@ -495,4 +503,72 @@ it("surfaces a thread-open error (not the silent list) with a Back control", asy
   // Back clears the failed thread id and returns to the list (a re-open would refetch).
   fireEvent.click(screen.getByRole("button", { name: /Back to list/ }));
   expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+});
+
+/* ── no Google connected (#764) ─────────────────────────────────────────────── */
+// Mail is provider-only (ADR-0032), so the module answers with an empty list carrying
+// `disconnected` instead of an error. The shell's job is to say why, and offer the exits.
+
+const DISCONNECTED = {
+  title: "Mail",
+  labels: [],
+  active_label: "INBOX",
+  query: "",
+  tabs: [],
+  active_tab: "",
+  threads: [],
+  next_cursor: null,
+  disconnected: true,
+};
+
+function disconnectedPage() {
+  mockModulePage.mockImplementation(() => Promise.resolve(DISCONNECTED));
+}
+
+it("names the missing Google connection instead of showing an empty folder (#764)", async () => {
+  disconnectedPage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("Google is not connected.")).toBeInTheDocument();
+  // Both ways out, in the copy the issue asked for.
+  expect(screen.getByText(/Connect it in Settings/)).toBeInTheDocument();
+  expect(screen.getByText(/disable the mail module/)).toBeInTheDocument();
+  // Never the generic "this folder is empty" — that reads as "you have no mail".
+  expect(screen.queryByText("This folder is empty.")).not.toBeInTheDocument();
+});
+
+it("keeps the disconnected page out of the error state (no toast, no failure copy)", async () => {
+  disconnectedPage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  await screen.findByText("Google is not connected.");
+  expect(screen.queryByText(/Couldn't reach your mail/)).not.toBeInTheDocument();
+});
+
+it("hides the folder rail, search, and compose while disconnected", async () => {
+  disconnectedPage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  await screen.findByText("Google is not connected.");
+  expect(screen.queryByRole("navigation", { name: "Mailbox folders" })).not.toBeInTheDocument();
+  expect(screen.queryByPlaceholderText("Search mail…")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /New message/ })).not.toBeInTheDocument();
+});
+
+it("offers one-tap routes to the two switches that fix it", async () => {
+  disconnectedPage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByRole("button", { name: /Open Settings/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Modules" })).toBeInTheDocument();
+});
+
+it("renders the ordinary page when the payload omits the flag (pre-#764 modules)", async () => {
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+  expect(screen.queryByText("Google is not connected.")).not.toBeInTheDocument();
+});
+
+it("distinguishes an empty folder from a missing connection", async () => {
+  // A connected mailbox with nothing in the folder keeps the old, correct copy.
+  mockModulePage.mockImplementation(() => Promise.resolve({ ...LIST, threads: [] }));
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("This folder is empty.")).toBeInTheDocument();
+  expect(screen.queryByText("Google is not connected.")).not.toBeInTheDocument();
 });

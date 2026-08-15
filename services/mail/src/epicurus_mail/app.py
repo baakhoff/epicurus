@@ -29,8 +29,9 @@ from epicurus_mail.cache import CachedMailbox
 from epicurus_mail.db import MailCache
 from epicurus_mail.gmail import GmailProvider
 from epicurus_mail.poller import run_periodic
-from epicurus_mail.provider import ComposedMessage
+from epicurus_mail.provider import ComposedMessage, MailNotConnected
 from epicurus_mail.service import (
+    _NOT_CONNECTED_HINT,
     _SCOPE_HINT,
     _SCOPE_HINT_READ,
     _SCOPE_HINT_SEND,
@@ -44,6 +45,20 @@ from epicurus_mail.service import (
     build_module,
 )
 from epicurus_mail.settings import MailSettings
+
+# What a route raises when no Google account is connected (#764). 503 rather than the token
+# endpoint's own 404/400: those describe the *core's* view of a missing token, and a 404 out
+# of a page/message route already means "no such page / no such message" — reusing it would
+# make "you haven't connected Google" indistinguishable from "that id is wrong". 503 says the
+# dependency this module is built on isn't available right now, which is exactly true and is
+# what the shell relays verbatim. The list read never reaches here: it answers with the honest
+# empty payload instead, so plain navigation to Mail is never an error.
+_NOT_CONNECTED_STATUS = 503
+
+
+def _not_connected() -> HTTPException:
+    """The uniform "Google is not connected" HTTP failure (#764) — one wording, one status."""
+    return HTTPException(status_code=_NOT_CONNECTED_STATUS, detail=_NOT_CONNECTED_HINT)
 
 
 def _service_version() -> str:
@@ -184,6 +199,10 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         """
         try:
             message = await provider.read(ref_id)
+        except MailNotConnected as exc:
+            # Ahead of the blanket 404 below: a chip left over from a connected session must
+            # not claim the message was deleted when the truth is that Google is gone (#764).
+            raise _not_connected() from exc
         except Exception as exc:
             raise HTTPException(status_code=404, detail=f"message {ref_id!r} not found") from exc
         details: list[dict[str, str]] = []
@@ -214,6 +233,8 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         """
         try:
             message = await provider.read(ref_id)
+        except MailNotConnected as exc:
+            raise _not_connected() from exc
         except Exception as exc:
             raise HTTPException(status_code=404, detail=f"message {ref_id!r} not found") from exc
         toggle = (
@@ -250,6 +271,10 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         """
         try:
             sent_id = await provider.transmit(message)
+        except MailNotConnected as exc:
+            # Google was disconnected between composing the draft and confirming it (#764) —
+            # the operator gets the reconnect sentence, not a traceback in the split-pane.
+            raise _not_connected() from exc
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_SEND)
             if hint is not None:
@@ -308,6 +333,11 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         a tab-scoped list, and deeper pages read live. A Gmail 403 (missing scope or a
         ``usageLimits`` rate limit) / 429 is relayed as that status with the module's reconnect
         / wait hint, not a raw 500 (#538/#557).
+
+        With **no Google account connected** (#764) the list read returns an empty payload
+        carrying ``disconnected: true`` — the shell renders its honest empty state, so opening
+        Mail on a self-host that never connected Google is not an error. A ``?thread_id=``
+        read has nothing honest to return and fails with 503 + the reconnect sentence.
         """
         if page_id != MAILBOX_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no such page {page_id!r}")
@@ -323,6 +353,11 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
                 cursor=cursor,
                 reconcile=reconcile,
             )
+        except MailNotConnected as exc:
+            # Only a `?thread_id=` read can land here: the list read answers with the honest
+            # empty payload (#764) rather than raising, so plain navigation to Mail never
+            # errors. Opening a specific conversation with no account is a real dead end.
+            raise _not_connected() from exc
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_READ)
             if hint is not None:
@@ -352,6 +387,8 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
                     to=recipient, subject=req.subject or "", body=req.body, cc=req.cc
                 )
             sent_id = await provider.transmit(message)
+        except MailNotConnected as exc:
+            raise _not_connected() from exc
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_SEND)
             if hint is not None:
@@ -377,6 +414,8 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         try:
             for message_id in req.message_ids:
                 await provider.set_unread(message_id, unread=False)
+        except MailNotConnected as exc:
+            raise _not_connected() from exc
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT)
             if hint is not None:
@@ -405,6 +444,8 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=f"no such page {page_id!r}")
         try:
             attachment = await provider.get_attachment(message_id, attachment_id)
+        except MailNotConnected as exc:
+            raise _not_connected() from exc
         except httpx.HTTPStatusError as exc:
             code = exc.response.status_code
             if code == httpx.codes.NOT_FOUND:

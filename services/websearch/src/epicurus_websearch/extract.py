@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -127,14 +128,18 @@ def extract_page(html: str, *, url: str = "", max_chars: int = 20_000) -> PageFa
     """
     facts = PageFacts()
     try:
-        meta = extract_metadata(html, default_url=url or None)
+        # extensive=False turns off htmldate's most speculative pass. Explicit metadata
+        # (OpenGraph, JSON-LD, <meta>) is unaffected; what goes away is the guess made from
+        # any date-shaped string on the page, which on a content-free interstitial invents a
+        # publication date out of nothing. A missing date beats a fabricated one.
+        meta = extract_metadata(html, default_url=url or None, extensive=False)
     except Exception:  # trafilatura raises assorted parser errors on malformed input
         meta = None
     if meta is not None:
         facts.title = _clean(meta.title)
         facts.site = _clean(meta.sitename) or host_of(url)
-        facts.author = _clean(meta.author) or None
-        facts.published = _clean(meta.date) or None
+        facts.author = plausible_author(_clean(meta.author))
+        facts.published = plausible_date(_clean(meta.date))
         facts.description = _clean(meta.description)
         facts.image = _clean(getattr(meta, "image", "") or "")
     if not facts.site:
@@ -206,6 +211,42 @@ def parse_vtt(payload: bytes, *, max_chars: int = 20_000) -> str:
         previous = line
     text = " ".join(lines).strip()
     return text[:max_chars].rstrip() if len(text) > max_chars else text
+
+
+# A byline is a name (or a few, semicolon-joined), not a paragraph. Without a ceiling, a
+# heuristic extractor happily reports a navigation block as the author — a real observed case
+# was Wikipedia's "Authority control databases International GND National Japan". An absent
+# author is honest; an invented one gets copied into whatever the agent files.
+_MAX_AUTHOR_CHARS = 80
+_MAX_AUTHOR_WORDS = 6
+# Content older than the web, or dated in the future, is a parse artifact rather than a fact.
+_MIN_YEAR = 1995
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def plausible_author(author: str) -> str | None:
+    """``author`` if it reads like a byline, else ``None``.
+
+    Applied per name so a genuine multi-author credit (``"A; B"``) survives while a single
+    over-long run of nav text does not.
+    """
+    if not author or len(author) > _MAX_AUTHOR_CHARS:
+        return None
+    names = [part.strip() for part in author.split(";") if part.strip()]
+    if not names:
+        return None
+    if any(len(name.split()) > _MAX_AUTHOR_WORDS for name in names):
+        return None
+    return author
+
+
+def plausible_date(date: str) -> str | None:
+    """``date`` if it is an ISO ``YYYY-MM-DD`` in a believable window, else ``None``."""
+    match = _ISO_DATE_RE.match(date)
+    if match is None:
+        return date or None  # a non-ISO string is the source's own wording; pass it through
+    year = int(match.group(1))
+    return date if _MIN_YEAR <= year <= datetime.now(UTC).year + 1 else None
 
 
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)

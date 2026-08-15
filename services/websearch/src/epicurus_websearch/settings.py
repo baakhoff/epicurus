@@ -40,4 +40,7 @@ class WebSearchSettings(CoreSettings):
     # module never holds a key — the core resolves and meters the call (constraint #8).
     link_ingest_vision_model: str = ""
     # Identifies these fetches to the sites they hit, rather than pretending to be a browser.
-    link_ingest_user_agent: str = "epicurus-websearch (+link_ingest)"
+    # Name plus a contact URL is what site bot policies ask for; some hosts reject a
+    # contactless agent outright (Wikimedia answers 400), and an operator running a public
+    # deployment may want to point this at themselves.
+    link_ingest_user_agent: str = "epicurus-websearch (+https://github.com/baakhoff/epicurus)"

@@ -440,6 +440,58 @@ async def test_a_private_reel_with_nothing_retrievable_is_unreachable(
     assert any("never signs in or uses credentials" in note for note in result.notes)
 
 
+async def test_platform_chrome_is_not_reported_as_the_posts_own_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Found in live testing: a signed-out Instagram reel came back `published: 2000-01-01`.
+
+    When neither yt-dlp nor oEmbed produced anything, whatever the page yielded is the
+    platform's interstitial — its byline and date are artifacts, not facts about the post.
+    """
+
+    async def fake_probe(_url: str, *, timeout_s: float = 20.0) -> None:
+        return None
+
+    monkeypatch.setattr(media, "probe", fake_probe)
+    interstitial = (
+        b"<html><head><title>Instagram</title>"
+        b"<meta property='og:title' content='Instagram'>"
+        b"<meta name='author' content='Instagram'>"
+        b"<meta property='article:published_time' content='2013-05-01T00:00:00Z'>"
+        b"</head><body></body></html>"
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=interstitial, headers={"content-type": "text/html"})
+
+    result = await _ingestor(handler, use_media_probe=True).ingest(
+        "https://www.instagram.com/reel/abc/"
+    )
+    assert result.author is None
+    assert result.published is None
+    assert any("only the link's basic metadata" in note for note in result.notes)
+
+
+async def test_real_metadata_survives_when_the_probe_did_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counterpart: that drop must not touch a link that genuinely resolved."""
+
+    async def fake_probe(_url: str, *, timeout_s: float = 20.0) -> media.MediaFacts:
+        return _facts(title="A clip", uploader="Someone", published="2025-04-02")
+
+    monkeypatch.setattr(media, "probe", fake_probe)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "oembed" in str(request.url):
+            return httpx.Response(404)
+        return httpx.Response(200, content=b"<html></html>", headers={"content-type": "text/html"})
+
+    result = await _ingestor(handler, use_media_probe=True).ingest("https://youtu.be/x")
+    assert result.author == "Someone"
+    assert result.published == "2025-04-02"
+
+
 async def test_media_probe_is_skipped_when_the_operator_turns_it_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

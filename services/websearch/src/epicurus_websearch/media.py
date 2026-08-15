@@ -81,6 +81,28 @@ async def probe(url: str, *, timeout_s: float = 20.0) -> MediaFacts | None:
         return facts
 
 
+class _QuietLogger:
+    """Routes yt-dlp's own output into structlog instead of the process's stderr.
+
+    ``quiet=True`` silences yt-dlp's *progress*, not its errors — a private Instagram post
+    still writes a multi-line "use --cookies-from-browser" block straight to stderr, which in
+    a container is service log noise recommending the one thing #739 forbids. The failure is
+    already reported to the operator through the result's notes, so here it is debug detail.
+    """
+
+    def debug(self, message: str) -> None:
+        log.debug("yt-dlp", message=message[:300])
+
+    def info(self, message: str) -> None:
+        log.debug("yt-dlp", message=message[:300])
+
+    def warning(self, message: str) -> None:
+        log.debug("yt-dlp warning", message=message[:300])
+
+    def error(self, message: str) -> None:
+        log.info("yt-dlp error", message=message[:300])
+
+
 def _probe_sync(url: str, timeout_s: float) -> MediaFacts | None:
     try:
         from yt_dlp import YoutubeDL
@@ -91,6 +113,8 @@ def _probe_sync(url: str, timeout_s: float) -> MediaFacts | None:
     options: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
+        "logger": _QuietLogger(),
         "skip_download": True,
         "noplaylist": True,
         "socket_timeout": max(1.0, timeout_s / 2),

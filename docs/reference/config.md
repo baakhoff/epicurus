@@ -193,7 +193,7 @@ allow-list) is on the
 | `LINK_INGEST_MAX_TEXT_CHARS` | `20000` | websearch | Characters of extracted text (and captions) kept per ingest. |
 | `LINK_INGEST_YTDLP` | `true` | websearch | Run yt-dlp for metadata/subtitles on allow-listed public media platforms; `false` keeps tier 3 on oEmbed + OpenGraph only. Metadata only either way — nothing is ever downloaded, so no ffmpeg or OS packages are involved. |
 | `LINK_INGEST_VISION_MODEL` | _(empty)_ | websearch | Model for image descriptions; empty means the core's configured default. The module holds no key — the core resolves, gates, and meters the call (constraint #8). |
-| `LINK_INGEST_USER_AGENT` | `epicurus-websearch (+link_ingest)` | websearch | Sent on every ingest fetch; identifies the requests rather than impersonating a browser. |
+| `LINK_INGEST_USER_AGENT` | `epicurus-websearch (+https://github.com/baakhoff/epicurus)` | websearch | Sent on every ingest fetch; identifies the requests rather than impersonating a browser. Name plus a contact URL is what site bot policies ask for — some hosts reject a contactless agent outright. |
 
 ## Docker-socket opt-in (#622, ADR-0099)
 

@@ -19,6 +19,8 @@ from epicurus_websearch.extract import (
     oembed_endpoint,
     parse_oembed,
     parse_vtt,
+    plausible_author,
+    plausible_date,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -87,6 +89,60 @@ def test_malformed_documents_degrade_rather_than_raising(html: str) -> None:
     assert facts.site == "example.com"
     assert isinstance(facts.text, str)
     assert facts.author is None
+
+
+# ── metadata plausibility (found by live testing) ──────────────────────────────────────
+#
+# A heuristic extractor is confidently wrong sometimes, and its output is copied verbatim
+# into whatever the agent files. Both filters below exist because of a real observed case:
+# Wikipedia's nav block coming back as the author, and a signed-out Instagram interstitial
+# coming back with `published: 2000-01-01`. An absent field is honest; an invented one is not.
+
+
+@pytest.mark.parametrize(
+    "author", ["Marit Halvorsen", "By Jane Q. Public", "A. Author; B. Writer", "Cher"]
+)
+def test_real_bylines_survive(author: str) -> None:
+    assert plausible_author(author) == author
+
+
+@pytest.mark.parametrize(
+    "author",
+    [
+        "Authority control databases International GND National Japan",  # observed live
+        "Home News Sport Business Opinion Culture Travel More",
+        "x" * 81,
+        "",
+    ],
+)
+def test_navigation_text_is_not_reported_as_an_author(author: str) -> None:
+    assert plausible_author(author) is None
+
+
+def test_a_multi_author_credit_is_judged_per_name() -> None:
+    """One over-long run poisons the field; several ordinary names do not."""
+    assert plausible_author("Ann Lee; Bo Ng; Cy Oh") == "Ann Lee; Bo Ng; Cy Oh"
+    assert plausible_author("Ann Lee; a whole sentence of navigation text lives here too") is None
+
+
+@pytest.mark.parametrize("date", ["2025-11-14", "1996-01-01", "Spring 2024"])
+def test_believable_dates_survive(date: str) -> None:
+    assert plausible_date(date) == date
+
+
+@pytest.mark.parametrize("date", ["1900-01-01", "1970-01-01", "3025-01-01", ""])
+def test_impossible_dates_are_dropped(date: str) -> None:
+    assert plausible_date(date) is None
+
+
+def test_the_extractor_does_not_invent_a_date_for_a_content_free_page() -> None:
+    """`extensive=False`: no explicit date on the page means no date, not a guess."""
+    html = (
+        "<html><head><title>Someplace</title></head>"
+        "<body><div id='app'></div><footer>© 2000</footer></body></html>"
+    )
+    facts = extract_page(html, url="https://someplace.example/p/abc")
+    assert facts.published is None
 
 
 # ── tier 3: media pages ────────────────────────────────────────────────────────────────

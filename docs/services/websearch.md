@@ -216,7 +216,7 @@ The websearch module emits and consumes no NATS events.
 | `LINK_INGEST_MAX_TEXT_CHARS` | `20000` | Characters of extracted text (and of captions) kept per ingest. |
 | `LINK_INGEST_YTDLP` | `true` | Run yt-dlp for richer metadata/subtitles on allow-listed public media platforms. `false` keeps tier 3 on oEmbed + OpenGraph only. |
 | `LINK_INGEST_VISION_MODEL` | _(empty)_ | Model used for image descriptions. Empty means the core's configured default; the core resolves, gates, and meters the call either way. |
-| `LINK_INGEST_USER_AGENT` | `epicurus-websearch (+link_ingest)` | Sent on every ingest fetch. Identifies these requests rather than impersonating a browser. |
+| `LINK_INGEST_USER_AGENT` | `epicurus-websearch (+https://github.com/baakhoff/epicurus)` | Sent on every ingest fetch. Identifies the requests rather than impersonating a browser — name plus a contact URL is what site bot policies ask for, and some hosts (Wikimedia) reject a contactless agent outright. Point it at yourself for a public deployment. |
 | `NATS_URL` | `nats://nats:4222` | NATS connection string. |
 | `DEFAULT_TENANT_ID` | `local` | Tenant context. |
 | `WEBSEARCH_PORT` | `8086` | Host port the module is published on (dev only). |

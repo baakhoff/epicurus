@@ -166,3 +166,20 @@ def test_uploader_subtitles_take_precedence_and_clear_the_auto_flag() -> None:
     )
     assert facts.subtitle_url == "https://x/en.vtt"
     assert facts.has_only_auto_captions is False
+
+
+def test_ytdlp_output_goes_to_the_logger_not_the_processs_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Found in live testing: a private Instagram post wrote a multi-line
+    "use --cookies-from-browser" block straight to stderr despite ``quiet=True`` — container
+    log noise recommending the one thing #739 forbids. The probe now hands yt-dlp a logger,
+    so its output lands in structlog instead."""
+    from epicurus_websearch.media import _QuietLogger
+
+    logger = _QuietLogger()
+    for method in (logger.debug, logger.info, logger.warning, logger.error):
+        method("ERROR: [Instagram] use --cookies-from-browser to authenticate")
+    captured = capsys.readouterr()
+    assert "cookies-from-browser" not in captured.out
+    assert "cookies-from-browser" not in captured.err

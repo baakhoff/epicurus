@@ -238,7 +238,7 @@ class FetchLimits:
     max_bytes: int = 5_000_000
     timeout_s: float = 20.0
     max_redirects: int = 5
-    user_agent: str = "epicurus-websearch (+link_ingest)"
+    user_agent: str = "epicurus-websearch (+https://github.com/baakhoff/epicurus)"
 
 
 @dataclass(frozen=True)

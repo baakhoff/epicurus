@@ -252,6 +252,15 @@ class LinkIngestor:
             return result
         if not result.text and not result.image_descriptions:
             result.kind = KIND_PAGE if not result.title else KIND_VIDEO
+            # Nothing specific to this post came back, so whatever the page did yield is the
+            # platform's own chrome — a generic title, and a byline/date scraped off an
+            # interstitial. Reporting those as the post's own would be the exact kind of
+            # confident wrongness #739's honesty rule exists to prevent, so drop the two that
+            # read as facts about the content (observed live: a signed-out Instagram reel
+            # coming back as `published: 2000-01-01`).
+            if probe is None and not oembed:
+                result.author = None
+                result.published = None
             result.notes.append(
                 "only the link's basic metadata was available — no description, captions,"
                 " or image description could be retrieved"

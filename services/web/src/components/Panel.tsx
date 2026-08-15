@@ -203,7 +203,11 @@ function DocReaderView({ payload }: { payload: unknown }) {
  *
  * Three states, decided by what the write actually did:
  *
- * - **In flight** — the body so far, read-only. A user edit can't race the agent's write.
+ * - **In flight** — the body so far, read-only. A user edit can't race the agent's write. This
+ *   covers both halves of the write: the **typewriter** (#654, ADR-0121), where `content` grows
+ *   frame by frame as the model types it, and the call itself once the arguments are complete.
+ *   Read-only across both, which is what keeps #541's edit/write conflict structurally
+ *   impossible — there is never an unsaved user edit for the agent's write to clobber.
  * - **Applied** (the module's review is off) — the write landed, so the pane hands over to the
  *   real {@link EditorView}: the same editor, auto-save (ADR-0042) and version history
  *   (ADR-0046) as the module's own page, through the same document APIs. No second write path.
@@ -255,13 +259,16 @@ function DocumentView({ payload }: { payload: unknown }) {
   return (
     <article>
       <DocumentHeading doc={doc} />
+      {/* One word for both halves of a write in flight — the model typing (#654) and the call
+          running. "saving…" would be a lie for the staged case, where nothing is written at all
+          (ADR-0033); the caret below is what distinguishes "still arriving" from "waiting". */}
       {doc.writing && <p className="mt-2 text-xs text-ink-dim">writing…</p>}
       {!doc.writing && review.data?.enabled && (
         <p className="mt-2 text-xs text-ink-dim">
           Waiting for your review — nothing is written until you approve it.
         </p>
       )}
-      <DocumentBody content={doc.content} />
+      <DocumentBody content={doc.content} streaming={doc.streaming} />
       {!doc.writing && review.data?.enabled && reviewPage && (
         <div className="mt-5 border-t border-edge pt-4">
           <Button
@@ -301,10 +308,20 @@ function DocumentHeading({ doc }: { doc: LiveDocument }) {
   );
 }
 
-function DocumentBody({ content }: { content: string }) {
+function DocumentBody({ content, streaming = false }: { content: string; streaming?: boolean }) {
   return (
     <div className="mt-4">
       <Markdown>{content}</Markdown>
+      {streaming && (
+        // A caret at the end of the typed text (#654) — the one cue that says "more is coming"
+        // rather than "this is all there is". Decorative, so hidden from assistive tech; the
+        // "writing…" line above carries the same meaning in words.
+        <span
+          aria-hidden
+          data-testid="typewriter-caret"
+          className="ml-0.5 inline-block h-4 w-0.5 animate-pulse rounded-sm bg-accent align-text-bottom"
+        />
+      )}
     </div>
   );
 }

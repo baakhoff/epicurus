@@ -30,7 +30,7 @@ from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
-from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent
+from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent, ToolCallFragment
 
 
 class _FakeStreamGateway:
@@ -1265,3 +1265,248 @@ async def test_the_pane_payload_adds_nothing_to_the_persisted_activity() -> None
     assert not hasattr(step, "document")
     assert step.detail is not None and len(step.detail) <= _TOOL_DETAIL_CAP
     assert len(json.dumps(done.turn.activity.model_dump())) < len(long_body)
+
+
+# ── the live typewriter (#654, ADR-0121) ─────────────────────────────────────
+#
+# v1 above shows the document once the call *lands*. These are the other half: the same document
+# arriving character by character, off the gateway's new streamed tool-call fragments.
+
+
+class _FragmentGateway:
+    """Replays scripted rounds of raw ``StreamEvent``s — deltas, fragments and the result.
+
+    The other fake in this file scripts a round as ``(deltas, result)``, which cannot express a
+    tool call *being typed* or the interleaving of that with the answer's own tokens. This one
+    hands the loop exactly the event sequence a provider would.
+    """
+
+    def __init__(self, rounds: list[list[StreamEvent]]) -> None:
+        self._rounds = list(rounds)
+        self.calls: list[list[ChatMessage]] = []
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        tools: Any = None,
+        tenant_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.calls.append(list(messages))
+        for event in self._rounds.pop(0):
+            yield event
+
+    async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
+        return True
+
+    async def supports_vision(self, *_a: Any, **_k: Any) -> bool:
+        return True
+
+
+def _typed_call(
+    arguments: str, *, chunk: int = 8, tool: str = "write_doc", call_id: str = "c1"
+) -> list[StreamEvent]:
+    """The events a provider emits while typing one tool call's arguments."""
+    pieces = [arguments[i : i + chunk] for i in range(0, len(arguments), chunk)] or [""]
+    events = [StreamEvent(tool_call=ToolCallFragment(slot=0, id=call_id, name=tool))]
+    events += [
+        StreamEvent(tool_call=ToolCallFragment(slot=0, id=call_id, name=tool, arguments=piece))
+        for piece in pieces
+    ]
+    events.append(
+        StreamEvent(
+            result=ChatResult(model="m", content="", tool_calls=[_tool_call(tool, arguments)])
+        )
+    )
+    return events
+
+
+async def _typed_events(
+    arguments: dict[str, Any],
+    *,
+    lookup: DocumentToolLookup | None = None,
+    chunk: int = 8,
+) -> list[AgentEvent]:
+    """Run one turn whose single tool call is typed out fragment by fragment."""
+    raw = json.dumps(arguments)
+    answer = [
+        StreamEvent(delta="saved"),
+        StreamEvent(result=ChatResult(model="m", content="saved")),
+    ]
+    gw = _FragmentGateway([_typed_call(raw, chunk=chunk), answer])
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_ScribeMcp(),
+        documents=_doc_lookup(_writes(target_arg="path")) if lookup is None else lookup,
+    )
+    return await _collect(agent, "write it down")
+
+
+async def test_a_write_types_itself_into_the_pane_as_the_model_writes_it() -> None:
+    body = "# Goals\n\nship the typewriter"
+    events = await _typed_events({"path": "notes/goals.md", "content": body})
+
+    previews = [e for e in events if e.type == "doc_preview"]
+    assert previews, "an annotated call should preview while it is being typed"
+    # The deltas concatenate to exactly what the model wrote — nothing lost, nothing doubled.
+    assert "".join(e.text or "" for e in previews) == body
+    # Every frame names its own document, so a client that joins late still knows what it is.
+    for frame in previews:
+        assert frame.tool == "write_doc"
+        assert frame.preview is not None and frame.preview["module"] == "knowledge"
+    assert previews[-1].preview == {"module": "knowledge", "target": "notes/goals.md"}
+
+
+async def test_the_typewriter_runs_before_the_call_is_executed() -> None:
+    events = await _typed_events({"path": "a.md", "content": "body text here"})
+    kinds = [e.type for e in events]
+    # preview(s) → `running` (the pane's authoritative payload) → `ok` → the answer.
+    assert kinds.index("doc_preview") < kinds.index("tool")
+    assert [e.status for e in events if e.type == "tool"] == ["running", "ok"]
+
+
+async def test_the_pane_settles_on_the_parsed_call_not_on_the_preview() -> None:
+    # ADR-0101's rule: the pane must never lie about what was written. The preview is a *guess*
+    # read out of half-typed JSON; the `tool` frames carry the arguments as actually parsed, and
+    # they are what the pane ends on.
+    body = 'a "quoted" body\nwith a newline'
+    events = await _typed_events({"path": "a.md", "content": body})
+
+    settled = [e for e in events if e.type == "tool"]
+    assert [e.document for e in settled] == [
+        {"module": "knowledge", "content": body, "target": "a.md", "title": None}
+    ] * 2
+    assert all(e.document is None for e in events if e.type == "doc_preview")
+
+
+async def test_a_preview_never_reaches_the_persisted_activity() -> None:
+    """ADR-0041, restated for the typewriter: previews ride SSE and stop there.
+
+    v1 keeps a *finished* document out of the timeline; a preview is a stream of them, so the
+    same rule matters more, not less. The turn's activity must look exactly as it would have
+    without the typewriter.
+    """
+    body = "# Long\n" + ("every word of this is streamed. " * 200)
+    events = await _typed_events({"path": "a.md", "content": body}, chunk=16)
+
+    assert len([e for e in events if e.type == "doc_preview"]) > 0
+    done = events[-1]
+    assert done.turn is not None
+    activity = done.turn.activity
+    assert [s.tool for s in activity.steps] == ["write_doc"]  # one step, not one per fragment
+    step = activity.steps[0]
+    assert not hasattr(step, "preview")
+    assert step.detail is not None and len(step.detail) <= _TOOL_DETAIL_CAP
+    serialized = json.dumps(activity.model_dump())
+    # The body never lands in the row — only the pre-existing, capped call detail does.
+    assert len(serialized) < len(body)
+    assert "doc_preview" not in serialized
+
+
+async def test_a_long_write_never_starves_the_chat_deltas() -> None:
+    """#541's constraint: the document and the answer share one stream, so bound the document.
+
+    Two things have to hold at once — the answer's tokens go out *immediately and in order*
+    (they are never queued behind a document), and the document's own frames are coalesced far
+    below the fragment rate so they cannot swamp the connection.
+    """
+    body = "word " * 4000  # 20k characters, typed in ~2500 fragments
+    raw = json.dumps({"path": "a.md", "content": body})
+    pieces = [raw[i : i + 8] for i in range(0, len(raw), 8)]
+    # Answer tokens scattered through the write, as a model that narrates while it writes.
+    marks = {0: "writing", len(pieces) // 2: " it", len(pieces) - 1: " now"}
+    chat_tokens = list(marks.values())
+    scripted: list[StreamEvent] = [
+        StreamEvent(tool_call=ToolCallFragment(slot=0, id="c1", name="write_doc"))
+    ]
+    for index, piece in enumerate(pieces):
+        if (token := marks.get(index)) is not None:
+            scripted.append(StreamEvent(delta=token))
+        scripted.append(
+            StreamEvent(
+                tool_call=ToolCallFragment(slot=0, id="c1", name="write_doc", arguments=piece)
+            )
+        )
+    scripted.append(
+        StreamEvent(
+            result=ChatResult(model="m", content="", tool_calls=[_tool_call("write_doc", raw)])
+        )
+    )
+    gw = _FragmentGateway(
+        [
+            scripted,
+            [StreamEvent(delta="done"), StreamEvent(result=ChatResult(model="m", content="done"))],
+        ]
+    )
+    agent = Agent(  # type: ignore[arg-type]
+        gateway=gw, mcp=_ScribeMcp(), documents=_doc_lookup(_writes(target_arg="path"))
+    )
+    events = await _collect(agent, "write a long one")
+
+    stream = [e for e in events if e.type in {"delta", "doc_preview"}]
+    previews = [e for e in stream if e.type == "doc_preview"]
+    deltas = [e for e in stream if e.type == "delta"]
+    # Every answer token arrived, in order, and none of them waited for the document.
+    assert [e.text for e in deltas][:3] == chat_tokens
+    assert stream[0].type == "delta"  # the first token beat the first preview frame
+    kinds = [e.type for e in stream]
+    middle = kinds.index("delta", 1)
+    assert "doc_preview" in kinds[:middle]  # the document was already flowing…
+    assert "doc_preview" in kinds[middle + 1 :]  # …and kept flowing after the token
+    # The document was coalesced by a wide margin — orders of magnitude fewer frames than
+    # fragments — while still delivering every character.
+    assert len(previews) < len(pieces) / 50
+    assert "".join(e.text or "" for e in previews) == body
+
+
+async def test_an_unannotated_call_is_typed_out_in_silence() -> None:
+    events = await _typed_events({"path": "a.md", "content": "body"}, lookup=_doc_lookup(None))
+    assert not [e for e in events if e.type == "doc_preview"]
+
+
+async def test_no_document_lookup_means_no_typewriter() -> None:
+    raw = json.dumps({"path": "a.md", "content": "body"})
+    gw = _FragmentGateway(
+        [
+            _typed_call(raw),
+            [StreamEvent(delta="ok"), StreamEvent(result=ChatResult(model="m", content="ok"))],
+        ]
+    )
+    events = await _collect(Agent(gateway=gw, mcp=_ScribeMcp()), "go")  # type: ignore[arg-type]
+    assert not [e for e in events if e.type == "doc_preview"]
+
+
+async def test_a_body_that_never_starts_opens_no_pane() -> None:
+    events = await _typed_events({"path": "a.md", "content": ""})
+    assert not [e for e in events if e.type == "doc_preview"]
+
+
+async def test_a_second_step_does_not_inherit_the_first_steps_preview_state() -> None:
+    """Fragment slots restart per gateway call; a fresh tracker per step is what makes that safe.
+
+    Without it, step two's slot 0 would resolve to step one's tool and its body would be
+    appended to the previous document's — the pane would show two writes fused into one.
+    """
+    first = json.dumps({"path": "one.md", "content": "first body"})
+    second = json.dumps({"path": "two.md", "content": "second body"})
+    gw = _FragmentGateway(
+        [
+            _typed_call(first, call_id="c1"),
+            _typed_call(second, call_id="c2"),
+            [StreamEvent(delta="both"), StreamEvent(result=ChatResult(model="m", content="both"))],
+        ]
+    )
+    agent = Agent(  # type: ignore[arg-type]
+        gateway=gw, mcp=_ScribeMcp(), documents=_doc_lookup(_writes(target_arg="path"))
+    )
+    events = await _collect(agent, "write two")
+
+    previews = [e for e in events if e.type == "doc_preview"]
+    targets = {e.preview["target"] for e in previews if e.preview and "target" in e.preview}
+    assert targets == {"one.md", "two.md"}
+    bodies = [
+        "".join(e.text or "" for e in previews if (e.preview or {}).get("target") == t)
+        for t in ("one.md", "two.md")
+    ]
+    assert bodies == ["first body", "second body"]

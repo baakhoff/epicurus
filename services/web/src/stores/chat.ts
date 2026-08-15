@@ -19,6 +19,7 @@ import { api } from "@/lib/api";
 import {
   AgentEvent,
   type Attachment,
+  type DocumentPreview,
   EmailDraft,
   type EntityRef,
   type Readiness,
@@ -48,6 +49,12 @@ export interface LiveDocument extends WrittenDocument {
   failed: boolean;
   /** The user closed the pane; a further write to the same document must not reopen it. */
   dismissed: boolean;
+  /** The typewriter is running (#654, ADR-0121): `content` is what the model has typed *so far*,
+   *  growing frame by frame, and the call has not been made yet. It flips false the moment the
+   *  `tool` frame lands — that frame carries the arguments as actually parsed, and replaces this
+   *  body wholesale, so the pane never keeps showing a guess after the real thing is known.
+   *  Read-only either way: `writing` stays true from the first preview through the write. */
+  streaming: boolean;
 }
 
 /** One entry on the activity timeline (the turn's *process*): a run of thinking or a tool
@@ -165,11 +172,13 @@ interface ChatState {
    *  Mutually exclusive with both. */
   awaitingApproval: { runId: string; summary: string; refs: EntityRef[] } | null;
   /** The document the turn is writing, for the pane beside the chat (#541, ADR-0101). Set from
-   *  a `tool` event whose module annotated the tool; null when this turn writes none. Not
-   *  persisted: the body rides the SSE stream and never reaches the transcript (ADR-0041's caps
-   *  are unchanged), so a reload has nothing to restore it from — the turn's entity-ref chip is
-   *  the durable way back to the document (ADR-0019). `dismissed` survives further writes to the
-   *  same document, so closing the pane stays closed. */
+   *  a `doc_preview` event while the model types it (#654, ADR-0121) and then from the `tool`
+   *  event that carries the call as parsed; null when this turn writes none. Not persisted: the
+   *  body rides the SSE stream and never reaches the transcript (ADR-0041's caps are unchanged),
+   *  so a reload has nothing to restore it from — the turn's entity-ref chip is the durable way
+   *  back to the document (ADR-0019), and an in-flight turn re-attaches and replays the deltas.
+   *  `dismissed` survives further writes to the same document, so closing the pane stays closed —
+   *  including closing it mid-typewriter. */
   liveDocument: LiveDocument | null;
   /** Close the document pane. It reopens only when a *new* document is written (#541). */
   dismissDocument: () => void;
@@ -337,7 +346,12 @@ export const useChat = create<ChatState>()(
         document: WrittenDocument,
       ): void => {
         const open = get().liveDocument;
-        const same = open?.module === document.module && open?.target === document.target;
+        const same =
+          open?.module === document.module &&
+          // A typewriter that never got as far as the target still belongs to this write — the
+          // preview and the call it previewed are the same document, so a mid-write dismissal
+          // must survive the settle rather than being overruled by the pane reopening.
+          (open?.streaming || open?.target === document.target);
         set({
           liveDocument: {
             ...document,
@@ -345,6 +359,34 @@ export const useChat = create<ChatState>()(
             writing: status === "running",
             failed: status === "error",
             dismissed: same ? open.dismissed : false,
+            // The authoritative frame: whatever the typewriter drew is replaced by the arguments
+            // as actually parsed (ADR-0101 — the pane must never keep showing a guess).
+            streaming: false,
+          },
+        });
+      };
+
+      // The typewriter (#654, ADR-0121): a `doc_preview` delta extends the body being typed.
+      // Deltas are append-only and ordered, so this is a concatenation — which is also what
+      // makes re-attach free: replaying the run's buffer replays these in order and rebuilds
+      // exactly the same body. A frame carries `module` always and `target`/`title` once the
+      // model has finished typing them, so the header fills in as it goes.
+      const appendPreview = (tool: string, text: string, preview: DocumentPreview): void => {
+        const open = get().liveDocument;
+        // Continue the open preview when it is the same module's write; anything else (a settled
+        // document, or another module) starts a fresh pane.
+        const same = open !== null && open.streaming && open.module === preview.module;
+        set({
+          liveDocument: {
+            module: preview.module,
+            content: same ? open.content + text : text,
+            target: preview.target ?? (same ? open.target : null),
+            title: preview.title ?? (same ? open.title : null),
+            tool,
+            writing: true, // read-only from the very first character (#541's structural fix)
+            failed: false,
+            dismissed: same ? open.dismissed : false,
+            streaming: true,
           },
         });
       };
@@ -366,6 +408,10 @@ export const useChat = create<ChatState>()(
             else if (event.type === "tool" && event.tool && event.status) {
               setTool({ tool: event.tool, status: event.status, detail: event.detail ?? undefined });
               if (event.document) setLiveDocument(event.tool, event.status, event.document);
+            } else if (event.type === "doc_preview" && event.tool && event.preview) {
+              // Ephemeral by contract: nothing about a preview is persisted, and it leaves no
+              // trace in `segments` — it only feeds the pane (ADR-0041/0121).
+              appendPreview(event.tool, event.text ?? "", event.preview);
             }
             else if (event.type === "error") {
               const detail = event.detail ?? "the stream failed";

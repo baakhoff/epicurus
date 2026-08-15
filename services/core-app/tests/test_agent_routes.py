@@ -1055,6 +1055,89 @@ async def test_reattach_replays_buffer_after_seq() -> None:
     assert _parse_sse_ids(resp.text) == [("2", "delta"), ("3", "done")]
 
 
+def _typewriter_run() -> list[AgentEvent]:
+    """A turn that types a document, then settles it — the #654 shape, as SSE frames."""
+    return [
+        AgentEvent(
+            type="doc_preview", tool="write_doc", text="# Goals\n", preview={"module": "knowledge"}
+        ),
+        AgentEvent(
+            type="doc_preview",
+            tool="write_doc",
+            text="ship it",
+            preview={"module": "knowledge", "target": "notes/goals.md"},
+        ),
+        AgentEvent(
+            type="tool",
+            tool="write_doc",
+            status="ok",
+            document={
+                "module": "knowledge",
+                "content": "# Goals\nship it",
+                "target": "notes/goals.md",
+                "title": None,
+            },
+        ),
+        AgentEvent(type="done", turn=None),
+    ]
+
+
+async def test_reattach_rebuilds_the_document_typewriter_from_its_replayed_deltas() -> None:
+    """#654's re-attach decision: a preview rides the same seq'd buffer as every other frame.
+
+    The alternative — holding the latest coalesced snapshot and resending *that* on re-attach —
+    would make the run carry document state it otherwise has no reason to keep, and it would be
+    wrong for the ordinary resume: a client that already saw the first half would be handed it
+    twice. Deltas replay exactly instead. From ``after_seq=0`` (a reload, which has seen nothing)
+    the pane rebuilds the whole body; from ``after_seq=K`` it continues where it left off. No
+    special case in the buffer, and none in the client.
+    """
+    registry = LiveRunRegistry()
+    agent = _ScriptAgent(_typewriter_run())
+    run = await registry.start(lambda: agent.run_stream(), tenant="local", session_id="s1")
+    await _settle(run)
+    app = _runs_app(_FakeAgent(), registry=registry)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        fresh = await client.get(f"/platform/v1/agent/runs/{run.run_id}/stream")
+        resumed = await client.get(f"/platform/v1/agent/runs/{run.run_id}/stream?after_seq=1")
+
+    assert _parse_sse_ids(fresh.text) == [
+        ("1", "doc_preview"),
+        ("2", "doc_preview"),
+        ("3", "tool"),
+        ("4", "done"),
+    ]
+    rebuilt = [data for event, data in _parse_sse(fresh.text) if event == "doc_preview"]
+    assert "".join(str(frame["text"]) for frame in rebuilt) == "# Goals\nship it"
+    # Each frame names its own document, so a client that joins late still knows what it is.
+    assert all(frame["preview"] for frame in rebuilt)
+    # …and a resume gets only what it missed — no re-sent prefix to double up on.
+    assert _parse_sse_ids(resumed.text) == [("2", "doc_preview"), ("3", "tool"), ("4", "done")]
+    tail = [data for event, data in _parse_sse(resumed.text) if event == "doc_preview"]
+    assert "".join(str(frame["text"]) for frame in tail) == "ship it"
+
+
+async def test_a_preview_frame_carries_only_the_fields_it_fills() -> None:
+    # `exclude_none` on the framer keeps the new kind additive (ADR-0055): a preview frame is
+    # {type, tool, text, preview}, so a stale cached client parsing the stream sees only fields
+    # it can safely ignore.
+    registry = LiveRunRegistry()
+    agent = _ScriptAgent(_typewriter_run())
+    run = await registry.start(lambda: agent.run_stream(), tenant="local", session_id="s1")
+    await _settle(run)
+    app = _runs_app(_FakeAgent(), registry=registry)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.get(f"/platform/v1/agent/runs/{run.run_id}/stream")
+
+    frame = next(data for event, data in _parse_sse(resp.text) if event == "doc_preview")
+    assert frame["preview"] == {"module": "knowledge"}
+    assert set(frame) <= {"type", "tool", "text", "preview", "refs"}
+
+
 async def test_reattach_unknown_run_emits_gone() -> None:
     registry = LiveRunRegistry()
     app = _runs_app(_FakeAgent(), registry=registry)

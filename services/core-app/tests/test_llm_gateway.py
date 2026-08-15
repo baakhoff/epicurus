@@ -645,6 +645,145 @@ async def test_stream_chat_keeps_unindexed_tool_calls_distinct(
         json.loads(tool_call["function"]["arguments"])  # no JSONDecodeError
 
 
+# ── streamed tool-call fragments (#654, ADR-0121) ────────────────────────────
+#
+# The same accumulator as above, seen from its new outward-facing side: a consumer that wants to
+# watch a call being written gets one `tool_call` event per arriving fragment. What matters is
+# that this is *additive* (the assembly and the final result are untouched) and that it reuses
+# the slot discipline above rather than re-deriving it.
+
+
+class _Fn:
+    def __init__(self, name: str | None = None, arguments: Any = None) -> None:
+        self.name = name
+        self.arguments = arguments
+
+
+class _Frag:
+    def __init__(
+        self,
+        index: int | None = None,
+        call_id: str | None = None,
+        name: str | None = None,
+        arguments: Any = None,
+        function: _Fn | None = None,
+    ) -> None:
+        self.index = index
+        self.id = call_id
+        self.function = _Fn(name, arguments) if function is None else function
+
+
+class _FragDelta:
+    def __init__(self, tool_calls: list[_Frag] | None = None, content: str | None = None) -> None:
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _FragChunk:
+    def __init__(self, delta: _FragDelta) -> None:
+        self.choices = [cast(Any, type("_C", (), {"delta": delta})())]
+
+
+def _stream_fragments(
+    monkeypatch: pytest.MonkeyPatch, deltas: list[_FragDelta]
+) -> AsyncIterator[Any]:
+    async def fake_chunks() -> AsyncIterator[_FragChunk]:
+        for delta in deltas:
+            yield _FragChunk(delta)
+
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[_FragChunk]:
+        return fake_chunks()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    return _gateway().stream_chat(
+        [ChatMessage(role="user", content="write it")],
+        tools=[{"type": "function", "function": {"name": "write_doc"}}],
+    )
+
+
+async def test_stream_chat_surfaces_tool_call_fragments_as_they_arrive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = _stream_fragments(
+        monkeypatch,
+        [
+            _FragDelta(content="on it"),
+            _FragDelta([_Frag(0, call_id="call_1", name="write_doc")]),
+            _FragDelta([_Frag(0, arguments='{"content": "# Go')]),
+            _FragDelta([_Frag(0, arguments='als"}')]),
+        ],
+    )
+    events = [event async for event in stream]
+
+    fragments = [e.tool_call for e in events if e.tool_call is not None]
+    # One event per arriving fragment, in order, carrying only that fragment's *delta*…
+    assert [f.arguments for f in fragments] == [None, '{"content": "# Go', 'als"}']
+    # …while id and name are the call's as resolved so far, so a continuation still names its
+    # tool and a consumer can act on identity without tracking state of its own.
+    assert {f.slot for f in fragments} == {0}
+    assert [f.name for f in fragments] == ["write_doc"] * 3
+    assert [f.id for f in fragments] == ["call_1"] * 3
+    # Additive: the content delta and the assembled result are exactly what they always were.
+    assert [e.delta for e in events if e.delta] == ["on it"]
+    [result] = [e.result for e in events if e.result is not None]
+    call = (result.tool_calls or [])[0]
+    assert call["function"]["arguments"] == '{"content": "# Goals"}'
+
+
+async def test_streamed_fragments_inherit_the_unindexed_slot_discipline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #324's regression, from the new side: two un-indexed, named Ollama calls must be reported
+    # under two slots. One slot would hand a consumer `{…}{…}` as though it were a single call's
+    # arguments — the same "Extra data" shape, just earlier in the pipeline.
+    stream = _stream_fragments(
+        monkeypatch,
+        [
+            _FragDelta([_Frag(call_id="a", name="write_doc", arguments='{"content": "one"}')]),
+            _FragDelta([_Frag(call_id="b", name="write_doc", arguments='{"content": "two"}')]),
+        ],
+    )
+    fragments = [e.tool_call async for e in stream if e.tool_call is not None]
+
+    assert [f.slot for f in fragments] == [0, 1]
+    assert [f.arguments for f in fragments] == ['{"content": "one"}', '{"content": "two"}']
+    assert [f.id for f in fragments] == ["a", "b"]
+
+
+async def test_a_fragment_that_carries_nothing_new_is_not_an_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = _stream_fragments(
+        monkeypatch,
+        [
+            _FragDelta([_Frag(0, call_id="call_1", name="write_doc")]),
+            _FragDelta([_Frag(0, arguments="")]),  # an empty continuation says nothing…
+            _FragDelta([_Frag(0, function=None)]),  # …and neither does an empty fragment
+        ],
+    )
+    fragments = [e.tool_call async for e in stream if e.tool_call is not None]
+    assert len(fragments) == 1
+
+
+async def test_whole_dict_arguments_report_no_incremental_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Some providers send the arguments as a dict in one go. The accumulator *replaces* rather
+    # than appends for that flavour, so there is nothing incremental to report — the call still
+    # arrives whole on the final result, it simply has no typewriter.
+    stream = _stream_fragments(
+        monkeypatch,
+        [_FragDelta([_Frag(0, call_id="call_1", name="write_doc", arguments={"content": "hi"})])],
+    )
+    events = [event async for event in stream]
+
+    [fragment] = [e.tool_call for e in events if e.tool_call is not None]
+    assert fragment.arguments is None
+    assert (fragment.name, fragment.id) == ("write_doc", "call_1")
+    [result] = [e.result for e in events if e.result is not None]
+    assert json.loads((result.tool_calls or [])[0]["function"]["arguments"]) == {"content": "hi"}
+
+
 def test_normalize_tool_calls_repairs_arguments() -> None:
     # The defense-in-depth layer: whatever a provider hands us, every replayed arguments
     # value is exactly one loadable JSON string.

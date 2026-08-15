@@ -38,7 +38,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `doc_preview` (a slice of a document *as the model types it* — `text` carries a coalesced body delta and `preview` `{module, target?, title?}` names the document, #654/ADR-0121; purely ephemeral — see **The document typewriter** below) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. **Invisible sessions are excluded** (#772), and every list read also runs the **orphan sweep**: any flagged session not named by the optional `?active=<session_id>` query param (the invisible chat the requesting client is currently *in*) and with no turn in flight is fully erased via the #771 cascade — so a crash never strands an invisible chat on disk. The sweep is best-effort; a hiccup never fails the list. |
 | `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
 | `PUT /platform/v1/agent/sessions/{id}/ephemeral` | Flag a session **invisible** (#772) — see *Invisible chats* below. Idempotent (a mid-chat reload re-marks so the flag is server truth, not client memory); **503** if no flag store is wired. Returns `{ephemeral: true}`. There is deliberately **no un-mark**: toggling invisibility off *is* an exit, and every exit deletes (`DELETE /sessions/{id}`). |
@@ -756,6 +756,50 @@ tool now starts a fresh slot. As a backstop, every assembled call's `arguments` 
 to exactly one valid JSON string before it is stored or replayed — a dict is serialized, a
 leading JSON value is salvaged from any trailing junk, and anything unparseable degrades to
 `{}` — so a malformed stream can never poison a later turn.
+
+Since #654 the assembly is also **observable while it happens**: each arriving fragment is
+surfaced as a `StreamEvent.tool_call` — `ToolCallFragment{slot, id?, name?, arguments?}` — where
+`slot` is the accumulator's own slot (so a consumer inherits the index discipline above rather
+than re-deriving it), `id`/`name` are the call's values *as resolved so far* (a continuation
+fragment still names its tool), and `arguments` is strictly the delta this fragment added, or
+`None` for the whole-dict provider flavour (which is replaced rather than appended, so there is
+nothing incremental to report). Purely additive: the accumulation and the final `result` are
+untouched, and a consumer that ignores the field behaves exactly as before.
+
+### The document typewriter (#654, ADR-0121)
+
+The document pane (ADR-0101) opens when an annotated `writes_document` call *lands*. The
+typewriter shows the body arriving instead, off the streamed fragments above:
+
+- **`DocumentPreviewTracker`** (`agent/doc_preview.py`) resolves each call's tool name once
+  against the registry's `writes_document` annotation and ignores everything else.
+- **`StreamingArguments`** (`agent/partial_json.py`) is a resumable scanner that decodes one
+  named top-level string argument out of JSON that is still an unterminated fragment. It is
+  split-invariant: a `\` cut from what it escapes, a `\uXXXX` cut from its digits, or a surrogate
+  pair cut in half is held back until it is complete, so a consumer never sees a half-escape or a
+  lone surrogate (which would fail to encode into the SSE frame that carries it). Malformed JSON
+  marks the reader broken and keeps what it had — a preview is never worth an exception. Only the
+  body is shown half-written; `target_arg`/`title_arg` are reported only once *closed*, so the
+  pane's header fills in rather than flickering through a half-typed title.
+- **Throttle.** A `doc_preview` frame is emitted at most every `PREVIEW_INTERVAL_S` (**0.1 s**)
+  per call, or sooner once `PREVIEW_MAX_CHARS` (**4096**) have piled up — the first slice goes out
+  immediately, and the tracker is flushed when the gateway stream ends so the tail is never
+  withheld. The interval bounds the frame *rate* (~10/s whatever the token rate) and the cap
+  bounds frame *size*; together they are #541's answer to "a large document must never starve the
+  chat deltas", which share the one stream.
+- **Ephemeral (ADR-0041).** A preview never touches the turn's timeline — not `append_tool`, not
+  `activity` — for the same reason v1's finished `document` payload doesn't, only more so: it
+  reads an *unfinished* call. The persisted step is unchanged: one entry, with the pre-existing
+  capped `detail`.
+- **Hand-off (ADR-0101).** The `tool` frame that follows carries the arguments as actually
+  *parsed* and replaces whatever the typewriter drew, so the pane can never keep showing a guess
+  after the real thing is known. The pane is read-only from the first previewed character through
+  the settle, which is what keeps #541's edit/write conflict structurally impossible.
+- **Re-attach.** Previews ride the same seq-tagged live-run buffer as every other frame, so
+  `GET /runs/{id}/stream?after_seq=N` replays them in order: from `0` (a reload) the pane rebuilds
+  the body from its deltas, from `N` it continues. No snapshot is held or re-sent — that would
+  make the run carry document state it has no other reason to keep, and would hand a resuming
+  client a prefix it already has.
 
 ### Stream timeouts & mid-stream failures (#453)
 

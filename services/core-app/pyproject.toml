@@ -8,7 +8,7 @@ dependencies = [
     "fastapi>=0.141.1",
     # FastAPI needs python-multipart for UploadFile (the chat attachment upload, ADR-0019).
     "python-multipart>=0.0.9",
-    "uvicorn[standard]>=0.52.0",
+    "uvicorn[standard]>=0.52.1",
     "litellm>=1.50",
     "httpx>=0.27",
     # mcp 2.0's transport raises httpx2 (its httpx fork with built-in SSE) exceptions; the

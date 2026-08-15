@@ -32,6 +32,7 @@ from epicurus_mail.provider import (
     MailCursor,
     MailLabel,
     MailMessage,
+    MailNotConnected,
     MailProvider,
     MailThread,
     MailThreadSummary,
@@ -109,7 +110,21 @@ class GmailProvider(MailProvider):
     # ── internal helpers ─────────────────────────────────────────────────────
 
     async def _get_token(self) -> str:
-        return await self._platform.get_oauth_token("google")
+        """The tenant's Google access token, or :class:`MailNotConnected` (#764).
+
+        ``PlatformClient.get_oauth_token`` documents a 404/400 as "the provider is not
+        connected for this tenant" (ADR-0020 — the core owns the vault; the module never
+        holds a secret and never calls the token endpoint itself). Translating exactly those
+        two statuses here is what lets every caller distinguish *no account* from Gmail's own
+        errors: a bare 404 further up the stack means "no such message", not "no Google".
+        Any other status stays the raw ``HTTPStatusError`` the existing 403/429 mapping reads.
+        """
+        try:
+            return await self._platform.get_oauth_token("google")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (httpx.codes.NOT_FOUND, httpx.codes.BAD_REQUEST):
+                raise MailNotConnected("no Google account is connected") from exc
+            raise
 
     def _make_client(self, token: str) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -549,8 +564,10 @@ class GmailProvider(MailProvider):
 
         A token-presence check — a fast core round-trip via the OAuth vault, not a live
         Gmail API call — so the polled status panel can't stall the core's status proxy
-        into a Bad Gateway. Any HTTP failure (not connected, or the core unreachable)
-        reads as not available.
+        into a Bad Gateway. Any HTTP failure reads as not available: the deliberate
+        :class:`MailNotConnected` (nobody has connected Google, #764) and an unreachable
+        core alike — from a caller's point of view there is no mailbox to reach either way,
+        and the caller that needs the *reason* catches ``MailNotConnected`` instead.
         """
         try:
             await self._get_token()

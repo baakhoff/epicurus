@@ -226,6 +226,22 @@ removed the core **clears the provider from each module's collection selection**
 symmetric with the connect-time auto-connect): a calendar/task list it can no longer reach
 is dropped from the stored selection, falling the module back to its local default.
 
+**What each module does afterwards (#764).** Calendar and tasks resolve read and write targets
+through one rule (#813/#814), so a dropped ref degrades to local with no error. **Mail is the
+exception**: it is provider-only (ADR-0032 — no collections, no local mailbox), so it has
+nothing to fall back to. Instead its tools return one model-actionable sentence and its page
+returns an honest empty state — see
+[mail — no connected account](../services/mail.md#no-connected-account-764). Nothing is deleted
+anywhere: mail keeps its local cache, so reconnecting restores the mailbox with no resync and
+no restart. The web shell invalidates its module-facing caches on disconnect, so no page keeps
+painting a connected account.
+
+**Going provider-free in one module instead.** Disconnect is platform-wide. To stop a *single*
+module using a provider while the others keep it, use that module's collections panel —
+**Stop using {provider} in this module** — which writes the same `CollectionPrefs` this hook
+writes, scoped to one module, and leaves the tokens in place (ADR-0030/ADR-0122). Operator
+guide: [Running without Google](../user/running-without-google.md).
+
 ---
 
 ## `GET /platform/v1/oauth/{provider}/token`

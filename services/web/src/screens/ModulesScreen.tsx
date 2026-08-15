@@ -24,6 +24,7 @@ import { api } from "@/lib/api";
 import { moduleIcon } from "@/lib/icons";
 import { CORE_MODULE } from "@/lib/suggestions";
 import type {
+  Account,
   Collection,
   CollectionPrefs,
   CollectionRef,
@@ -355,10 +356,29 @@ const sameRef = (a: CollectionRef, b: { account: string; collection: string }): 
   a.account === b.account && a.collection === b.collection;
 
 /**
+ * Whether this module is currently using *account* at all (#764).
+ *
+ * Derived from the prefs, never stored: "not used" is exactly "none of this account's
+ * collections are enabled". There is nowhere else it could live — `CollectionPrefs` is
+ * `{enabled, active}` and nothing more — and deriving it means the collapsed row can never
+ * disagree with the toggles it replaces. Safe as a *default* rendering because connecting an
+ * account seeds every collection enabled (the core's `autoconnect_collections`, #209), so a
+ * connected account with nothing ticked is always the result of a deliberate act.
+ */
+const accountInUse = (account: Account): boolean => account.collections.some((c) => c.enabled);
+
+/**
  * Connected accounts + per-collection toggles + an active switcher (ADR-0030) — the
  * core-rendered replacement for the old local/google provider dropdown. The module
  * supplies the data (its `/accounts`, merged with the stored selection); this shell
  * owns the chrome. `local` is the silent default and never appears here.
+ *
+ * Going provider-free is one action, not N unticks (#764): "Stop using Google here" clears
+ * every one of that account's collections in a single PUT (the active falls back to the
+ * local default when it belonged to the account), and the block collapses to a quiet
+ * "not used · Use again" row so the panel *states* that the module is now local-only
+ * instead of leaving a wall of switched-off toggles. OAuth tokens are untouched — this is
+ * prefs only, per module, so every other module keeps working and one click undoes it.
  */
 function ModuleCollections({ snapshot }: { snapshot: ModuleSnapshot }) {
   const name = snapshot.manifest.name;
@@ -414,7 +434,40 @@ function ModuleCollections({ snapshot }: { snapshot: ModuleSnapshot }) {
     save.mutate({ enabled, active: ref });
   };
 
+  // "Stop using <account> here" (#764) — one PUT that drops every one of this account's
+  // collections. The active clears to null (the built-in local default) only when it was one
+  // of them; another account's active is left alone, so going Google-free in a module that
+  // also has some other provider doesn't quietly reset that one too.
+  const stopUsing = (account: Account) => {
+    const enabled = enabledRefs.filter((r) => r.account !== account.account);
+    const active =
+      activeCol && activeCol.account !== account.account
+        ? { account: activeCol.account, collection: activeCol.collection }
+        : null;
+    save.mutate({ enabled, active });
+  };
+
+  // "Use again" — re-enable all of the account's collections and, if nothing else is active,
+  // make its first writable one the write target. Deliberately the *same* seeding a fresh
+  // connect performs (the core's `autoconnect_collections`), rather than restoring whatever
+  // was ticked before: prefs hold one selection, not a history, so a "restore" would have to
+  // invent hidden session state that silently stops working after a reload — two behaviours
+  // behind one button. One rule instead, and for the operator who never hand-picked a subset
+  // (the seeded default) it *is* their previous selection. The toggles show exactly what is
+  // on, so any narrowing is one untick away and never hidden.
+  const resumeUsing = (account: Account) => {
+    const refs = account.collections.map((c) => ({ account: c.account, collection: c.collection }));
+    const writable = account.collections.find((c) => c.writable) ?? account.collections[0];
+    const active = activeCol
+      ? { account: activeCol.account, collection: activeCol.collection }
+      : writable
+        ? { account: writable.account, collection: writable.collection }
+        : null;
+    save.mutate({ enabled: [...enabledRefs, ...refs], active });
+  };
+
   const activeWord = spec.multi ? "default" : "active";
+  const nothingEnabled = cols.length > 0 && enabledRefs.length === 0;
 
   return (
     <div>
@@ -425,60 +478,99 @@ function ModuleCollections({ snapshot }: { snapshot: ModuleSnapshot }) {
         <Spinner />
       ) : (
         <div className="flex flex-col gap-3">
-          {accounts.map((account) => (
+          {accounts.map((account) => {
+            // Collapsed = connected, has collections, uses none of them (#764). A connected
+            // account with nothing to offer keeps its ordinary block: there is nothing to
+            // stop using, so "not used" would be a non-sequitur.
+            const collapsed = account.connected && account.collections.length > 0
+              && !accountInUse(account);
+            return (
             <div key={account.account} className="rounded-(--radius-field) border border-edge p-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-sm text-ink">{account.label}</span>
-                {account.connected ? (
-                  <Badge tone="ok">connected</Badge>
-                ) : (
-                  <Button
-                    busy={connect.isPending}
-                    onClick={() => connect.mutate(account.provider)}
+              {collapsed ? (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm text-ink-dim">
+                    {account.label} — not used
+                  </span>
+                  <button
+                    className="shrink-0 text-xs text-accent-strong disabled:opacity-50"
+                    disabled={save.isPending}
+                    onClick={() => resumeUsing(account)}
                   >
-                    Connect
-                  </Button>
-                )}
-              </div>
-              {account.connected && account.collections.length === 0 && (
-                <p className="mt-2 text-xs text-ink-dim">No {spec.noun}s found in this account.</p>
-              )}
-              {account.collections.length > 0 && (
-                <div className="mt-2 flex flex-col gap-1.5">
-                  {account.collections.map((c) => (
-                    <div
-                      key={`${c.account}/${c.collection}`}
-                      className="flex items-center justify-between gap-3"
-                    >
-                      <span className="min-w-0 flex-1 truncate text-sm text-ink">{c.title}</span>
-                      <div className="flex items-center gap-3">
-                        {c.enabled && c.writable && (
-                          <button
-                            className={cn("text-xs", c.active ? "text-accent" : "text-ink-faint")}
-                            aria-pressed={c.active ?? false}
-                            disabled={save.isPending}
-                            onClick={() => setActive(c.active ? null : c)}
-                          >
-                            {c.active ? activeWord : `set ${activeWord}`}
-                          </button>
-                        )}
-                        <Switch
-                          checked={c.enabled ?? false}
-                          onChange={(on) => toggleEnabled(c, on)}
-                          disabled={save.isPending}
-                          label={`Toggle ${c.title}`}
-                        />
-                      </div>
-                    </div>
-                  ))}
+                    Use again
+                  </button>
                 </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm text-ink">{account.label}</span>
+                    {account.connected ? (
+                      <Badge tone="ok">connected</Badge>
+                    ) : (
+                      <Button
+                        busy={connect.isPending}
+                        onClick={() => connect.mutate(account.provider)}
+                      >
+                        Connect
+                      </Button>
+                    )}
+                  </div>
+                  {account.connected && account.collections.length === 0 && (
+                    <p className="mt-2 text-xs text-ink-dim">
+                      No {spec.noun}s found in this account.
+                    </p>
+                  )}
+                  {account.collections.length > 0 && (
+                    <div className="mt-2 flex flex-col gap-1.5">
+                      {account.collections.map((c) => (
+                        <div
+                          key={`${c.account}/${c.collection}`}
+                          className="flex items-center justify-between gap-3"
+                        >
+                          <span className="min-w-0 flex-1 truncate text-sm text-ink">{c.title}</span>
+                          <div className="flex items-center gap-3">
+                            {c.enabled && c.writable && (
+                              <button
+                                className={cn("text-xs", c.active ? "text-accent" : "text-ink-faint")}
+                                aria-pressed={c.active ?? false}
+                                disabled={save.isPending}
+                                onClick={() => setActive(c.active ? null : c)}
+                              >
+                                {c.active ? activeWord : `set ${activeWord}`}
+                              </button>
+                            )}
+                            <Switch
+                              checked={c.enabled ?? false}
+                              onChange={(on) => toggleEnabled(c, on)}
+                              disabled={save.isPending}
+                              label={`Toggle ${c.title}`}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {/* The whole point of #764: going provider-free is one action here, not one
+                      untick per collection followed by guesswork about whether it worked. */}
+                  {accountInUse(account) && (
+                    <button
+                      className="mt-2.5 text-xs text-ink-faint hover:text-ink disabled:opacity-50"
+                      disabled={save.isPending}
+                      onClick={() => stopUsing(account)}
+                    >
+                      Stop using {account.label} in this module
+                    </button>
+                  )}
+                </>
               )}
             </div>
-          ))}
+            );
+          })}
           <p className="text-xs text-ink-faint">
             {activeCol
               ? `New items are created in “${activeCol.title}”.`
-              : `Nothing active — the built-in local default is used.`}
+              : nothingEnabled
+                ? `Not using any connected account — this module reads and writes its built-in local ${spec.noun}s.`
+                : `Nothing active — the built-in local default is used.`}
           </p>
         </div>
       )}

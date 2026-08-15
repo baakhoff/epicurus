@@ -37,6 +37,7 @@ from epicurus_mail.provider import (
     MailCursor,
     MailLabel,
     MailMessage,
+    MailNotConnected,
     MailProvider,
     MailThreadSummary,
     ThreadChanges,
@@ -736,3 +737,22 @@ async def test_a_failed_assembly_is_not_cached_as_no_categories() -> None:
 
     assert await mailbox.categories("INBOX") == []
     assert [t.id for t in await mailbox.categories("INBOX")] == ["primary"]
+
+
+async def test_reconcile_without_a_connection_reraises_without_emitting_sync_failed() -> None:
+    """No account connected is an absence, not a sync failure (#764).
+
+    ``mail.sync_failed`` drives alerts and automations. Firing it every time a *deliberately*
+    disconnected deployment is asked to reconcile would report breakage for a state the
+    operator chose — so this one provider error re-raises untouched, with nothing on the bus.
+    """
+    provider = _provider(threads=[_summary("t1", sort_ts=100)])
+    bus = _RecordingBus()
+    mailbox = await _mailbox_with_bus(provider, bus)
+    await mailbox.landing("INBOX")
+    provider.changed_threads_since = AsyncMock(side_effect=MailNotConnected("not connected"))
+
+    with pytest.raises(MailNotConnected):
+        await mailbox.reconcile("INBOX")
+
+    assert bus.envelopes_of_type("mail.sync_failed") == []

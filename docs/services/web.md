@@ -450,6 +450,19 @@ remount, #428). Page data is fetched through the core proxy
 (`GET /platform/v1/modules/{name}/pages/{id}`, which forwards query params such as a
 calendar's `start`/`end` window) — **no module markup, JS, or CSS ever runs in the shell**.
 
+**A module with nothing to show is not a module that failed (#764).** `mailbox` is the case
+that forces the distinction: mail has no local provider (ADR-0032), so with Google
+disconnected it has *nothing* — but plain navigation to Mail must not look broken. The module
+answers a valid, empty list carrying `disconnected: true`, and `MailboxView` renders it as an
+honest empty state — **"Google is not connected"**, the two ways out in prose (connect it in
+Settings, or disable the module), and a button to each — while hiding the folder rail, the
+search box, and Compose, all of which need a mailbox to mean anything. This is deliberately
+*not* the `listQuery.isError` branch beside it (which surfaces a relayed Gmail scope /
+rate-limit hint), and deliberately not the generic "This folder is empty" (which reads as
+"you have no mail"). The flag defaults to `false`, so a connected mailbox — and any payload
+predating it — renders exactly as before. The pattern generalizes: a provider-only archetype
+page should name the absence *in its data* rather than raise, and let the shell say it.
+
 **Caching posture: no cold-mount flash on a view/filter switch (#712).** Every one of these
 archetypes' list-shaped queries — mailbox's folder/search/page list, the browser's
 directory/search listing, the editor's file tree and open document, calendar's date-range
@@ -596,6 +609,56 @@ save (so the timeline only ever grows). The shell reads history from the proxied
 `…/doc/versions` / `…/doc/version` endpoints; restore is client-side (it re-saves a past
 version's content), so there is no restore endpoint. History doubles as the general recovery
 path if a save ever overwrites content you meant to keep — the previous entry still has it.
+
+### Connected accounts & per-module provider removal (ADR-0030, ADR-0122)
+
+Two switches, at two scopes, both rendered generically by this shell — no module ships UI and
+no provider dropdown exists anywhere (ADR-0030: `local` is never an account and never a
+selectable choice).
+
+**Per module** — the collections panel on a module's card (`ModuleCollections`,
+`src/screens/ModulesScreen.tsx`). Data comes from the core's merged account view
+(`GET …/modules/{name}/collections`, the module's own `/accounts` folded together with the
+stored selection); every write is the same `PUT` of one `CollectionPrefs` (`{enabled, active}`).
+On top of the per-collection toggles and the active switcher, each connected account with an
+enabled collection offers **"Stop using {label} in this module"** (#764): one write that drops
+every one of that account's refs, clearing `active` to `null` — the built-in local default —
+only when the active belonged to *that* account, so a second provider's write target is never
+collateral. The panel then states the outcome (*"Not using any connected account — this module
+reads and writes its built-in local …"*), and the account block **collapses to one quiet row**:
+
+> {label} — not used · **Use again**
+
+Three properties worth knowing when touching this:
+
+- **The collapse is derived, never stored.** "Not used" *is* "none of this account's
+  collections are enabled" — there is nowhere else it could live, since `CollectionPrefs` holds
+  only `{enabled, active}`, and deriving it means the row can never disagree with the toggles it
+  replaces. It is safe as a default rendering because connecting an account seeds every
+  collection enabled (the core's `autoconnect_collections`, #209), so a connected account with
+  nothing ticked is always the result of a deliberate act. A connected account with *no*
+  collections keeps its ordinary block — there is nothing to stop using.
+- **Use again re-seeds; it does not replay history.** It enables all of the account's
+  collections and, if nothing else is active, makes the first writable one the write target —
+  precisely what a fresh connect does. Restoring a hand-picked subset would need hidden session
+  state that silently stops working after a reload: two behaviours behind one button. One rule
+  instead, and the toggles show exactly what is on, so re-narrowing is one tick.
+- **Tokens are untouched.** This is prefs only, per module — every other module keeps working,
+  nothing at the provider changes, and one click undoes it.
+
+**Globally** — Settings → Connected accounts → **Disconnect** (`OAuthProviderRow`). The core
+deletes the tokens and strips the provider from every module's stored selection (#209), so the
+web's caches describing *what the modules can see* are all wrong the moment it returns — and
+several are deliberately long-lived (the calendar's account view holds Google calendar names
+and colours for five minutes; the mailbox list for thirty seconds). Left alone they keep
+painting a connected account on whichever page the operator opens next. The mutation therefore
+invalidates the module-facing keys by prefix — `["modules"]`, `["module-collections"]`,
+`["module-status"]`, `["module-page"]` — alongside its own `["oauth-status", provider]`, which
+is what makes a disconnect look like one everywhere, immediately, with no error toast on plain
+navigation. **Any new long-lived module-facing query key must be added to that list.**
+
+The operator-facing walkthrough is
+[Running without Google](../user/running-without-google.md).
 
 ### Right panel / split-screen (ADR-0018)
 

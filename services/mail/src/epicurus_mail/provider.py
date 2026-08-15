@@ -10,7 +10,33 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
+import httpx
 from pydantic import BaseModel, Field
+
+
+class MailNotConnected(httpx.HTTPError):
+    """No mail account is connected for this tenant (#764).
+
+    Mail is provider-only — unlike calendar and tasks there is no local store to fall back
+    to (ADR-0032: scopes and collections are independent, so mail declares no collections
+    and cannot degrade to a local provider). "Nobody has connected Google" is therefore a
+    normal, expected state of a deployed mail module, **not** a failure: it is what a fresh
+    self-host looks like, and what a Settings → Disconnect leaves behind. Every surface owes
+    it an honest answer instead of a provider traceback — the tools return a reconnect hint,
+    the page returns an empty state, and the operator is told the two ways out (connect
+    Google, or disable the module).
+
+    Raised at the one place the absence is observable: the provider's token fetch
+    (:meth:`~epicurus_mail.gmail.GmailProvider._get_token`), where the core answers 404/400
+    for a provider it holds no tokens for. Distinguishing it *there* — rather than reading a
+    bare 404 off some later Gmail call — is what keeps "Google is not connected" from being
+    confused with Gmail's own "that message does not exist".
+
+    Subclasses ``httpx.HTTPError`` so the existing provider-error guards (``is_available``,
+    the cache's reconcile/categories paths) keep treating it as the transport failure it
+    structurally is; the surfaces that want the honest wording catch it explicitly, ahead of
+    ``httpx.HTTPStatusError``.
+    """
 
 
 class MailAttachment(BaseModel):

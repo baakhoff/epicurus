@@ -578,8 +578,9 @@ chosen view **persists per page** (`board-view:<module>/<page>` in localStorage,
 pattern) and the URL's `?view=` is kept in sync on switch — an explicit `?view=` deep-link
 wins over the stored choice, junk clamps to the board, and a board with no `view` control
 ignores the param entirely. `BoardView` is keyed per `(module, pageId)` in
-`ModulePageScreen`, so two board pages from one module (tasks' board + Can, #766) never
-leak control state onto each other.
+`ModulePageScreen`, so two board pages from one module never leak control state onto each
+other (the case that motivated it — tasks' board + Can, #766 — was folded back into a
+single page by #820).
 
 The `editor` archetype (knowledge, notes) opens a document **rendered and editable** — its
 markdown shows immediately as a **WYSIWYG** surface you type into directly (Milkdown's Crepe —

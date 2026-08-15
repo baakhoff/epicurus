@@ -82,6 +82,88 @@ images to GHCR.
   #633, so the module builds content parts over the existing `PlatformClient.chat` and the wire
   contract is unchanged. `websearch` 0.2.2→0.3.0 (MINOR), `core-app` 0.112.0→0.113.0 (MINOR).
 
+- **Going Google-free is now a first-class path, per module and platform-wide** (#764) — the
+  operator's instinct was that it wasn't possible at all, and the shell had been quietly proving
+  them right. Everything needed already existed: the ADR-0030 collections panel could untick a
+  Google list, and Settings could disconnect the account outright. But "stop using Google in
+  tasks" was N individual unticks, after which the Google block kept its full visual weight and
+  nothing anywhere said the module was now local-only — configuration archaeology dressed as a
+  setting. The panel now offers **"Stop using Google in this module"**: one write against the
+  existing prefs API that disables every one of that account's collections, clears the write
+  target back to the built-in local default (and only when the active collection belonged to
+  that account — a second provider's target is never collateral), and collapses the block to a
+  single quiet row, *"Google — not used · Use again"*. Tokens are untouched, so it is per module
+  by construction: every other module keeps working, nothing at Google changes, and one click
+  undoes it. Two deliberate decisions, recorded as ADR-0122. The collapsed state is **derived,
+  never stored** — "not used" *is* "none of this account's collections are enabled", the only
+  place it could live given `CollectionPrefs` holds `{enabled, active}` and nothing else, so it
+  can never disagree with the toggles it replaces (safe as a default because connecting an
+  account seeds every collection enabled, #209, making a connected account with nothing ticked
+  always a deliberate act). And **"Use again" re-seeds rather than replays**: it enables all of
+  the account's collections and makes the first writable one active — exactly what a fresh
+  connect does — because restoring a hand-picked subset would need hidden session state that
+  silently stops working after a reload, i.e. two behaviours behind one button; the toggles show
+  what is on, so re-narrowing is one tick.
+
+  The other half was the global disconnect, which worked but didn't *look* like it had.
+  Disconnecting deletes the tokens and strips the provider from every module's stored selection
+  (#209), yet the web kept several deliberately long-lived caches describing what modules can
+  see — the calendar's account view holds Google calendar names and colours for five minutes,
+  the mailbox its thread list for thirty — so the next page the operator opened still painted a
+  connected account. The disconnect mutation now invalidates the module-facing keys by prefix
+  alongside its own status. And mail, the one module with **no local provider** (ADR-0032: no
+  collections, no fallback mailbox), had no story at all for the disconnected state: the page
+  relayed a raw `httpx.HTTPStatusError` under a scope hint that didn't apply, and the tools
+  re-raised it at the agent. The token seam now distinguishes the case —
+  `GmailProvider._get_token` maps the core's documented 404/400 to `MailNotConnected`, translated
+  *there* precisely so it can never be confused with Gmail's own "no such message" 404 — and
+  every surface answers honestly: each MCP tool returns one model-actionable sentence naming both
+  ways out (connect it in Settings, or disable the module) instead of raising, `mail_send`
+  refuses to compose a draft that could never be delivered, the page returns a valid empty list
+  carrying `disconnected` that the shell renders as an honest empty state with a tap to each
+  exit, a leftover message chip answers 503 rather than a 404 claiming the message was deleted,
+  and `mail.sync_failed` is no longer emitted — an absence the operator chose is not a failure to
+  alert on. The local cache is kept but not served, so a reconnect restores the mailbox with no
+  resync and no restart. Not in scope, and deliberately so: local-first replacements for the
+  Google-backed capabilities themselves (no local mailbox, no richer local calendar) — going
+  Google-free means keeping the local half, not re-implementing the other one. New operator note,
+  `docs/user/running-without-google.md`. `web` 0.135.0→0.136.0 (MINOR), `mail` 0.18.1→0.19.0
+  (MINOR).
+
+- **Folded the Can into the Tasks page as a Show → Backlog option, instead of a second nav
+  entry** (#820) — the Can's own **partition** (#766, the board shows only dated tasks, the
+  backlog holds the rest) was right; its **placement** wasn't. A second left-nav page gave
+  the backlog the visual weight of its own module and split one workflow — triage the
+  backlog, schedule things onto the board — across two pages. The *Show* control (already
+  shared by the board and the Can, open/completed/all) gains a fourth value, **`backlog`**:
+  a page-level dated-ness partition, deliberately **not** a widened `TaskScope` — the app
+  branches on it before the provider fetch rather than teaching the providers a fourth read
+  scope. The Can's own `PageSpec` and its `GET /pages/can` route are gone (`can` now 404s
+  like any other unknown page id); its data now comes back from
+  `GET /pages/board?show=backlog`, rendered by a new `build_tasks_backlog` that keeps the
+  Can's exact shape — a flat column, an Add with no due/repeat field, and each card's
+  leading Schedule action. *Group by* is omitted whenever Show is Backlog (a flat backlog
+  has nothing to group, the same dead-knob rule #767 already gives List/Calendar), and the
+  **Calendar** view drops `backlog` from Show's own options entirely — a backlog has no due
+  dates to place on a grid — correcting a stale or explicit `show=backlog` back to Open
+  whenever `view=calendar`, so the control's echoed value is always inside its own offered
+  options. One axis nuance needed a decision: Show used to mean *status scope* on the board
+  and, independently, the Can page's *own* Show filter over the backlog; folded onto a
+  single control, only one Show value can be active at a time, so the backlog can no longer
+  carry that second, independent filter. The chosen rule fetches every status for the
+  backlog regardless and splits internally — open and in-progress tasks lead in a flat
+  **Backlog** column, any completed undated task follows in its own muted **Completed**
+  column (an ordinary struck-through card) — rather than making completed/all leak undated
+  items onto the dated board, which would have broken its "dated tasks only, no 'No date'
+  bucket" invariant. Either column is dropped when empty, neither is ever omitted, which is
+  what keeps the acceptance bar: no undated task, open or completed, becomes unreachable.
+  Agent- and web-form-facing copy was swept from "the Can" to "the backlog" / "Show →
+  Backlog" throughout — `tasks_add`'s tool description, both `due` parameter descriptions,
+  and a task's hover-card `href` (now a `?show=backlog` deep link on the one Tasks route
+  rather than a separate page's URL) — so the words the agent uses match what the operator
+  sees.
+  `tasks` 0.22.1→0.23.0 (MINOR).
+
 - **Disabling a connected calendar account silently emptied the Calendar page** (#814) —
   `CollectionRouter` resolved a *missing provider* in exactly opposite ways on the write and
   read paths. The trigger is a stale `enabled`/`active` collection reference: nothing prunes

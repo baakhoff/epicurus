@@ -50,7 +50,13 @@ from pydantic import BaseModel, Field
 
 from epicurus_core import EntityRef, EventBus, emit_event, get_logger
 from epicurus_mail.db import MailCache
-from epicurus_mail.provider import MailCategory, MailLabel, MailProvider, MailThreadSummary
+from epicurus_mail.provider import (
+    MailCategory,
+    MailLabel,
+    MailNotConnected,
+    MailProvider,
+    MailThreadSummary,
+)
 
 log = get_logger("epicurus_mail.cache")
 
@@ -170,7 +176,9 @@ class CachedMailbox:
 
         A provider failure (``httpx.HTTPError`` — an auth failure surfaces this way, via
         ``PlatformClient.get_oauth_token``) emits ``mail.sync_failed`` and re-raises, so the
-        existing HTTP-level error mapping (403 scope hints, 429 throttling) is unchanged.
+        existing HTTP-level error mapping (403 scope hints, 429 throttling) is unchanged. The
+        one exception is :class:`~epicurus_mail.provider.MailNotConnected` (#764): no account
+        connected is an absence, not a failure, so it re-raises **without** the event.
         """
         async with self._sync_lock:
             return await self._reconcile_locked(label)
@@ -194,6 +202,13 @@ class CachedMailbox:
                 await self._emit_received(label, changes.new_message_ids)
             await self._cache.set_cursor(tenant_id=self._tenant, cursor=changes.next_cursor)
             return await self._bundle_from_cache(label)
+        except MailNotConnected:
+            # Not a sync failure — there is simply no account to sync (#764). Emitting
+            # `mail.sync_failed` here would fire an alert (and any automation bound to it)
+            # every time a disconnected deployment is asked to reconcile, reporting breakage
+            # for a state the operator deliberately chose. Re-raised untouched for the caller
+            # to turn into the honest empty state.
+            raise
         except httpx.HTTPError as exc:
             log.warning("mail reconcile failed", tenant=self._tenant, error=str(exc))
             await self._emit_sync_failed(reason="provider_error")

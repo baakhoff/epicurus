@@ -129,10 +129,27 @@ export function OAuthProviderRow({ providerId }: { providerId: string }) {
     },
   });
 
+  // Disconnecting reaches much further than this row (#764). The core deletes the tokens and
+  // strips the provider from every module's stored collection selection (#209), so the caches
+  // that describe *what the modules can see* are all wrong the moment it returns — and several
+  // of them are deliberately long-lived (the calendar's account view holds its Google calendar
+  // names and colours for five minutes, the mailbox its thread list for thirty seconds). Left
+  // alone they keep painting a connected account on pages the operator visits next: stale
+  // Google chips, folders that no longer resolve. Invalidating the module-facing keys here is
+  // what makes "disconnect" look like a disconnect everywhere, immediately.
   const disconnect = useMutation({
     mutationFn: () => api.oauthDisconnect(providerId),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["oauth-status", providerId] }),
+    onSuccess: () => {
+      for (const key of [
+        ["oauth-status", providerId],
+        ["modules"], // manifests + health, and the per-module status panels below
+        ["module-collections"], // ADR-0030 account views: the Modules panel + calendar chips
+        ["module-status"],
+        ["module-page"], // every archetype page's data — mailbox, board, calendar
+      ]) {
+        void queryClient.invalidateQueries({ queryKey: key });
+      }
+    },
   });
 
   if (status.isLoading || clientStatus.isLoading) return <Spinner />;

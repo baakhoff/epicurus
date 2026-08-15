@@ -17,6 +17,8 @@ expose your own server).
   up.
 - **[Configuration](configuration.md)** — environment configuration and where
   secrets live.
+- **[Running without Google](running-without-google.md)** — the two switches (per
+  module, and platform-wide), what stops working, and what carries on.
 
 ## How it's meant to run
 

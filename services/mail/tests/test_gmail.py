@@ -22,7 +22,7 @@ from epicurus_mail.gmail import (
     _reply_subject,
     _thread_summary,
 )
-from epicurus_mail.provider import ComposedMessage
+from epicurus_mail.provider import ComposedMessage, MailNotConnected
 
 
 def _b64(text: str) -> str:
@@ -885,3 +885,47 @@ async def test_get_attachment_unknown_id_raises_404() -> None:
     with pytest.raises(httpx.HTTPStatusError) as exc:
         await provider.get_attachment("m1", "missing")
     assert exc.value.response.status_code == 404
+
+
+# ── the not-connected seam (#764) ────────────────────────────────────────────
+# `PlatformClient.get_oauth_token` documents a 404/400 as "the provider is not connected for
+# this tenant". Translating exactly those two here — and nothing else — is what lets every
+# caller tell "no Google account" apart from Gmail's own errors.
+
+
+def _platform_raising(status: int) -> PlatformClient:
+    platform = MagicMock(spec=PlatformClient)
+    request = httpx.Request("GET", "http://core/platform/v1/oauth/google/token")
+    platform.get_oauth_token = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            str(status), request=request, response=httpx.Response(status, request=request)
+        )
+    )
+    return platform  # type: ignore[return-value]
+
+
+@pytest.mark.parametrize("status", [404, 400])
+async def test_get_token_maps_the_core_not_connected_statuses(status: int) -> None:
+    provider = GmailProvider(platform=_platform_raising(status), tenant_id="local")
+    with pytest.raises(MailNotConnected):
+        await provider._get_token()
+
+
+@pytest.mark.parametrize("status", [401, 403, 500, 502])
+async def test_get_token_leaves_every_other_status_raw(status: int) -> None:
+    """A 401/403/500 out of the core is a real failure, not an absent connection — the
+    existing scope/rate-limit mapping reads the raw ``HTTPStatusError`` and must still see it."""
+    provider = GmailProvider(platform=_platform_raising(status), tenant_id="local")
+    with pytest.raises(httpx.HTTPStatusError) as caught:
+        await provider._get_token()
+    assert not isinstance(caught.value, MailNotConnected)
+
+
+async def test_is_available_is_false_when_google_is_not_connected() -> None:
+    provider = GmailProvider(platform=_platform_raising(404), tenant_id="local")
+    assert await provider.is_available() is False
+
+
+async def test_is_available_is_true_with_a_token() -> None:
+    provider = GmailProvider(platform=_make_platform(), tenant_id="local")
+    assert await provider.is_available() is True

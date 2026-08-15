@@ -21,6 +21,9 @@ arguments.
 ``mail_search`` additionally takes a ``category`` (#765) — the same Primary / Promotions /
 Social / Updates / Forums buckets the mail page renders as tabs over the Inbox — so a chat
 turn can ask about one of them without knowing any provider query syntax.
+Mail is provider-only: with **no Google account connected** (#764) every tool answers with
+:data:`_NOT_CONNECTED_HINT` — one model-actionable sentence naming both ways out — instead of
+raising, and the page falls back to :func:`mailbox_disconnected`.
 """
 
 from __future__ import annotations
@@ -43,7 +46,13 @@ from epicurus_core import (
 )
 from epicurus_mail.cache import CachedMailbox
 from epicurus_mail.gmail import GMAIL_API_SCOPES
-from epicurus_mail.provider import ComposedMessage, MailCategory, MailMessage, MailProvider
+from epicurus_mail.provider import (
+    ComposedMessage,
+    MailCategory,
+    MailMessage,
+    MailNotConnected,
+    MailProvider,
+)
 
 MODULE_NAME = "mail"
 MAILBOX_PAGE_ID = "mailbox"
@@ -55,6 +64,19 @@ MESSAGE_KIND = "message"
 # page keeps one request from fanning out across an unbounded mailbox (#539); the shell pages
 # further with the returned cursor.
 MAILBOX_PAGE_SIZE = 25
+
+# Shown by every tool when no Google account is connected at all (#764) — the state a fresh
+# self-host starts in and the one a Settings → Disconnect leaves behind. Distinct from the
+# scope hints below, which all presuppose a *connected* account missing one permission:
+# telling an operator with no connection to "reconnect to grant a permission" sends them
+# looking for a setting that isn't there. Model-actionable in the same shape as those hints
+# — a plain sentence naming the cause and both ways out — so the agent can relay it verbatim
+# instead of surfacing a provider traceback. Mail is Gmail-only (ADR-0032: no collections, no
+# local provider), so "disable the module" is a legitimate second answer, not a dismissal.
+_NOT_CONNECTED_HINT = (
+    "Google is not connected, so there is no mailbox to read or send from. Connect it in"
+    " Settings → Connected accounts, or disable the mail module if you don't use Gmail."
+)
 
 # Shown when ``messages.modify`` is rejected for lack of scope — the operator connected
 # Google before mail required ``gmail.modify`` and must reconnect to grant it.
@@ -196,7 +218,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.17.0",
+        version="0.19.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -331,6 +353,8 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             query = f"{scoped} {query}".strip()
         try:
             messages = await provider.search(query, capped)
+        except MailNotConnected:
+            return _NOT_CONNECTED_HINT
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_READ)
             if hint is not None:
@@ -375,6 +399,8 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         """
         try:
             m = await provider.read(message_id)
+        except MailNotConnected:
+            return _NOT_CONNECTED_HINT
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_READ)
             if hint is not None:
@@ -409,6 +435,13 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         recipient = to.strip()
         if not recipient:
             return "error: a recipient (`to`) is required to compose a message."
+        # The only tool that reaches no provider at all — composing is pure local work, so
+        # without this it would happily hand back a draft that can never be delivered, and
+        # the operator would discover the missing connection at Confirm time (#764). Cheap
+        # credential probe (#209), not a live Gmail call; refusing here keeps the draft-first
+        # split-pane from ever opening on a message with nowhere to go.
+        if not await provider.is_available():
+            return _NOT_CONNECTED_HINT
         message = ComposedMessage(to=recipient, subject=subject, body=body)
         return draft_review(
             kind="mail",
@@ -438,6 +471,8 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         """
         try:
             message = await provider.compose_reply(message_id, body)
+        except MailNotConnected:
+            return _NOT_CONNECTED_HINT
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_REPLY_LOOKUP)
             if hint is not None:
@@ -463,6 +498,8 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         """
         try:
             await provider.set_unread(message_id, unread=False)
+        except MailNotConnected:
+            return _NOT_CONNECTED_HINT
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT)
             if hint is not None:
@@ -482,6 +519,8 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         """
         try:
             await provider.set_unread(message_id, unread=True)
+        except MailNotConnected:
+            return _NOT_CONNECTED_HINT
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT)
             if hint is not None:
@@ -502,6 +541,8 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         """
         try:
             await provider.archive(message_id)
+        except MailNotConnected:
+            return _NOT_CONNECTED_HINT
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_TRIAGE)
             if hint is not None:
@@ -522,6 +563,8 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         """
         try:
             await provider.trash(message_id)
+        except MailNotConnected:
+            return _NOT_CONNECTED_HINT
         except httpx.HTTPStatusError as exc:
             hint = _describe_gmail_error(exc, _SCOPE_HINT_TRIAGE)
             if hint is not None:
@@ -649,6 +692,34 @@ def _resolve_tab(
     return (requested, scoped) if scoped else ("", None)
 
 
+def mailbox_disconnected(label: str | None = None) -> dict[str, Any]:
+    """The `mailbox` list payload for "no Google account is connected" (#764).
+
+    Structurally a valid, *empty* list read — no rail, no tabs, no threads — plus the
+    ``disconnected`` flag the shell keys its honest empty state off. Deliberately **not** an
+    HTTP error: opening Mail on a self-host that has never connected Google is a normal
+    first-run state, and a page that errors on plain navigation tells the operator they broke
+    something rather than that there is a switch to flip. The flag is the whole contract; a
+    shell that ignores it renders the ordinary "this folder is empty" view, which is wrong but
+    not broken.
+
+    The local cache is intentionally *not* cleared and not served: the rows stay on disk, so a
+    reconnect restores the mailbox instantly (no resync, no restart), while a disconnected
+    module shows nothing it no longer has permission to show.
+    """
+    return {
+        "title": "Mail",
+        "labels": [],
+        "active_label": label or DEFAULT_LABEL,
+        "query": "",
+        "tabs": [],
+        "active_tab": "",
+        "threads": [],
+        "next_cursor": None,
+        "disconnected": True,
+    }
+
+
 async def build_mailbox_list(
     provider: MailProvider,
     *,
@@ -683,6 +754,11 @@ async def build_mailbox_list(
     the block entirely; so does a provider that doesn't classify mail — and a payload without
     ``tabs`` renders exactly the pre-tabs page.
 
+    **Disconnected (#764).** With no Google account connected this short-circuits to
+    :func:`mailbox_disconnected` — an empty list carrying ``disconnected: true`` — before
+    either read path runs, so the page states the honest reason instead of erroring or
+    serving cached rows the module can no longer refresh.
+
     Args:
         provider: The active mail backend.
         mailbox: The cache orchestrator for the landing fast path (``None`` → always live).
@@ -694,6 +770,14 @@ async def build_mailbox_list(
         limit: Requested page size, clamped to :data:`MAILBOX_PAGE_SIZE`.
     """
     active = label or DEFAULT_LABEL
+    # Reflect the *connection*, not the cache (#764). The cached landing path below never
+    # touches the provider, so without this gate a disconnected mailbox would keep serving
+    # the rows it synced while it was connected — the page would look fine and be a lie.
+    # One cheap credential probe (#209, the same call `/status` and the poller make), placed
+    # ahead of both paths so the live path gets the honest answer too rather than a raw 404
+    # from a token fetch mid-fan-out.
+    if not await provider.is_available():
+        return mailbox_disconnected(active)
     capped = max(1, min(limit, MAILBOX_PAGE_SIZE))
     q = (query or "").strip() or None
     # Tabs sit over the Inbox only, and never over a search (a search spans every folder, so

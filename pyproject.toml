@@ -29,7 +29,7 @@ dev = [
     # upward and the bump rides invisibly inside an unrelated PR's lockfile — a
     # green-local/red-CI split (#514: mypy 1.13 -> 2.1.0 flagged new no-any-return).
     # Bump these deliberately, in their own chore PR.
-    "ruff==0.16.1",
+    "ruff==0.16.3",
     "mypy==2.3.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=0.24",
@@ -38,7 +38,7 @@ dev = [
     "httpx>=0.27",
     "testcontainers[minio]>=4.15.0",
     "cookiecutter>=2.5",
-    "pre-commit>=4.6.1",
+    "pre-commit>=4.6.2",
     # tests/test_docker_proxy_allowlist.py (#726) parses `docker compose config` output —
     # already resolved transitively (uvicorn[standard]), made an explicit direct
     # dependency since the test takes a real, load-bearing dependency on it.

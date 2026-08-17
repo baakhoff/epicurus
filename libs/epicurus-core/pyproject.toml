@@ -5,7 +5,7 @@ description = "Shared contract and runtime for epicurus services."
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.9",
-    "pydantic-settings>=2.6",
+    "pydantic-settings>=2.15.0",
     "structlog>=24.4",
     "fastapi>=0.141.1",
     "prometheus-client>=0.21",

@@ -19,14 +19,32 @@ import httpx
 from dateutil.rrule import rrule, rrulestr
 
 from epicurus_calendar.models import Attendee, DateTimeRange, Event
-from epicurus_calendar.providers.base import CalendarProvider, EditScope
+from epicurus_calendar.providers.base import (
+    CalendarProvider,
+    EditScope,
+    EventChange,
+    EventSyncPage,
+)
 from epicurus_calendar.recurrence import continue_from, truncate_before
-from epicurus_core import Collection, PlatformClient
+from epicurus_core import Collection, PlatformClient, get_logger
+
+log = get_logger("epicurus_calendar.google")
 
 _CALENDAR_API = "https://www.googleapis.com/calendar/v3"
 
 # Google calendarList access roles that permit creating/editing events.
 _WRITABLE_ROLES = {"writer", "owner"}
+
+# How many events one sync page asks for — Google's documented maximum for events.list. A
+# smaller page would only mean more round trips for the same data.
+_SYNC_PAGE_SIZE = 250
+
+# How many pages one sync walk follows before giving up on minting a cursor (#831). A bound,
+# not a limit on correctness: exhausting it returns the changes gathered so far with **no**
+# ``next_cursor``, so the next pass full-syncs and diffs rather than losing anything. At 250
+# per page that is 10,000 events — far past any realistic delta, and the only thing standing
+# between a pathological ``nextPageToken`` and an unbounded tick.
+_MAX_SYNC_PAGES = 40
 
 
 class GoogleCalendarProvider(CalendarProvider):
@@ -40,6 +58,10 @@ class GoogleCalendarProvider(CalendarProvider):
     """
 
     name = "google"
+
+    # Google Calendar has a real incremental change feed (``events.list`` + ``syncToken``), so
+    # this backend is a reconcile target (#831). See :meth:`full_sync`/:meth:`changed_events_since`.
+    supports_sync = True
 
     def __init__(self, platform: PlatformClient, calendar_id: str = "primary") -> None:
         self._platform = platform
@@ -489,6 +511,99 @@ class GoogleCalendarProvider(CalendarProvider):
             min_duration=timedelta(minutes=duration_minutes),
         )
 
+    # ── incremental sync (#831) ─────────────────────────────────────────────
+
+    async def full_sync(
+        self, *, tenant_id: str, calendar_id: str | None = None, since: datetime
+    ) -> EventSyncPage:
+        """The calendar's state from *since* onward plus a fresh ``nextSyncToken`` (#831).
+
+        ``singleEvents=true`` expands recurring series into occurrences, matching what
+        :meth:`list_events` (and therefore the page, the tools and the lead-time scheduler)
+        already sees — the reconcile must classify the *same* things the rest of the module
+        talks about. ``showDeleted=true`` is required for a sync token to be issued at all,
+        and is what makes a later delta able to report a cancellation rather than a silent
+        disappearance.
+
+        Google binds these parameters to the token it mints, so *since* is the window every
+        subsequent incremental call inherits: it must be persisted alongside the cursor.
+        """
+        cal = calendar_id or self._calendar_id
+        return await self._sync_walk(
+            cal,
+            {
+                "singleEvents": "true",
+                "showDeleted": "true",
+                "timeMin": _to_rfc3339(since),
+                "maxResults": str(_SYNC_PAGE_SIZE),
+            },
+        )
+
+    async def changed_events_since(
+        self, *, tenant_id: str, calendar_id: str | None = None, cursor: str
+    ) -> EventSyncPage | None:
+        """Everything that changed since *cursor*; ``None`` when Google says ``410 GONE``.
+
+        A ``410`` means the token is older than Google's retention for that calendar's change
+        log — the direct analogue of Gmail's expired ``historyId`` (ADR-0096 §3). Returning
+        ``None`` rather than raising keeps "start over" an ordinary control-flow outcome; the
+        orchestrator answers it with :meth:`full_sync` and a diff.
+
+        Every other parameter is inherited from the token, so only paging arguments are sent
+        alongside it — Google rejects a request that tries to change the query mid-sync.
+        """
+        cal = calendar_id or self._calendar_id
+        try:
+            return await self._sync_walk(
+                cal, {"syncToken": cursor, "maxResults": str(_SYNC_PAGE_SIZE)}
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == httpx.codes.GONE:
+                return None
+            raise
+
+    async def _sync_walk(self, cal: str, params: dict[str, str]) -> EventSyncPage:
+        """Page through ``events.list`` until Google hands back a ``nextSyncToken``.
+
+        The token only appears on the **final** page, so a partial walk has no resumable
+        cursor — hence the page budget returning ``next_cursor=None`` instead of a token that
+        would skip whatever the unread pages held.
+        """
+        headers = await self._auth_headers()
+        changes: list[EventChange] = []
+        next_cursor: str | None = None
+        page_token: str | None = None
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            for _ in range(_MAX_SYNC_PAGES):
+                page_params = dict(params)
+                if page_token:
+                    page_params["pageToken"] = page_token
+                resp = await http.get(
+                    f"{_CALENDAR_API}/calendars/{cal}/events",
+                    headers=headers,
+                    params=page_params,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                for item in body.get("items", []):
+                    change = _google_item_to_change(item)
+                    if change is not None:
+                        changes.append(change)
+                token = body.get("nextSyncToken")
+                next_cursor = str(token) if token else next_cursor
+                raw_page = body.get("nextPageToken")
+                page_token = str(raw_page) if raw_page else None
+                if not page_token:
+                    break
+            else:
+                log.warning(
+                    "google calendar sync walk hit its page budget; no cursor minted (#831)",
+                    calendar_id=cal,
+                    pages=_MAX_SYNC_PAGES,
+                )
+                next_cursor = None
+        return EventSyncPage(changes=changes, next_cursor=next_cursor)
+
     async def is_available(self, *, tenant_id: str) -> bool:
         """True when a Google token is stored for this tenant.
 
@@ -616,6 +731,34 @@ def _google_attendees(item: dict[str, object]) -> list[Attendee]:
             )
         )
     return out
+
+
+def _google_item_to_change(item: dict[str, object]) -> EventChange | None:
+    """Map one sync-feed item to a neutral :class:`EventChange`, or ``None`` if unusable.
+
+    A ``status: "cancelled"`` item is a **tombstone**: Google strips it down to little more
+    than an id (no ``summary``, usually no ``start``/``end``), which is exactly why
+    :class:`EventChange` carries ``series_id`` itself and why the reconcile reads a
+    cancellation's title from its own cache. Anything else is a live event, parsed by the same
+    :func:`_google_item_to_event` every read path uses — so the change hash the reconcile
+    computes matches the one the write seam computed for the identical event.
+
+    An item with no id, or a live one missing its start/end, is dropped rather than crashing a
+    whole sync pass over one malformed row; the id-less case cannot even be cached.
+    """
+    event_id = str(item.get("id", ""))
+    if not event_id:
+        return None
+    raw_series = item.get("recurringEventId")
+    series_id = str(raw_series) if raw_series else None
+    if str(item.get("status") or "") == "cancelled":
+        return EventChange(event_id=event_id, cancelled=True, series_id=series_id)
+    try:
+        event = _google_item_to_event(item)
+    except Exception:  # one malformed row must not cost a whole sync pass
+        log.warning("skipping unparseable google calendar sync item (#831)", event_id=event_id)
+        return None
+    return EventChange(event_id=event_id, cancelled=False, event=event, series_id=series_id)
 
 
 def _google_item_to_event(item: dict[str, object]) -> Event:

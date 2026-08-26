@@ -12,6 +12,43 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Calendar now notices changes you didn't make here** (#831) — the three calendar change
+  events had exactly one emitter, the provider-write seam, which sees every write made *through*
+  this module and, structurally, nothing else: an event created, moved or deleted in Google
+  Calendar's own UI was never observed and never announced. Every downstream consumer — the
+  automations matcher, push alerts, the event feed — was correct and simply never heard about
+  half the changes to the operator's calendar. This adds the second emitter, on the shape mail's
+  reconcile proved (ADR-0096): a per-collection incremental sync over Google's `syncToken`, with
+  a tenant-scoped local cache of *what this module last observed* — which is what turns a
+  provider's flat "here is a changed event" into the three different things the spine wants to
+  hear. An id never seen is a creation; an id whose change hash moved is an edit, with
+  `time_changed` a real before/after comparison against the cached start/end rather than a
+  guess; an id that vanishes is a cancellation with a title still worth printing, since a
+  tombstone is little more than an id. An expired token (`410 GONE`) is reported through the
+  provider seam as `None` rather than an exception — a lapsed cursor is a recoverable state,
+  not a failure — and the loop answers it by full-syncing and **diffing against that cache**,
+  so the gap is reported exactly instead of replayed blindly or swallowed; a row that merely
+  fell out of the forward-moving window is pruned in silence, because the passage of time is
+  not an operator action. A first-ever sync stays silent (a calendar you already had is not
+  news), and the signal is the sync-state row's mere existence, so a *restart* resumes and
+  reports what changed during the outage rather than absorbing it into a silent prime. The hard
+  part is having two emitters without ever double-announcing one action: each write records a
+  short-lived durable marker keyed `"<event type>|<provider>:<id>"` — plus the series id when
+  the write was series-scoped — which the reconcile consumes (exact id) or peeks (series)
+  before emitting. That key deliberately omits the change hash the `dedup_key` carries, so
+  suppression survives the provider normalising content on the way back and survives the
+  series → occurrence identity shift; both sides now build payloads, dedup keys and suppression
+  keys from one module, because two copies of a dedup rule are one copy of a bug. Markers are
+  written only for external-provider writes, so a local-only deployment gains no churn at all —
+  and by the same one-rule degrade (#815) an unconfigured or disconnected provider resolves to
+  zero sync targets, so an idle tick makes no provider call and prints no log line. A recurring
+  series arrives as one change per occurrence, so a pass collapses them per
+  `(series, event type)` — one click in Google's UI is one event, not thirty — and the whole
+  pass is capped, mirroring mail's resume-backlog ceiling. `invitation_received` /
+  `attendee_responded` are deliberately still **not** declared: they are Google-only, and a
+  declared-but-never-published event would repeat the mistake mail's docs already record as a
+  lesson learned once. `calendar` 0.19.0→0.20.0 (MINOR).
+
 - **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
   `writes_document` call *lands*, by which point the model has already written the whole body;
   v2 shows it arriving. The blocker was never the pane: tool-call fragments were assembled

@@ -23,3 +23,26 @@ class CalendarSettings(CoreSettings):
     # keeps a 15-minute default lead accurate to within about a minute without hammering the
     # provider (Google Calendar) every few seconds.
     scheduler_poll_interval_s: float = 60.0
+
+    # How often the reconcile loop pulls each watched calendar's delta (#831) — the loop that
+    # makes event_created/event_updated/event_cancelled fire for a change made in Google
+    # Calendar's own UI. **On by default**: an event contract covering only changes made
+    # through this module is not a contract, and every downstream consumer (automations, push
+    # alerts) is already wired for it. A tick with nothing connected or enabled costs nothing —
+    # no target resolves, so no provider call is made. Matched to mail's poller rather than the
+    # lead-time scheduler's 60s: an external edit is not minute-critical. ``0`` disables it.
+    sync_poll_interval_s: float = 300.0
+    # Fraction of the interval each sleep is randomised by (±). Calendar runs two periodic
+    # loops in one process; a little jitter keeps them from settling into lockstep. 0 disables.
+    sync_poll_jitter_frac: float = 0.1
+    # How far back a first sync anchors its window. Google binds ``timeMin`` to the sync token
+    # it mints, so this is also the window every later incremental call inherits.
+    sync_window_days: int = 30
+    # How long a self-write marker stays valid — the window in which the reconcile still
+    # recognises a change this module made itself. Comfortably longer than the poll interval so
+    # a write is always covered by the tick that observes it, short enough that a lingering
+    # series marker cannot mask a genuinely external edit for long.
+    sync_self_write_ttl_s: float = 900.0
+    # Ceiling on how many events one collection's reconcile pass may announce. A bound on the
+    # notification burst, never on the sync itself: the cache is updated in full regardless.
+    sync_max_emissions_per_pass: int = 50

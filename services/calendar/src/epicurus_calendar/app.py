@@ -19,7 +19,8 @@ from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_calendar.providers.google import GoogleCalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
 from epicurus_calendar.providers.router import CollectionRouter
-from epicurus_calendar.scheduler import FiredMarkerStore, run_periodic
+from epicurus_calendar.scheduler import FiredMarkerStore
+from epicurus_calendar.scheduler import run_periodic as run_lead_time_scheduler
 from epicurus_calendar.service import (
     CALENDAR_PAGE_ID,
     EVENT_KIND,
@@ -36,6 +37,9 @@ from epicurus_calendar.service import (
     resolve_timezone,
 )
 from epicurus_calendar.settings import CalendarSettings
+from epicurus_calendar.sync import CalendarReconciler
+from epicurus_calendar.sync import run_periodic as run_reconcile
+from epicurus_calendar.sync_store import CalendarSyncStore, SelfWriteLedger
 from epicurus_core import (
     EventBus,
     PlatformClient,
@@ -71,6 +75,11 @@ def create_app() -> FastAPI:
     # separate tables (the module owns all three, no shared-DB coupling with another service).
     lead_prefs = LeadTimePrefsStore(engine)
     markers = FiredMarkerStore(engine)
+    # The reconcile layer's own tables (#831), same engine again: the per-collection sync
+    # cursor + observed-event cache, and the self-write ledger the router stamps so a change
+    # made *through* this module is never announced twice.
+    sync_store = CalendarSyncStore(engine)
+    ledger = SelfWriteLedger(engine, ttl_s=settings.sync_self_write_ttl_s)
 
     bus = EventBus.from_settings(settings)
     # Hold every backend at once and route per the operator's selection (ADR-0030): the
@@ -80,7 +89,21 @@ def create_app() -> FastAPI:
     # (#664) directly into the router, the one place every write already passes through.
     local_provider = LocalCalendarProvider(store=store)
     external: dict[str, CalendarProvider] = {"google": GoogleCalendarProvider(platform=platform)}
-    provider = CollectionRouter(local=local_provider, external=external, prefs=platform, bus=bus)
+    provider = CollectionRouter(
+        local=local_provider, external=external, prefs=platform, bus=bus, ledger=ledger
+    )
+    # The other emitter (#831): the same three events, observed from the provider side, for
+    # changes made outside epicurus. It reads the router's `sync_targets` so both emitters
+    # agree on which collections are in play.
+    reconciler = CalendarReconciler(
+        targets=provider,
+        store=sync_store,
+        ledger=ledger,
+        bus=bus,
+        tenant_id=settings.default_tenant_id,
+        window_days=settings.sync_window_days,
+        max_emissions_per_pass=settings.sync_max_emissions_per_pass,
+    )
 
     # Naive (offset-less) start/end inputs are read in the operator's configured
     # timezone (ADR-0039) rather than UTC, so "3 PM" is the operator's 3 PM (#433).
@@ -97,11 +120,13 @@ def create_app() -> FastAPI:
             await store.init()
             await lead_prefs.init()
             await markers.init()
+            await sync_store.init()
+            await ledger.init()
             await bus.connect()
             # The lead-time scheduler (#664) — calendar's first periodic background job.
             # Started/cancelled around the app lifetime like knowledge's vault watcher.
             scheduler_task = asyncio.create_task(
-                run_periodic(
+                run_lead_time_scheduler(
                     tenant=settings.default_tenant_id,
                     provider=provider,
                     lead_prefs=lead_prefs,
@@ -110,13 +135,24 @@ def create_app() -> FastAPI:
                     poll_interval_s=settings.scheduler_poll_interval_s,
                 )
             )
+            # The reconcile loop (#831) — calendar's second, and the only thing that sees a
+            # change made outside epicurus. Same start/cancel discipline as the scheduler.
+            reconcile_task = asyncio.create_task(
+                run_reconcile(
+                    reconciler=reconciler,
+                    tenant=settings.default_tenant_id,
+                    poll_interval_s=settings.sync_poll_interval_s,
+                    jitter_frac=settings.sync_poll_jitter_frac,
+                )
+            )
             log.info("calendar service ready", tenant=settings.default_tenant_id)
             try:
                 yield
             finally:
-                scheduler_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await scheduler_task
+                for task in (scheduler_task, reconcile_task):
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
                 await bus.close()
                 await engine.dispose()
 

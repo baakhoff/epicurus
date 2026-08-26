@@ -17,6 +17,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Literal
 
+from pydantic import BaseModel, Field
+
 from epicurus_calendar.models import Attendee, DateTimeRange, Event
 from epicurus_core import Collection
 
@@ -28,10 +30,77 @@ from epicurus_core import Collection
 EditScope = Literal["this", "following", "all"]
 
 
+class EventChange(BaseModel):
+    """One change reported by a backend's incremental-sync feed (#831).
+
+    Provider-neutral by construction: a backend translates its own change feed into these, and
+    the reconcile orchestrator (:mod:`epicurus_calendar.sync`) never learns which dialect
+    produced them — the seam discipline ADR-0016/ADR-0096 hold for mail's change cursor.
+
+    A **tombstone** (``cancelled=True``) carries no :attr:`event`: the thing it describes no
+    longer exists, and a feed generally reports it as a bare id. The reconcile therefore takes
+    a cancellation's title from its own cache, not from the change.
+    """
+
+    event_id: str
+    cancelled: bool = False
+    #: The event's current state; ``None`` on a tombstone.
+    event: Event | None = None
+    #: The series this event is an occurrence of, if any — present even on a tombstone, which
+    #: is why it is a field here rather than something read off :attr:`event`.
+    series_id: str | None = None
+
+
+class EventSyncPage(BaseModel):
+    """A backend's answer to "what changed?" — the changes plus the cursor to resume from.
+
+    ``next_cursor`` is opaque: the store persists it and hands it straight back, never parsing
+    it. ``None`` means the backend could not mint one for this run (e.g. a pagination walk that
+    hit its page budget), which the orchestrator treats as "no resumable cursor" — the next
+    pass does a full sync and diffs, rather than silently skipping.
+    """
+
+    changes: list[EventChange] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
 class CalendarProvider(ABC):
     """Contract every calendar backend must satisfy."""
 
     name: str
+
+    #: Whether this backend can report changes made **outside** epicurus (#831). Default
+    #: ``False``: the local store has no "outside" (every write to it already passes through
+    #: the router's emission seam), and a backend with no change feed must be *skipped* by the
+    #: reconcile loop rather than forced into a full poll it cannot do incrementally.
+    supports_sync: bool = False
+
+    async def full_sync(
+        self, *, tenant_id: str, calendar_id: str | None = None, since: datetime
+    ) -> EventSyncPage:
+        """The collection's current state from *since* onward, plus a fresh cursor (#831).
+
+        Called to prime a never-synced collection, and to recover when a stored cursor can no
+        longer be replayed. *since* anchors the window the resulting cursor inherits, so it is
+        also the boundary a later resync prunes aged-out cache rows against.
+
+        Only meaningful when :attr:`supports_sync` is true; the default raises.
+        """
+        raise NotImplementedError(f"{self.name} has no incremental sync feed")
+
+    async def changed_events_since(
+        self, *, tenant_id: str, calendar_id: str | None = None, cursor: str
+    ) -> EventSyncPage | None:
+        """Changes since *cursor*, or ``None`` when *cursor* can no longer be replayed (#831).
+
+        ``None`` is the "start over" signal — Google answers an expired sync token with
+        ``410 GONE`` — and the caller responds with :meth:`full_sync`, exactly as mail's cache
+        does for an expired Gmail ``historyId`` (ADR-0096 §3). Deliberately not an exception: a
+        lapsed cursor is an expected, recoverable state, not a failure.
+
+        Only meaningful when :attr:`supports_sync` is true; the default raises.
+        """
+        raise NotImplementedError(f"{self.name} has no incremental sync feed")
 
     @abstractmethod
     async def list_events(

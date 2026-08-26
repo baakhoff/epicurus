@@ -6,6 +6,7 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -295,7 +296,7 @@ class TestSend:
         assert resp.status_code == 200
         assert resp.json() == {"id": "sent-123"}
         # Transmitted byte-identical to what was reviewed (ADR-0085).
-        sent = provider.transmit.call_args.args[0]  # type: ignore[attr-defined]
+        sent = provider.transmit.call_args.args[0]
         assert (sent.to, sent.subject, sent.body) == ("bob@x.com", "Hi", "Hello")
 
     def test_publishes_mail_sent(self) -> None:
@@ -678,9 +679,9 @@ class TestGoogleNotConnected:
             setattr(provider, method, AsyncMock(side_effect=MailNotConnected("not connected")))
         provider.compose_reply = AsyncMock(side_effect=MailNotConnected("not connected"))
         provider.is_available = AsyncMock(return_value=False)
-        return provider  # type: ignore[return-value]
+        return provider
 
-    def _assert_reconnect_hint(self, resp: httpx.Response) -> None:
+    def _assert_reconnect_hint(self, resp: httpx2.Response) -> None:
         assert resp.status_code == self.NOT_CONNECTED
         detail = resp.json()["detail"]
         assert "not connected" in detail and "Settings" in detail

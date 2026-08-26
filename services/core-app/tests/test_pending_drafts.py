@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -21,7 +23,7 @@ async def store() -> PendingDraftStore:
 
 
 async def _save(store: PendingDraftStore, *, tenant: str = TENANT) -> str:
-    convo = [
+    convo: list[dict[str, Any]] = [
         {"role": "user", "content": "email bob"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
     ]

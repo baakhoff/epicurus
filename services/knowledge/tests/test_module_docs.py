@@ -249,7 +249,9 @@ async def test_indexer_purges_removed_doc(ledger: ModuleDocLedger) -> None:
 
 async def test_indexer_recovers_when_list_modules_fails(ledger: ModuleDocLedger) -> None:
     indexer = _make_indexer(ledger, snapshots=[], module_docs={})
-    indexer._platform.list_modules = AsyncMock(side_effect=RuntimeError("unreachable"))
+    indexer._platform.list_modules = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("unreachable")
+    )
     result = await indexer.run()
     # Should return zeros, not raise.
     assert result == {"indexed": 0, "deleted": 0, "unchanged": 0}
@@ -268,7 +270,7 @@ async def test_indexer_skips_module_when_fetch_fails(ledger: ModuleDocLedger) ->
             raise RuntimeError("connection refused")
         return [{"path": "usage.md", "content": "# Usage"}]
 
-    indexer._platform.get_module_docs = _get_docs
+    indexer._platform.get_module_docs = _get_docs  # type: ignore[method-assign]
     result = await indexer.run()
     assert result["indexed"] == 1
     assert await ledger.count(tenant=TENANT) == 1
@@ -302,7 +304,9 @@ async def test_ledger_clear(ledger: ModuleDocLedger) -> None:
 
 async def test_reconcile_clears_when_docs_collection_missing(ledger: ModuleDocLedger) -> None:
     indexer = _make_indexer(ledger, snapshots=[], module_docs={})
-    indexer._qdrant.collection_exists = AsyncMock(return_value=False)  # __docs wiped
+    indexer._qdrant.collection_exists = AsyncMock(  # type: ignore[method-assign]
+        return_value=False
+    )  # __docs wiped
     await ledger.upsert(
         tenant=TENANT, module_name="echo", doc_path="a.md", content_hash="h1", chunk_count=1
     )
@@ -312,7 +316,7 @@ async def test_reconcile_clears_when_docs_collection_missing(ledger: ModuleDocLe
 
 async def test_reconcile_noop_when_collection_exists(ledger: ModuleDocLedger) -> None:
     indexer = _make_indexer(ledger, snapshots=[], module_docs={})
-    indexer._qdrant.collection_exists = AsyncMock(return_value=True)
+    indexer._qdrant.collection_exists = AsyncMock(return_value=True)  # type: ignore[method-assign]
     await ledger.upsert(
         tenant=TENANT, module_name="echo", doc_path="a.md", content_hash="h1", chunk_count=1
     )

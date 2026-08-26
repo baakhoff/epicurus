@@ -11,7 +11,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core import ChatMessage, EntityRef
@@ -113,7 +113,7 @@ async def _tz() -> str:
     return "UTC"
 
 
-def _engine():
+def _engine() -> AsyncEngine:
     return create_async_engine(
         "sqlite+aiosqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
     )
@@ -178,7 +178,7 @@ def _runner(
     return AutomationRunner(
         store,
         queue,
-        agent or _FakeAgent(),  # type: ignore[arg-type]
+        agent or _FakeAgent(),
         power or _FakePower(),  # type: ignore[arg-type]
         kill,
         sinks or SinkDispatcher(),

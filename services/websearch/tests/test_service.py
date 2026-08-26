@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+from mcp.types import ContentBlock, TextContent
+
 from epicurus_core.contracts import ToolEnvelope
 from epicurus_websearch.ingest import IngestResult, LinkIngestor
 from epicurus_websearch.refs import decode_source_ref
@@ -14,13 +16,17 @@ from epicurus_websearch.service import build_module
 def _make_client(results: list[SearchResult]) -> SearXNGClient:
     client = AsyncMock(spec=SearXNGClient)
     client.search = AsyncMock(return_value=results)
-    return client  # type: ignore[return-value]
+    return client
 
 
-def _parse_envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
+def _text_of(item: ContentBlock) -> str:
+    assert isinstance(item, TextContent)
+    return item.text
+
+
+def _parse_envelope(content: list[ContentBlock]) -> ToolEnvelope:
     """Extract the ToolEnvelope from the first TextContent item in a call_tool result."""
-    text = content[0].text  # type: ignore[attr-defined]
-    return ToolEnvelope.model_validate_json(text)
+    return ToolEnvelope.model_validate_json(_text_of(content[0]))
 
 
 SAMPLE_RESULTS: list[SearchResult] = [
@@ -63,7 +69,7 @@ async def test_web_search_tool_caps_at_20() -> None:
 async def test_web_search_returns_no_refs_on_exception() -> None:
     client = AsyncMock(spec=SearXNGClient)
     client.search = AsyncMock(side_effect=Exception("network error"))
-    module = build_module(client)  # type: ignore[arg-type]
+    module = build_module(client)
     content, _ = await module.call_tool("web_search", {"query": "q"})
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
@@ -161,7 +167,7 @@ def _stub_ingestor(result: IngestResult) -> LinkIngestor:
     """A LinkIngestor that returns *result* — the real one is covered in test_ingest.py."""
     ingestor = AsyncMock(spec=LinkIngestor)
     ingestor.ingest = AsyncMock(return_value=result)
-    return ingestor  # type: ignore[return-value]
+    return ingestor
 
 
 ARTICLE_RESULT = IngestResult(

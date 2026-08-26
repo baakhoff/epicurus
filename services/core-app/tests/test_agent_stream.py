@@ -23,9 +23,9 @@ from epicurus_core_app.agent.agent import (
     _VISION_UNSUPPORTED_MESSAGE,
     Agent,
     AgentEvent,
-    DocumentToolLookup,
 )
 from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
+from epicurus_core_app.agent.doc_preview import DocumentToolLookup
 from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
@@ -89,6 +89,16 @@ class _FakeMcp:
         return self._outputs.get(name, "out")
 
 
+def _text(content: str | list[dict[str, Any]] | None) -> str:
+    """Flatten a message's ``content`` to text for assertions.
+
+    ``ChatMessage.content`` is ``str | list[dict] | None``; the parts array only ever rides on
+    an assembled vision turn, never on the tool/assistant turns asserted here, so a non-string
+    is treated as "no text" exactly like the ``None`` the callers already tolerate.
+    """
+    return content if isinstance(content, str) else ""
+
+
 def _tool_call(name: str = "echo", arguments: str = "{}") -> dict[str, Any]:
     return {"id": "c1", "type": "function", "function": {"name": name, "arguments": arguments}}
 
@@ -115,8 +125,8 @@ async def test_stream_tool_round_then_answer() -> None:
         ]
     )
     events = await _collect(
-        Agent(gateway=gw, mcp=_FakeMcp(outputs={"echo": "pong"})),
-        "use echo",  # type: ignore[arg-type]
+        Agent(gateway=gw, mcp=_FakeMcp(outputs={"echo": "pong"})),  # type: ignore[arg-type]
+        "use echo",
     )
 
     assert [e.type for e in events] == ["tool", "tool", "delta", "delta", "done"]
@@ -522,6 +532,7 @@ async def test_ask_user_resume_continues_the_turn() -> None:
         )
     ]
     awaiting = next(e for e in first if e.type == "awaiting_input")
+    assert awaiting.run_id is not None
     run = await store.take(tenant="local", run_id=awaiting.run_id)
     assert run is not None
     convo = [ChatMessage.model_validate(m) for m in run.conversation]
@@ -547,14 +558,14 @@ async def test_ask_user_without_store_degrades_and_answers() -> None:
             (["best guess"], ChatResult(model="m", content="best guess")),
         ]
     )
-    agent = Agent(gateway=gw, mcp=_FakeMcp())  # no suspend store wired  # type: ignore[arg-type]
+    agent = Agent(gateway=gw, mcp=_FakeMcp())  # type: ignore[arg-type]  # no suspend store wired
     events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
     assert "awaiting_input" not in [e.type for e in events]
     assert events[-1].type == "done"
     assert events[-1].turn is not None and events[-1].turn.content == "best guess"
     # Without a store the loop feeds an instruction back as the ask_user result and continues.
     assert any(
-        m.role == "tool" and m.name == "ask_user" and (m.content or "").startswith("error:")
+        m.role == "tool" and m.name == "ask_user" and _text(m.content).startswith("error:")
         for m in gw.calls[1]
     )
 
@@ -621,6 +632,7 @@ async def test_ask_user_runs_sibling_tools_before_suspending() -> None:
         e async for e in agent.run_stream([ChatMessage(role="user", content="go")], session_id="s1")
     ]
     awaiting = next(e for e in events if e.type == "awaiting_input")
+    assert awaiting.run_id is not None
     run = await store.take(tenant="local", run_id=awaiting.run_id)
     assert run is not None
     # The sibling tool ran (its result is in the persisted convo) so the convo stays valid;
@@ -733,6 +745,7 @@ async def test_draft_resume_continues_the_turn() -> None:
         )
     ]
     awaiting = next(e for e in first if e.type == "awaiting_input")
+    assert awaiting.run_id is not None
     run = await store.take(tenant="local", run_id=awaiting.run_id)
     assert run is not None
     convo = [ChatMessage.model_validate(m) for m in run.conversation]
@@ -769,7 +782,7 @@ async def test_draft_without_store_degrades_and_answers() -> None:
     assert events[-1].type == "done"
     # Without a store the loop tells the model it could not present a draft, and continues.
     assert any(
-        m.role == "tool" and m.name == "mail_send" and (m.content or "").startswith("error:")
+        m.role == "tool" and m.name == "mail_send" and _text(m.content).startswith("error:")
         for m in gw.calls[1]
     )
 
@@ -883,6 +896,7 @@ async def test_ask_approval_resume_continues_the_turn() -> None:
         )
     ]
     awaiting = next(e for e in first if e.type == "awaiting_input")
+    assert awaiting.run_id is not None
     run = await store.take(tenant="local", run_id=awaiting.run_id)
     assert run is not None
     convo = [ChatMessage.model_validate(m) for m in run.conversation]
@@ -913,15 +927,16 @@ async def test_ask_approval_without_store_degrades_and_answers() -> None:
         ]
     )
     agent = Agent(
-        gateway=gw, mcp=_FakeMcp()
-    )  # no pending-approval store wired  # type: ignore[arg-type]
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    )  # no pending-approval store wired
     events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
     assert "awaiting_input" not in [e.type for e in events]
     assert events[-1].type == "done"
     assert events[-1].turn is not None and events[-1].turn.content == "proceeding"
     # Without a store the loop feeds an instruction back as the ask_approval result and continues.
     assert any(
-        m.role == "tool" and m.name == "ask_approval" and (m.content or "").startswith("error:")
+        m.role == "tool" and m.name == "ask_approval" and _text(m.content).startswith("error:")
         for m in gw.calls[1]
     )
 
@@ -945,6 +960,7 @@ async def test_ask_approval_runs_sibling_tools_before_suspending() -> None:
         e async for e in agent.run_stream([ChatMessage(role="user", content="go")], session_id="s1")
     ]
     awaiting = next(e for e in events if e.type == "awaiting_input")
+    assert awaiting.run_id is not None
     run = await store.take(tenant="local", run_id=awaiting.run_id)
     assert run is not None
     # The sibling tool ran (its result is in the persisted convo) so the convo stays valid;
@@ -1337,7 +1353,7 @@ async def _typed_events(
     gw = _FragmentGateway([_typed_call(raw, chunk=chunk), answer])
     agent = Agent(
         gateway=gw,  # type: ignore[arg-type]
-        mcp=_ScribeMcp(),
+        mcp=_ScribeMcp(),  # type: ignore[arg-type]
         documents=_doc_lookup(_writes(target_arg="path")) if lookup is None else lookup,
     )
     return await _collect(agent, "write it down")
@@ -1439,8 +1455,10 @@ async def test_a_long_write_never_starves_the_chat_deltas() -> None:
             [StreamEvent(delta="done"), StreamEvent(result=ChatResult(model="m", content="done"))],
         ]
     )
-    agent = Agent(  # type: ignore[arg-type]
-        gateway=gw, mcp=_ScribeMcp(), documents=_doc_lookup(_writes(target_arg="path"))
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_ScribeMcp(),  # type: ignore[arg-type]
+        documents=_doc_lookup(_writes(target_arg="path")),
     )
     events = await _collect(agent, "write a long one")
 
@@ -1497,8 +1515,10 @@ async def test_a_second_step_does_not_inherit_the_first_steps_preview_state() ->
             [StreamEvent(delta="both"), StreamEvent(result=ChatResult(model="m", content="both"))],
         ]
     )
-    agent = Agent(  # type: ignore[arg-type]
-        gateway=gw, mcp=_ScribeMcp(), documents=_doc_lookup(_writes(target_arg="path"))
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_ScribeMcp(),  # type: ignore[arg-type]
+        documents=_doc_lookup(_writes(target_arg="path")),
     )
     events = await _collect(agent, "write two")
 

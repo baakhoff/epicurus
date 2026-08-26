@@ -23,9 +23,11 @@ class _FakeBus:
     """Records spine publishes — the repo-standard EventBus stand-in."""
 
     def __init__(self) -> None:
-        self.published: list[tuple[str, dict, str | None]] = []
+        self.published: list[tuple[str, dict[str, object], str | None]] = []
 
-    async def publish(self, subject: str, data: dict, tenant_id: str | None = None) -> None:
+    async def publish(
+        self, subject: str, data: dict[str, object], tenant_id: str | None = None
+    ) -> None:
         self.published.append((subject, data, tenant_id))
 
 
@@ -60,7 +62,12 @@ async def _pages_with_folders(indexer: _FakeIndexer | None = None) -> NotesPages
     store, folders = NotesStore(engine), NoteFolderStore(engine)
     await store.init()
     await folders.init()
-    return NotesPages(store, indexer or _FakeIndexer(), tenant=TENANT, folders=folders)
+    return NotesPages(
+        store,
+        indexer or _FakeIndexer(),  # type: ignore[arg-type]
+        tenant=TENANT,
+        folders=folders,
+    )
 
 
 # ── title derivation ──────────────────────────────────────────────────────────
@@ -85,7 +92,7 @@ def test_derive_title(content: str, expected: str) -> None:
 
 
 async def test_list_empty_and_can_manage_files() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     data = await pages.list_docs()
     assert data.docs == []
     assert data.can_manage_files is True
@@ -98,7 +105,7 @@ async def test_write_creates_note_and_indexes() -> None:
     bus = _FakeBus()
 
     emitter = NoteEventEmitter(bus, tenant=TENANT)  # type: ignore[arg-type]
-    pages = NotesPages(store, indexer, tenant=TENANT, events=emitter)
+    pages = NotesPages(store, indexer, tenant=TENANT, events=emitter)  # type: ignore[arg-type]
     result = await pages.write_doc("my-note", "# My Note\n\nbody")
 
     assert result.path == "my-note"
@@ -118,7 +125,7 @@ async def test_write_creates_note_and_indexes() -> None:
 
 async def test_write_updates_existing_note() -> None:
     store = await _store()
-    pages = NotesPages(store, _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(store, _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     await pages.write_doc("n", "# One")
     await pages.write_doc("n", "# Two\n\nmore")
     doc = await pages.read_doc("n")
@@ -129,14 +136,14 @@ async def test_write_updates_existing_note() -> None:
 async def test_write_saves_even_when_index_fails() -> None:
     # The note is the source of truth — a failed embed must not lose it.
     store = await _store()
-    pages = NotesPages(store, _FakeIndexer(fail=True), tenant=TENANT)
+    pages = NotesPages(store, _FakeIndexer(fail=True), tenant=TENANT)  # type: ignore[arg-type]
     result = await pages.write_doc("n", "kept")
     assert result.indexed is False
     assert (await pages.read_doc("n")).content == "kept"
 
 
 async def test_read_missing_is_404() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     with pytest.raises(HTTPException) as err:
         await pages.read_doc("ghost")
     assert err.value.status_code == 404
@@ -145,7 +152,7 @@ async def test_read_missing_is_404() -> None:
 @pytest.mark.parametrize("bad", ["", "   ", " leading", "trailing ", "ctrl\nchar"])
 async def test_invalid_slugs_rejected_without_writing(bad: str) -> None:
     store = await _store()
-    pages = NotesPages(store, _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(store, _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     with pytest.raises(HTTPException) as err:
         await pages.write_doc(bad, "x")
     assert err.value.status_code == 400
@@ -162,7 +169,7 @@ def _client(pages: NotesPages) -> TestClient:
 
 
 async def test_router_create_read_list_roundtrip() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     client = _client(pages)
 
     save = client.put("/pages/notes/doc", params={"path": "idea"}, json={"content": "# Idea"})
@@ -180,12 +187,12 @@ async def test_router_create_read_list_roundtrip() -> None:
 
 
 async def test_router_unknown_page_is_404() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     assert _client(pages).get("/pages/ghost").status_code == 404
 
 
 async def test_router_invalid_slug_is_400() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     resp = _client(pages).get("/pages/notes/doc", params={"path": "   "})
     assert resp.status_code == 400
 
@@ -327,13 +334,13 @@ async def test_router_folder_and_move_roundtrip() -> None:
 
 
 async def test_editor_data_is_versioned() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     data = await pages.list_docs()
     assert data.versioned is True
 
 
 async def test_write_records_versions_newest_first() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     await pages.write_doc("n", "# One")
     await pages.write_doc("n", "# Two")
 
@@ -343,7 +350,7 @@ async def test_write_records_versions_newest_first() -> None:
 
 
 async def test_write_dedups_identical_resave() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     await pages.write_doc("n", "# Same")
     await pages.write_doc("n", "# Same")
     assert len((await pages.list_versions("n")).versions) == 1
@@ -351,14 +358,18 @@ async def test_write_dedups_identical_resave() -> None:
 
 async def test_write_still_versions_when_index_fails() -> None:
     # The save committed even though the embed failed, so the snapshot must exist.
-    pages = NotesPages(await _store(), _FakeIndexer(fail=True), tenant=TENANT)
+    pages = NotesPages(
+        await _store(),
+        _FakeIndexer(fail=True),  # type: ignore[arg-type]
+        tenant=TENANT,
+    )
     result = await pages.write_doc("n", "kept")
     assert result.indexed is False
     assert len((await pages.list_versions("n")).versions) == 1
 
 
 async def test_get_version_returns_content_then_404_for_unknown() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     await pages.write_doc("n", "# Body\n\ntext")
     [summary] = (await pages.list_versions("n")).versions
 
@@ -376,7 +387,7 @@ async def test_get_version_returns_content_then_404_for_unknown() -> None:
 
 
 async def test_version_router_roundtrip() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     client = _client(pages)
     client.put("/pages/notes/doc", params={"path": "idea"}, json={"content": "# First"})
     client.put("/pages/notes/doc", params={"path": "idea"}, json={"content": "# Second"})
@@ -396,15 +407,15 @@ async def test_version_router_roundtrip() -> None:
 
 
 async def test_version_router_unknown_page_is_404() -> None:
-    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)
+    pages = NotesPages(await _store(), _FakeIndexer(), tenant=TENANT)  # type: ignore[arg-type]
     resp = _client(pages).get("/pages/ghost/doc/versions", params={"path": "x"})
     assert resp.status_code == 404
 
 
 async def test_versions_are_tenant_isolated() -> None:
     store = await _store()
-    pages_a = NotesPages(store, _FakeIndexer(), tenant="tenant-a")
-    pages_b = NotesPages(store, _FakeIndexer(), tenant="tenant-b")
+    pages_a = NotesPages(store, _FakeIndexer(), tenant="tenant-a")  # type: ignore[arg-type]
+    pages_b = NotesPages(store, _FakeIndexer(), tenant="tenant-b")  # type: ignore[arg-type]
     await pages_a.write_doc("shared", "# A only")
     [v] = (await pages_a.list_versions("shared")).versions
 

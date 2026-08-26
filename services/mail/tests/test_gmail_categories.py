@@ -15,7 +15,7 @@ from epicurus_mail.gmail import GmailProvider
 def _make_platform(access_token: str = "tok") -> PlatformClient:
     platform = MagicMock(spec=PlatformClient)
     platform.get_oauth_token = AsyncMock(return_value=access_token)
-    return platform  # type: ignore[return-value]
+    return platform
 
 
 def _resp(json_value: Any) -> MagicMock:
@@ -33,7 +33,7 @@ def _mock_client() -> AsyncMock:
 
 
 def _provider() -> GmailProvider:
-    return GmailProvider(platform=_make_platform(), tenant_id="local")  # type: ignore[arg-type]
+    return GmailProvider(platform=_make_platform(), tenant_id="local")
 
 
 def _thread(subject: str, sender: str) -> dict[str, Any]:

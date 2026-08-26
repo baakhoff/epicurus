@@ -173,7 +173,7 @@ async def test_manager_status_lists_every_bridge() -> None:
     body = await manager.status()
     assert body["inbound_subject"] == MESSAGING_INBOUND
     assert body["outbound_subject"] == MESSAGING_OUTBOUND
-    bridges = {b["bridge"] for b in body["bridges"]}  # type: ignore[index,union-attr]
+    bridges = {b["bridge"] for b in body["bridges"]}  # type: ignore[attr-defined]
     assert {"loopback", "discord"} <= bridges
 
 

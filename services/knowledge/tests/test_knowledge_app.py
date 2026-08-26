@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from epicurus_core import route_paths
+from epicurus_core import EpicurusModule, route_paths
 
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("VAULT_PATH", "/tmp")
@@ -119,7 +119,7 @@ def _indexer_stub() -> object:
     return MagicMock()
 
 
-def _module():  # type: ignore[no-untyped-def]
+def _module() -> EpicurusModule:
     """Build the module for manifest assertions (suggestion store never exercised here)."""
     from pathlib import Path
     from unittest.mock import AsyncMock
@@ -148,17 +148,21 @@ def _module():  # type: ignore[no-untyped-def]
     review = SuggestionReview(
         store,
         VaultPages(
-            Path("/vault"), vault, platform=platform, core_prefix="knowledge", reader=reader
+            Path("/vault"),
+            vault,  # type: ignore[arg-type]
+            platform=platform,
+            core_prefix="knowledge",
+            reader=reader,
         ),
-        vault,
+        vault,  # type: ignore[arg-type]
         reader=reader,
         tenant="test",
         audit=audit,
     )
     return build_module(
-        vault,
-        _indexer_stub(),
-        _indexer_stub(),
+        vault,  # type: ignore[arg-type]
+        _indexer_stub(),  # type: ignore[arg-type]
+        _indexer_stub(),  # type: ignore[arg-type]
         store,
         review,
         platform,

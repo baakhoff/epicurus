@@ -71,8 +71,8 @@ def _mirror(notes_root: Path, store: NotesStore, platform: _FakePlatform) -> Not
         notes_root,
         store,
         tenant=TENANT,
-        platform=platform,
-        core_prefix=CORE_PREFIX,  # type: ignore[arg-type]
+        platform=platform,  # type: ignore[arg-type]
+        core_prefix=CORE_PREFIX,
     )
 
 

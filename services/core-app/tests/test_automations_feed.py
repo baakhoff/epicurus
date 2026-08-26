@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -145,7 +146,9 @@ async def test_closed_stream_unregisters_its_subscriber(tmp_path: Path) -> None:
     stream = feed.stream(tenant=TENANT)
     assert await anext(stream) is not None  # enter the generator; subscriber registers
     assert len(feed._subscribers) == 1
-    await stream.aclose()
+    # `RunFeed.stream` is declared -> AsyncIterator (no `aclose` in that protocol), but its
+    # body `yield`s, so it's an async generator at runtime — cast to call the real `aclose`.
+    await cast(AsyncGenerator[AutomationRun, None], stream).aclose()
     assert feed._subscribers == []
 
 
@@ -177,7 +180,7 @@ async def _client(
         )
     )
     return AsyncClient(
-        transport=ASGITransport(app=app),  # type: ignore[arg-type]
+        transport=ASGITransport(app=app),
         base_url="http://test",
     )
 

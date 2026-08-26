@@ -34,7 +34,7 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
     app = FastAPI()
     app.include_router(create_files_router(LocalFileStore(tmp_path), default_tenant=TENANT))
     async with AsyncClient(
-        transport=ASGITransport(app=app),  # type: ignore[arg-type]
+        transport=ASGITransport(app=app),
         base_url="http://test",
     ) as c:
         yield c
@@ -196,7 +196,7 @@ async def capped_client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
         )
     )
     async with AsyncClient(
-        transport=ASGITransport(app=app),  # type: ignore[arg-type]
+        transport=ASGITransport(app=app),
         base_url="http://test",
     ) as c:
         yield c

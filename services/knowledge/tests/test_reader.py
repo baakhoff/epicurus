@@ -253,7 +253,7 @@ async def test_list_dir_skips_entry_whose_stat_raises(
 
     real_stat = Path.stat
 
-    def _flaky_stat(self: Path, *args: object, **kwargs: object) -> object:
+    def _flaky_stat(self: Path, *args: object, **kwargs: bool) -> object:
         if self.name == "bad":
             raise PermissionError(13, "Permission denied")
         return real_stat(self, *args, **kwargs)

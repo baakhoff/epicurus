@@ -1046,7 +1046,7 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.114.0"
+version = "0.114.2"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },
@@ -1087,7 +1087,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-echo"
-version = "0.5.1"
+version = "0.5.2"
 source = { editable = "services/echo" }
 dependencies = [
     { name = "epicurus-core" },
@@ -1104,7 +1104,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-knowledge"
-version = "0.27.3"
+version = "0.27.4"
 source = { editable = "services/knowledge" }
 dependencies = [
     { name = "asyncpg" },
@@ -1131,7 +1131,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-mail"
-version = "0.19.0"
+version = "0.19.1"
 source = { editable = "services/mail" }
 dependencies = [
     { name = "asyncpg" },
@@ -1154,7 +1154,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-messaging"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "services/messaging" }
 dependencies = [
     { name = "discord-py" },
@@ -1175,7 +1175,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-notes"
-version = "0.12.1"
+version = "0.12.2"
 source = { editable = "services/notes" }
 dependencies = [
     { name = "asyncpg" },
@@ -1200,7 +1200,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-storage"
-version = "0.9.1"
+version = "0.9.2"
 source = { editable = "services/storage" }
 dependencies = [
     { name = "aioboto3" },
@@ -1225,7 +1225,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-tasks"
-version = "0.23.0"
+version = "0.23.1"
 source = { editable = "services/tasks" }
 dependencies = [
     { name = "asyncpg" },
@@ -1250,7 +1250,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-websearch"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "services/websearch" }
 dependencies = [
     { name = "epicurus-core" },

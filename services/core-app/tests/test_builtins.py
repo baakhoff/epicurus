@@ -47,7 +47,13 @@ def _handler(
             raise RuntimeError("calendar down")
         return calendar_tz
 
-    return make_now_handler(tz_provider, calendar_tz_provider)
+    inner = make_now_handler(tz_provider, calendar_tz_provider)
+
+    async def wrapped(arguments: dict[str, Any], tenant: str) -> str:
+        # `now` is session-agnostic (see docstring) — session_id is always None here.
+        return await inner(arguments, tenant, None)
+
+    return wrapped
 
 
 def test_now_spec_shape() -> None:
@@ -155,15 +161,15 @@ def _frozen_at(when: datetime) -> Iterator[None]:
 
     class _Frozen(datetime):
         @classmethod
-        def now(cls, tz: Any = None) -> datetime:
+        def now(cls, tz: Any = None) -> datetime:  # type: ignore[override]
             return when if tz is None else when.astimezone(tz)
 
-    real = builtins_module.datetime
-    builtins_module.datetime = _Frozen  # type: ignore[assignment]
+    real = builtins_module.datetime  # type: ignore[attr-defined]
+    builtins_module.datetime = _Frozen  # type: ignore[attr-defined]
     try:
         yield
     finally:
-        builtins_module.datetime = real
+        builtins_module.datetime = real  # type: ignore[attr-defined]
 
 
 async def test_now_resolves_the_reported_repro_friday_to_monday() -> None:
@@ -227,26 +233,26 @@ def test_remember_spec_shape() -> None:
 async def test_remember_saves_the_fact_for_the_calling_tenant() -> None:
     writer = _FakeFactWriter()
     handler = make_remember_handler(writer)
-    out = await handler({"fact": "Prefers metric units"}, "t1")
+    out = await handler({"fact": "Prefers metric units"}, "t1", None)
     assert writer.saved == [("t1", "Prefers metric units", "tool")]
     assert "Saved to memory" in out
 
 
 async def test_remember_reports_a_duplicate_without_re_saving() -> None:
     writer = _FakeFactWriter(duplicate=True)
-    out = await make_remember_handler(writer)({"fact": "Already known"}, "t1")
+    out = await make_remember_handler(writer)({"fact": "Already known"}, "t1", None)
     assert "Already in memory" in out
 
 
 async def test_remember_requires_a_fact() -> None:
     writer = _FakeFactWriter()
-    out = await make_remember_handler(writer)({"fact": "   "}, "t1")
+    out = await make_remember_handler(writer)({"fact": "   "}, "t1", None)
     assert out.startswith("error:")
     assert writer.saved == []
 
 
 async def test_remember_surfaces_a_storage_failure_as_an_error() -> None:
-    out = await make_remember_handler(_FakeFactWriter(raises=True))({"fact": "x"}, "t1")
+    out = await make_remember_handler(_FakeFactWriter(raises=True))({"fact": "x"}, "t1", None)
     assert out.startswith("error:")
 
 
@@ -317,7 +323,7 @@ async def test_memory_search_returns_both_facts_and_sessions() -> None:
         facts=[_fact("Prefers restic for backups")],
         sessions=[_session("Backups", "we chose a nightly restic cron")],
     )
-    out = await make_memory_search_handler(searcher)({"query": "backup"}, "t1")
+    out = await make_memory_search_handler(searcher)({"query": "backup"}, "t1", None)
     assert "Remembered facts:" in out
     assert "Prefers restic for backups" in out
     assert "From past conversations:" in out
@@ -332,7 +338,9 @@ async def test_memory_search_scope_facts_skips_sessions() -> None:
     searcher = _FakeMemorySearcher(
         facts=[_fact("Lives in Belgrade")], sessions=[_session("x", "y")]
     )
-    out = await make_memory_search_handler(searcher)({"query": "where", "scope": "facts"}, "t1")
+    out = await make_memory_search_handler(searcher)(
+        {"query": "where", "scope": "facts"}, "t1", None
+    )
     assert "Remembered facts:" in out
     assert "From past conversations:" not in out
     assert searcher.sessions_calls == []  # the sessions half was never touched
@@ -342,7 +350,9 @@ async def test_memory_search_scope_sessions_skips_facts() -> None:
     searcher = _FakeMemorySearcher(
         facts=[_fact("x")], sessions=[_session("Trip", "flights booked")]
     )
-    out = await make_memory_search_handler(searcher)({"query": "trip", "scope": "sessions"}, "t1")
+    out = await make_memory_search_handler(searcher)(
+        {"query": "trip", "scope": "sessions"}, "t1", None
+    )
     assert "From past conversations:" in out
     assert "Remembered facts:" not in out
     assert searcher.facts_calls == []
@@ -351,37 +361,39 @@ async def test_memory_search_scope_sessions_skips_facts() -> None:
 async def test_memory_search_degrades_when_the_embedder_fails() -> None:
     # A cold embedder fails the facts half; the tool still returns the sessions half (no embed).
     searcher = _FakeMemorySearcher(sessions=[_session("Backups", "restic cron")], facts_raise=True)
-    out = await make_memory_search_handler(searcher)({"query": "backup"}, "t1")
+    out = await make_memory_search_handler(searcher)({"query": "backup"}, "t1", None)
     assert not out.startswith("error:")
     assert "From past conversations:" in out
     assert "Remembered facts:" not in out
 
 
 async def test_memory_search_reports_nothing_found() -> None:
-    out = await make_memory_search_handler(_FakeMemorySearcher())({"query": "unicorn"}, "t1")
+    out = await make_memory_search_handler(_FakeMemorySearcher())({"query": "unicorn"}, "t1", None)
     assert "No remembered facts or past conversations matched" in out
     assert "unicorn" in out
 
 
 async def test_memory_search_requires_a_query() -> None:
     searcher = _FakeMemorySearcher(facts=[_fact("x")])
-    out = await make_memory_search_handler(searcher)({"query": "  "}, "t1")
+    out = await make_memory_search_handler(searcher)({"query": "  "}, "t1", None)
     assert out.startswith("error:")
     assert searcher.facts_calls == []  # nothing searched on a blank query
 
 
 async def test_memory_search_clamps_and_defaults_the_limit() -> None:
     searcher = _FakeMemorySearcher(facts=[_fact("x")])
-    await make_memory_search_handler(searcher)({"query": "q", "limit": 99}, "t1")
-    await make_memory_search_handler(searcher)({"query": "q", "limit": 0}, "t1")
-    await make_memory_search_handler(searcher)({"query": "q", "limit": "junk"}, "t1")
+    await make_memory_search_handler(searcher)({"query": "q", "limit": 99}, "t1", None)
+    await make_memory_search_handler(searcher)({"query": "q", "limit": 0}, "t1", None)
+    await make_memory_search_handler(searcher)({"query": "q", "limit": "junk"}, "t1", None)
     # 99 → 10 (cap), 0 → 1 (floor), junk → 5 (default)
     assert [limit for _tenant, limit in searcher.facts_calls] == [10, 1, 5]
 
 
 async def test_memory_search_unknown_scope_falls_back_to_both() -> None:
     searcher = _FakeMemorySearcher(facts=[_fact("a")], sessions=[_session("b", "c")])
-    out = await make_memory_search_handler(searcher)({"query": "q", "scope": "nonsense"}, "t1")
+    out = await make_memory_search_handler(searcher)(
+        {"query": "q", "scope": "nonsense"}, "t1", None
+    )
     assert "Remembered facts:" in out
     assert "From past conversations:" in out
 

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 import structlog
 from structlog.testing import capture_logs
+from structlog.types import EventDict
 
 from epicurus_core_app.llm.catalog import (
     KNOWN_TAGS,
@@ -507,7 +508,7 @@ async def test_refresh_empty_parse_is_treated_as_failure() -> None:
 # ── bounded failure logging (#710) ────────────────────────────────────────────
 
 
-def _events(logs: list[dict[str, object]], level: str) -> list[dict[str, object]]:
+def _events(logs: list[EventDict], level: str) -> list[EventDict]:
     return [entry for entry in logs if entry.get("log_level") == level]
 
 

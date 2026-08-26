@@ -31,7 +31,7 @@ def _search_response(results: list[dict[str, object]]) -> httpx.Response:
 
 
 async def test_search_returns_results() -> None:
-    raw = [
+    raw: list[dict[str, object]] = [
         {"title": "A", "url": "https://a.com", "content": "Snippet A", "engine": "google"},
         {"title": "B", "url": "https://b.com", "content": "Snippet B", "engine": "bing"},
     ]
@@ -45,7 +45,7 @@ async def test_search_returns_results() -> None:
 
 
 async def test_search_respects_num_results() -> None:
-    raw = [
+    raw: list[dict[str, object]] = [
         {"title": str(i), "url": f"https://{i}.com", "content": "", "engine": "x"}
         for i in range(10)
     ]
@@ -55,7 +55,7 @@ async def test_search_respects_num_results() -> None:
 
 
 async def test_search_skips_results_without_url() -> None:
-    raw = [
+    raw: list[dict[str, object]] = [
         {"title": "No URL", "url": "", "content": "text", "engine": "g"},
         {"title": "Has URL", "url": "https://ok.com", "content": "text", "engine": "g"},
     ]
@@ -72,7 +72,7 @@ async def test_search_returns_empty_on_empty_results() -> None:
 
 
 async def test_search_handles_missing_fields() -> None:
-    raw = [{"url": "https://x.com"}]
+    raw: list[dict[str, object]] = [{"url": "https://x.com"}]
     client = _make_client({"/search": _search_response(raw)})
     results = await client.search("q")
     assert results[0]["title"] == ""

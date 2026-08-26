@@ -120,7 +120,7 @@ async def test_create_event_each_call_gets_a_distinct_request_id() -> None:
 
 
 def test_maps_meet_url_from_the_video_entry_point() -> None:
-    item = {
+    item: dict[str, object] = {
         "id": "e1",
         "summary": "Standup",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
@@ -138,7 +138,7 @@ def test_maps_meet_url_from_the_video_entry_point() -> None:
 
 
 def test_no_conference_data_means_no_meet_url() -> None:
-    item = {
+    item: dict[str, object] = {
         "id": "e1",
         "summary": "One-off",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
@@ -150,7 +150,7 @@ def test_no_conference_data_means_no_meet_url() -> None:
 def test_conference_data_with_no_video_entry_point_means_no_meet_url() -> None:
     # A non-Meet conferencing solution (or a still-provisioning one) may have entry points
     # with no "video" type — degrade to None rather than picking the wrong link.
-    item = {
+    item: dict[str, object] = {
         "id": "e1",
         "summary": "Standup",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
@@ -162,7 +162,7 @@ def test_conference_data_with_no_video_entry_point_means_no_meet_url() -> None:
 
 def test_conference_data_pending_with_no_entry_points_means_no_meet_url() -> None:
     # A conference still being provisioned has no entryPoints yet — best-effort, not polled.
-    item = {
+    item: dict[str, object] = {
         "id": "e1",
         "summary": "Standup",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},

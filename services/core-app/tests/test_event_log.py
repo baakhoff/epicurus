@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -58,6 +59,14 @@ def _msg(envelope: EventEnvelope, *, subject: str | None = None) -> Event:
         subject=subject or f"{envelope.tenant_id}.events.{envelope.type}",
         data=envelope.model_dump_json().encode(),
     )
+
+
+def _as_agen(it: AsyncIterator[LoggedEvent]) -> AsyncGenerator[LoggedEvent, None]:
+    """``EventIntake.stream`` is declared as ``AsyncIterator`` but is really a generator —
+    narrow it so tests can call ``aclose()``/get a proper ``Coroutine`` from ``__anext__()``.
+    """
+    assert isinstance(it, AsyncGenerator)
+    return it
 
 
 async def _fresh_store() -> EventLogStore:
@@ -307,7 +316,7 @@ async def test_stream_replays_history_oldest_first() -> None:
     for i in range(3):
         await store.append(_envelope(dedup_key=f"k{i}"))
     seen: list[str] = []
-    agen = intake.stream(tenant=TENANT)
+    agen = _as_agen(intake.stream(tenant=TENANT))
     try:
         async for entry in agen:
             seen.append(entry.dedup_key)
@@ -321,7 +330,7 @@ async def test_stream_replays_history_oldest_first() -> None:
 
 async def test_stream_yields_live_events_after_history() -> None:
     _store, intake, _bus = await _fresh_intake()
-    agen = intake.stream(tenant=TENANT)
+    agen = _as_agen(intake.stream(tenant=TENANT))
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)  # let it register its queue and drain the empty history
     await intake._handle(_msg(_envelope(dedup_key="live")))
@@ -346,9 +355,9 @@ async def test_stream_does_not_lose_an_event_that_lands_during_replay() -> None:
         await gate.wait()
         return await real_recent(**kwargs)  # type: ignore[arg-type]
 
-    store.recent = _slow_recent  # type: ignore[method-assign,assignment]
+    store.recent = _slow_recent  # type: ignore[method-assign]
 
-    agen = intake.stream(tenant=TENANT)
+    agen = _as_agen(intake.stream(tenant=TENANT))
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)  # the generator is now blocked inside the history query
     await intake._handle(_msg(_envelope(dedup_key="mid-replay")))
@@ -367,7 +376,7 @@ async def test_stream_does_not_lose_an_event_that_lands_during_replay() -> None:
 
 async def test_stream_is_tenant_scoped() -> None:
     _store, intake, _bus = await _fresh_intake()
-    agen = intake.stream(tenant=TENANT)
+    agen = _as_agen(intake.stream(tenant=TENANT))
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)
     await intake._handle(_msg(_envelope(tenant=OTHER_TENANT, dedup_key="theirs")))
@@ -379,7 +388,7 @@ async def test_stream_is_tenant_scoped() -> None:
 
 async def test_stream_filters_live_events_by_module() -> None:
     _store, intake, _bus = await _fresh_intake()
-    agen = intake.stream(tenant=TENANT, module="mail")
+    agen = _as_agen(intake.stream(tenant=TENANT, module="mail"))
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)
     await intake._handle(_msg(_envelope(module="echo", dedup_key="e")))
@@ -392,7 +401,7 @@ async def test_stream_filters_live_events_by_module() -> None:
 async def test_stream_unregisters_its_subscriber_on_close() -> None:
     # Otherwise every closed browser tab leaks a queue that intake keeps filling forever.
     _store, intake, _bus = await _fresh_intake()
-    agen = intake.stream(tenant=TENANT)
+    agen = _as_agen(intake.stream(tenant=TENANT))
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)  # the generator has registered and is polling its queue
     assert len(intake._subscribers) == 1
@@ -451,7 +460,7 @@ async def test_retention_loop_survives_a_failing_prune() -> None:
         calls += 1
         raise RuntimeError("db down")
 
-    store.prune = _boom  # type: ignore[method-assign,assignment]
+    store.prune = _boom  # type: ignore[method-assign]
     task = asyncio.create_task(retention.run_periodic())
     await asyncio.sleep(0.05)
     task.cancel()

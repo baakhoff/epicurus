@@ -125,7 +125,7 @@ async def _make_client(
         return JSONResponse(status_code=500, content={"detail": str(exc)})
 
     client = AsyncClient(
-        transport=ASGITransport(app=app),  # type: ignore[arg-type]
+        transport=ASGITransport(app=app),
         base_url="http://test",
     )
     return client, index, mounts

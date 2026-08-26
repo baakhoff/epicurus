@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from mcp.types import ContentBlock, TextContent
+
 from epicurus_core import CONTRACT_VERSION
 from epicurus_echo.service import (
     ECHO_PAGE_ID,
@@ -12,10 +14,15 @@ from epicurus_echo.service import (
 )
 
 
+def _text_of(item: ContentBlock) -> str:
+    assert isinstance(item, TextContent)
+    return item.text
+
+
 async def test_echo_tool_returns_message() -> None:
     content, structured = await build_module().call_tool("echo", {"message": "hello"})
     assert structured == {"result": "hello"}
-    assert content[0].text == "hello"
+    assert _text_of(content[0]) == "hello"
 
 
 async def test_manifest_lists_tool_and_event() -> None:

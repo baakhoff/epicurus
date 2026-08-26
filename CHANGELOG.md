@@ -12,6 +12,44 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The module event spine survives a restart** (#832) — the spine was at-most-once by
+  deliberate choice (ADR-0103 §4): core NATS pub/sub, JetStream enabled on the server and
+  pointedly unused, because in July nothing consumed events so nothing could miss them. That
+  stopped being true when proactivity — listeners → automations → alerts → the notification
+  centre — moved inside 1.0, and a core restart began quietly costing the world's changes.
+  It is now **at-least-once**: a JetStream stream (`EPICURUS_EVENTS`) over the *unchanged*
+  `<tenant>.events.>` subjects, provisioned idempotently on every boot, and a **durable pull
+  consumer** (`core-event-intake`) whose server-side cursor outlives the process. Not one
+  emitter changed — persistence is a property of the subject, not of the publisher's API, so
+  a stream captures whatever lands on its subjects whoever published it. The rule that makes
+  it worth anything is one line of ordering: **the message is acked only after the row is
+  committed** to `module_events`. A core killed mid-message never acked it and gets it back;
+  a store that fails is *naked*, so a database outage costs latency rather than history; and
+  a message that can never be stored — unparseable, or claiming one tenant on the subject and
+  another in the envelope — is *terminated*, because unlimited redelivery with no terminal
+  case is an infinite loop. Fan-out to `on_event` listeners deliberately runs *after* the
+  ack: holding it would blow through `ack_wait` and trigger a redelivery that dedup then
+  absorbs as a no-op, skipping the listeners anyway. Redelivery is safe because the log's
+  `(tenant, module, dedup_key)` uniqueness is a **database constraint**, not a convention —
+  verified rather than assumed, and now asserted on the consume path and not only on the
+  store. The honest half: emitting is still an *unacknowledged* publish, and that is not a
+  trade that was available to make differently. A tenant-scoped subject puts the tenant in
+  the leading token, so the stream's subject starts with `*` — and NATS refuses a stream
+  whose subjects overlap its reserved `$JS.>` namespace unless publisher acks are disabled
+  (`no_ack`). Publisher-side acks would mean changing the *subject scheme*, which is a
+  contract change, not a transport one. So the guarantee is: **at-least-once from the NATS
+  server to the durable log; best-effort from the emitter to the NATS server**, with three
+  windows documented rather than glossed (a client that buffers and then dies, a stream at
+  its limit discarding oldest-first, an unclean server crash) — all of which require NATS
+  itself to be down or dying. The `module_events` table stays the copy of record; the stream
+  is a bounded delivery buffer in front of it (7 days, 512 MiB, discard oldest), not a second
+  archive. Also folded in: the LLM diagnostics no longer report "no key configured" when the
+  truth is "OpenBao could not be reached" — a bare `except SecretError` had collapsed the two
+  since #728, so a provider list read as *unconfigured* during a vault outage. `ProviderInfo`
+  now carries `key_state` (`not_required` / `present` / `missing` / `unavailable`) plus the
+  store's reason, with `configured` unchanged for existing readers.
+  `epicurus-core` 0.34.0→0.35.0 (MINOR). `core-app` 0.114.2→0.115.0 (MINOR).
+
 - **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
   `writes_document` call *lands*, by which point the model has already written the whole body;
   v2 shows it arriving. The blocker was never the pane: tool-call fragments were assembled

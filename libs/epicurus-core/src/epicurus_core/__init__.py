@@ -70,7 +70,13 @@ from epicurus_core.messaging import (
 )
 from epicurus_core.module import EpicurusModule, ToolError, add_manifest_route
 from epicurus_core.module_events import (
+    EVENTS_ACK_WAIT_S,
+    EVENTS_DURABLE,
     EVENTS_PREFIX,
+    EVENTS_STREAM,
+    EVENTS_STREAM_MAX_AGE_S,
+    EVENTS_STREAM_MAX_BYTES,
+    EVENTS_STREAM_SUBJECT,
     EVENTS_WILDCARD,
     MAX_PAYLOAD_BYTES,
     SCHEMA_VERSION,
@@ -107,7 +113,13 @@ from epicurus_core.tracing import get_tracer, setup_tracing
 
 __all__ = [
     "CONTRACT_VERSION",
+    "EVENTS_ACK_WAIT_S",
+    "EVENTS_DURABLE",
     "EVENTS_PREFIX",
+    "EVENTS_STREAM",
+    "EVENTS_STREAM_MAX_AGE_S",
+    "EVENTS_STREAM_MAX_BYTES",
+    "EVENTS_STREAM_SUBJECT",
     "EVENTS_WILDCARD",
     "LIST_CAP",
     "LOCAL_ACCOUNT",

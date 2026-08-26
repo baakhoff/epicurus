@@ -42,13 +42,11 @@ def _envelope(
 
 
 class _FakeBus:
-    async def subscribe_any_tenant(
-        self, subject: str, handler: object, *, queue: str = ""
-    ) -> object:
-        class _Sub:
-            async def unsubscribe(self) -> None: ...
+    """A stand-in for the constructor only.
 
-        return _Sub()
+    These tests exercise the feed, never the consumer: ``start()`` is not called, so
+    nothing on the bus is ever touched.
+    """
 
 
 async def _fresh() -> tuple[EventLogStore, EventIntake]:

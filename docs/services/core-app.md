@@ -1116,12 +1116,19 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 ### Module event spine — durable intake (ADR-0103)
 
 The core is the spine's recorder: modules announce world changes with
-[`emit_event`](../reference/events.md#emit_event), and the core keeps the copy of record.
-The bus is fire-and-forget and replays nothing, so "what happened" is a question you ask
-Postgres, not NATS.
+[`emit_event`](../reference/events.md#emit_event), and the core keeps the copy of record in
+Postgres. "What happened" is a question you ask the `module_events` table, not the bus.
 
-`EventIntake` **consumes `*.events.>`** — one subscription, **every tenant**
-(`EventBus.subscribe_any_tenant`). This deliberately departs from the inbound-messaging
+**Delivery is at-least-once** (#832). On startup the core provisions the JetStream stream
+`EPICURUS_EVENTS` over `*.events.>` — idempotent, so an existing stream is adopted, and one
+whose config cannot be updated is kept with a warning rather than failing the boot — and
+binds the durable pull consumer **`core-event-intake`**. The cursor lives on the server, so
+a core that was down while a module emitted picks those events up on the way back up. See
+[events → delivery posture](../reference/events.md#delivery-posture) for the exact
+guarantee, including what the *publish* side does not promise.
+
+`EventIntake` **consumes `*.events.>`** — one consumer, **every tenant**
+(`EventBus.pull_subscribe_any_tenant`). This deliberately departs from the inbound-messaging
 consumer's per-tenant subscribe: a tenant added at runtime would otherwise be silently
 unheard until restart, and an intake that drops a tenant's events looks exactly like a
 tenant that emitted none. It is core-only by construction — on the bus the core
@@ -1132,13 +1139,26 @@ Per message it: parses the [`EventEnvelope`](../reference/events.md#eventenvelop
 validators reject an oversized or credential-carrying payload *on the way in*, so the
 contract is enforced rather than trusted); checks that the **subject's tenant and the
 envelope's `tenant_id` agree** — two independent claims, and a mismatch is dropped rather
-than filed under a guess; records it in `module_events`; then fans it out to the live feed
-and to any registered `on_event` listener. Malformed and mis-tenanted messages are logged
-and dropped — one module's bad emit must not take down intake for every other module.
+than filed under a guess; records it in `module_events`; **acks**; then fans it out to the
+live feed and to any registered `on_event` listener.
+
+The message's disposition follows the durable write, and that ordering *is* the guarantee:
+
+| Outcome | Disposition | Why |
+| --- | --- | --- |
+| Row committed, or a duplicate the unique constraint rejected | **ack** | It is on file either way. |
+| The store failed — database down | **nak** (5s delay) | Nothing is durable yet. A database outage must cost latency, not history; redelivery is unlimited, so a long outage is survivable. |
+| Malformed JSON, a failed envelope validator, or a tenant mismatch | **term** | It will never become valid, and unlimited redelivery with no terminal case is an infinite loop. One module's bad emit must not wedge intake for every other module. |
+
+Fan-out happens **after** the ack on purpose: a slow listener holding the ack would blow
+through `ack_wait` (30s) and trigger a redelivery that dedup then absorbs as a no-op —
+skipping the listeners anyway. Nothing is acked before the row exists, so a core killed
+mid-message gets that message back.
 
 `on_event(listener)` is the seam consumers attach to (the automations engine, #666). It
 fires only for **newly-stored** events: a duplicate is not a change, so a consumer never
-sees the same one twice.
+sees the same one twice — which is also what makes a redelivery invisible to a listener
+rather than a double-trigger.
 
 `EventRetention` prunes the log on an hourly loop to `EVENTS_RETENTION_DAYS` (default 30;
 `0` disables).

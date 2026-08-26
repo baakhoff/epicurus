@@ -4,8 +4,16 @@ Subjects are tenant-scoped via :func:`scope_subject`, so publishers and
 subscribers address ``<tenant>.<base>`` without hand-building names. This talks
 to NATS on the internal Docker network only — the contract is local-only.
 
-Covers core NATS pub/sub and request/reply. JetStream persistence is a follow-up;
-the infra already runs NATS with ``-js`` enabled.
+Covers core NATS pub/sub, request/reply, and the two JetStream primitives a durable
+consumer needs: :meth:`EventBus.ensure_stream` and
+:meth:`EventBus.pull_subscribe_any_tenant`. **Publishing stays core pub/sub on every
+path.** A JetStream stream captures whatever lands on its subjects, whoever published
+it, so persistence is a property of the *subject* rather than of the publisher's API —
+which is what lets the module event spine become at-least-once without a single
+emitter changing (ADR-0103 §4, as amended). The honest cost is that
+:meth:`publish` returns when the local client has accepted the message, not when the
+server has stored it; see :func:`epicurus_core.module_events.emit_event` for the
+resulting failure window.
 
 Failure behavior: a subscriber handler or replier that raises is logged (with
 traceback) and does not break the subscription — later messages are still
@@ -32,6 +40,16 @@ import nats
 from nats.aio.client import Client as NATSClient
 from nats.aio.msg import Msg
 from nats.aio.subscription import Subscription
+from nats.js import JetStreamContext
+from nats.js.api import (
+    AckPolicy,
+    ConsumerConfig,
+    DiscardPolicy,
+    RetentionPolicy,
+    StorageType,
+    StreamConfig,
+)
+from nats.js.errors import APIError
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 
 from epicurus_core.config import CoreSettings
@@ -271,6 +289,139 @@ class EventBus:
             f"*.{subject}",
             queue=queue,
             cb=self._consumer_cb(subject, handler, None),
+        )
+
+    # ── JetStream ─────────────────────────────────────────────────────────────────────
+
+    def jetstream(self) -> JetStreamContext:
+        """The JetStream context on this connection (local; no round-trip)."""
+        return self.client.jetstream()
+
+    async def ensure_stream(
+        self,
+        name: str,
+        subjects: list[str],
+        *,
+        max_age_s: float,
+        max_bytes: int,
+    ) -> None:
+        """Provision the JetStream stream *name* over *subjects*. Idempotent.
+
+        Called on every boot, so "it already exists" is the *normal* path, not an error:
+        ``add_stream`` succeeds unchanged when a stream with an identical config is already
+        there, and only fails when one exists with a *different* config — which is then an
+        upgrade, so we update it in place rather than refusing to start.
+
+        The retention shape is fixed, not configurable, and each part of it is load-bearing:
+
+        * ``limits`` retention — a message lives out ``max_age_s`` regardless of who has
+          acked it. The alternatives delete on ack (``workqueue``/``interest``), which sounds
+          tidier and is a trap: with ``interest``, a message published while no durable
+          consumer exists is dropped *on arrival*, so the exact window this stream is meant
+          to cover (the consumer is down) is the one it would not cover.
+        * ``discard: old`` — at the limit, the oldest message is evicted rather than the new
+          publish refused. Publishers here do not read acks (see the module docstring), so a
+          refusal would be silent at the source; dropping the oldest at least fails in the
+          direction of the freshest truth.
+        * ``file`` storage — the point is surviving a restart, and memory storage does not
+          survive the *server's*.
+        * ``no_ack`` — **required, not chosen.** Tenant-scoped subjects put the tenant in the
+          leading token, so any stream over them starts with ``*``, and NATS treats a leading
+          ``*`` as overlapping its own reserved ``$JS.>`` namespace. It refuses such a stream
+          outright unless ``no_ack`` is set (``err_code 10052``: *subjects that overlap with
+          jetstream api require no-ack to be true*). What ``no_ack`` disables is the
+          **publisher's** ack — which this bus never asked for, since :meth:`publish` is
+          plain core NATS on every path. Consumer acks are a property of the consumer, not
+          the stream, and are unaffected. The real consequence is a hard one worth stating:
+          publisher-side acks are *impossible* for a tenant-first subject scheme, so
+          "should emitters use ``js.publish``?" is not a trade-off here — it is a subject
+          scheme change, which is a contract change (ADR-0103 §2), not a transport one.
+
+        Raises whatever JetStream raised if the stream can neither be created nor updated
+        *and* the existing one does not cover *subjects* — that is unrecoverable silence
+        (messages land nowhere) and must not be swallowed at boot.
+        """
+        js = self.jetstream()
+        config = StreamConfig(
+            name=name,
+            subjects=list(subjects),
+            retention=RetentionPolicy.LIMITS,
+            discard=DiscardPolicy.OLD,
+            storage=StorageType.FILE,
+            max_age=max_age_s,
+            max_bytes=max_bytes,
+            no_ack=True,
+        )
+        try:
+            await js.add_stream(config)
+        except APIError as exc:
+            log.info(
+                "jetstream stream exists with a different config; updating",
+                stream=name,
+                error=str(exc),
+            )
+        else:
+            log.info("jetstream stream ensured", stream=name, subjects=subjects)
+            return
+
+        try:
+            await js.update_stream(config)
+        except APIError as exc:
+            # Some fields are immutable once a stream exists (storage type, retention
+            # policy). An operator's pre-existing stream that still *routes* our subjects
+            # is usable — a tuning mismatch is not worth refusing to boot over. One that
+            # does not route them is fatal: every event would land nowhere, silently.
+            info = await js.stream_info(name)
+            existing = set(info.config.subjects or [])
+            if not set(subjects) <= existing:
+                raise
+            log.warning(
+                "jetstream stream kept as-is; its config could not be updated",
+                stream=name,
+                subjects=sorted(existing),
+                error=str(exc),
+            )
+        else:
+            log.info("jetstream stream updated", stream=name, subjects=subjects)
+
+    async def pull_subscribe_any_tenant(
+        self,
+        subject: str,
+        *,
+        durable: str,
+        stream: str,
+        ack_wait_s: float,
+    ) -> JetStreamContext.PullSubscription:
+        """A durable JetStream pull subscription over ``*.<subject>`` — **every tenant**.
+
+        The JetStream counterpart of :meth:`subscribe_any_tenant`, and core-only for the same
+        reason (ADR-0066): the single-token wildcard sits where
+        :func:`~epicurus_core.tenancy.scope_subject` puts the tenant, and reaching across
+        tenants is the core's job alone.
+
+        *durable* is a server-side cursor that outlives this process — that is the whole
+        point. A restarted consumer binds the existing durable and resumes exactly where its
+        last ack left off; a brand-new one starts at the head of the stream and replays
+        everything still in it (harmless, because the consumer's own store dedups).
+
+        Acks are **explicit** and redelivery is **unlimited** (``max_deliver = -1``). Both are
+        deliberate: an unacked message must come back, and a delivery cap would turn a long
+        database outage into permanent, silent data loss — the exact failure this whole
+        transport exists to remove. A message that can never be *stored* must therefore be
+        terminated by the consumer (``msg.term()``), not left to retry forever.
+        """
+        scoped = f"*.{subject}"
+        return await self.jetstream().pull_subscribe(
+            scoped,
+            durable=durable,
+            stream=stream,
+            config=ConsumerConfig(
+                durable_name=durable,
+                filter_subject=scoped,
+                ack_policy=AckPolicy.EXPLICIT,
+                ack_wait=ack_wait_s,
+                max_deliver=-1,
+            ),
         )
 
     async def reply(

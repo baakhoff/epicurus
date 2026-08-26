@@ -46,10 +46,37 @@ authenticates as `core` and modules as `module`. See [NATS](../infrastructure/na
 | `async subscribe(subject, handler, *, tenant_id=None, queue="") -> Subscription` | Call `handler(Event)` per message. |
 | `async subscribe_any_tenant(subject, handler, *, queue="") -> Subscription` | Call `handler(Event)` per message on `*.<subject>` — **every** tenant. Core-only. |
 | `async reply(subject, replier, *, tenant_id=None, queue="") -> Subscription` | Respond to each request with `replier(Event)`'s result. |
+| `jetstream() -> JetStreamContext` | The JetStream context on this connection (local; no round-trip). |
+| `async ensure_stream(name, subjects, *, max_age_s, max_bytes) -> None` | Provision a JetStream stream. Idempotent — safe on every boot. |
+| `async pull_subscribe_any_tenant(subject, *, durable, stream, ack_wait_s) -> PullSubscription` | A **durable** pull subscription over `*.<subject>` — every tenant. Core-only. |
 | `client` *(property)* | The underlying NATS client; raises if not connected. |
 
 `data` may be `bytes`, `str`, or a JSON-serializable `dict`. A non-empty `queue`
 joins a queue group for load-balanced delivery.
+
+### JetStream — `ensure_stream` / `pull_subscribe_any_tenant`
+
+`publish` is **always** plain core NATS; there is no JetStream publish path. A stream
+captures whatever lands on its subjects regardless of who published it, so persistence is a
+property of the *subject*, not of the publisher's API — which is what let the module event
+spine become at-least-once without a single emitter changing.
+
+`ensure_stream` fixes the retention shape rather than exposing it: `limits` retention
+(a message lives out `max_age_s` whether or not anyone has acked it — the alternatives drop
+a message published while no consumer exists, which is the exact window a durable stream is
+for), `discard: old` (evict the oldest rather than silently refuse a publisher that is not
+reading acks), `file` storage, and `no_ack: true` — the last one **required**, not chosen,
+because a `*`-leading subject overlaps NATS's reserved `$JS.>` namespace and the server
+refuses such a stream otherwise. Calling it on an existing stream updates it in place;
+if the update is refused (storage type and retention policy are immutable) the existing
+stream is kept with a warning, unless it does not route the requested subjects — that case
+raises, because it would mean silently routing every message nowhere.
+
+`pull_subscribe_any_tenant` binds a **durable** consumer: explicit acks, unlimited
+redelivery (`max_deliver = -1`), and a server-side cursor that outlives the process. A
+restarted consumer resumes at its last ack; a brand-new one replays whatever the stream
+still holds. Because redelivery is unlimited, a consumer **must** `msg.term()` anything it
+can never process, or that message loops forever.
 
 ### Failure behavior
 
@@ -220,21 +247,47 @@ false negative leaks a credential to a browser tab, and those are not symmetric.
 
 ### Delivery posture
 
-**Best-effort, at-most-once.** Core NATS pub/sub — an event emitted while the core is down
-is *gone*, not queued. JetStream is enabled on the server and deliberately unused here
-(ADR-0103 §4). This is why the core's `module_events` table, not the bus, is the copy of
-record: "what happened" is a question you ask Postgres. Promoting the spine to JetStream is
-a named follow-up; `dedup_key` already makes redelivery safe, so it is a transport change
-rather than a contract change.
+**At-least-once from the NATS server to the durable log; best-effort from the emitter to the
+NATS server.** Read that as two halves, because they make different promises.
+
+**The consumer half is guaranteed.** The spine's subjects are covered by the JetStream
+stream `EPICURUS_EVENTS`, and the core consumes it through the durable pull consumer
+`core-event-intake`, which acks a message **only after the row is committed** to
+`module_events`. So a core that is restarting, deploying, or crashed misses nothing: the
+stream holds the events, the durable cursor resumes where the last ack landed, and anything
+in flight when the process died comes back. A store that fails is *naked*, not dropped, and
+redelivery is unlimited — a database outage costs latency, not history. Redelivery is safe
+because `dedup_key` is unique in the log, so a repeat delivery collapses to a no-op.
+
+**The publisher half is not.** `emit_event` is still a plain core-NATS publish: it returns
+once the local NATS client accepts the message, not once the server has stored it. Three
+windows stay open, and all three require NATS itself to be down or dying:
+
+| Window | What happens | Who notices |
+| --- | --- | --- |
+| NATS unreachable at publish | The client buffers and flushes on reconnect; an emitter that dies first loses those events. A *closed* client raises instead. | Silent, unless the client was closed. |
+| Stream at its size/age limit | The stream discards its **oldest** messages to accept the new one. | Silent to the publisher. |
+| Unclean server crash | A message accepted but not yet written to the stream file is lost. | Silent. |
+
+This is deliberate and it is not a trade that was available to make differently: a
+tenant-scoped subject puts the tenant in the leading token, so the stream's subject starts
+with `*` — and NATS refuses a stream whose subjects overlap its reserved `$JS.>` namespace
+unless publisher acks are disabled (`no_ack`). Publisher-side acks would therefore require
+changing the *subject scheme*, which is a contract change (§2), not a transport one. See
+ADR-0103 §4 as amended by the JetStream ADR.
+
+The `module_events` table remains the copy of record. The stream is a **delivery buffer** in
+front of it — bounded (7 days, 512 MiB, discarding oldest first), not a second archive.
 
 ### The durable log
 
-The core subscribes `*.events.>` (one subscription, every tenant), verifies that the
+The core consumes `*.events.>` (one durable consumer, every tenant), verifies that the
 subject's tenant and the envelope's `tenant_id` agree, and records each event in the
 tenant-scoped `module_events` table. Duplicates — same `(tenant, module, dedup_key)` — are
 stored once; **first write wins**, since a later delivery of an already-recorded change
 carries no newer truth. Retention is time-based (`EVENTS_RETENTION_DAYS`, default 30 days;
-`0` disables). Malformed and mis-tenanted messages are logged and dropped.
+`0` disables). Malformed and mis-tenanted messages are logged and **terminated** — refused
+permanently rather than retried, because no number of redeliveries makes them valid.
 
 Read it over HTTP — `GET /platform/v1/events` and `GET /platform/v1/events/stream` — see
 [platform-api](platform-api.md). The Observability screen's **Events** tab is the live tail.

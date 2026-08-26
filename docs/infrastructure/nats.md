@@ -103,8 +103,22 @@ own token, is delivered. See [Secrets](secrets.md).
 
 ## Data model
 
-None. NATS owns the `nats-data` named volume for JetStream's store (`/data`), but no
-durable streams are created by app code yet — the bus is pub/sub + request/reply.
+NATS owns the `nats-data` named volume, which is JetStream's store (`/data`). One durable
+stream lives there:
+
+| Stream | Subjects | Shape | Owner |
+| --- | --- | --- | --- |
+| `EPICURUS_EVENTS` | `*.events.>` — every tenant's [module event spine](../reference/events.md) | `limits` retention, `discard: old`, `file` storage, 7 days / 512 MiB, `no_ack: true` | Provisioned by core-app on startup (idempotent); consumed by the durable `core-event-intake` |
+
+`no_ack` is forced by the subject scheme, not chosen: tenant-scoped subjects put the tenant
+in the leading token, so the stream's subject starts with `*`, and NATS refuses a stream
+whose subjects overlap its reserved `$JS.>` namespace unless publisher acks are off. Nothing
+here uses JetStream publish acks — `EventBus.publish` is plain core NATS on every path — so
+the practical effect is nil; the consequence worth knowing is that publisher-side acks would
+require changing the subject scheme itself.
+
+Everything else on the bus (`<tenant>.<module>.<type>` request/reply, `llm.usage`,
+`messaging.inbound`, …) is plain pub/sub and is **not** captured by any stream.
 
 ## Dependencies
 

@@ -4,20 +4,35 @@ The store's dedup and the intake's tenancy check are the two rules the rest of t
 trusts, so both are tested for what they *reject*. The feed's history→live handover has a
 subtle ordering property (an event landing mid-replay must not be lost) that is easy to
 break and invisible in normal use, so it gets a test that forces the race.
+
+Since the spine became at-least-once, one more rule joins them and it is the most important
+of the three: **a message's disposition follows the durable write.** Acked once the row is
+committed, naked when the store refused it, terminated when it can never be stored. Those
+are asserted directly here — the fake message records what it was told, so the *ordering*
+(row first, ack second) is a test rather than a comment. What only a real broker can prove —
+that an unacked message actually comes back — lives in the integration suite.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import pytest
+from nats.aio.msg import Msg
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from epicurus_core import EntityRef, Event, EventEnvelope
+from epicurus_core import (
+    EVENTS_DURABLE,
+    EVENTS_STREAM,
+    EVENTS_STREAM_SUBJECT,
+    EntityRef,
+    EventEnvelope,
+)
+from epicurus_core_app import event_log
 from epicurus_core_app.event_log import (
     EventIntake,
     EventLogStore,
@@ -53,20 +68,46 @@ def _envelope(
     )
 
 
-def _msg(envelope: EventEnvelope, *, subject: str | None = None) -> Event:
+class _FakeMsg:
+    """A JetStream delivery that records its disposition instead of talking to a broker.
+
+    ``dispositions`` is what makes the ack-after-commit rule testable: the store appends to
+    the *same* list, so an assertion can state the ordering rather than trust it.
+    """
+
+    def __init__(self, subject: str, data: bytes, *, log: list[str] | None = None) -> None:
+        self.subject = subject
+        self.data = data
+        self.dispositions = log if log is not None else []
+        self.ack_error: Exception | None = None
+
+    async def ack(self) -> None:
+        self.dispositions.append("ack")
+        if self.ack_error is not None:
+            raise self.ack_error
+
+    async def nak(self, delay: float | None = None) -> None:
+        self.dispositions.append(f"nak:{delay}")
+
+    async def term(self) -> None:
+        self.dispositions.append("term")
+
+
+def _msg(
+    envelope: EventEnvelope, *, subject: str | None = None, log: list[str] | None = None
+) -> _FakeMsg:
     """The envelope as it arrives off the wire, on its tenant-scoped subject."""
-    return Event(
-        subject=subject or f"{envelope.tenant_id}.events.{envelope.type}",
-        data=envelope.model_dump_json().encode(),
+    return _FakeMsg(
+        subject or f"{envelope.tenant_id}.events.{envelope.type}",
+        envelope.model_dump_json().encode(),
+        log=log,
     )
 
 
-def _as_agen(it: AsyncIterator[LoggedEvent]) -> AsyncGenerator[LoggedEvent, None]:
-    """``EventIntake.stream`` is declared as ``AsyncIterator`` but is really a generator —
-    narrow it so tests can call ``aclose()``/get a proper ``Coroutine`` from ``__anext__()``.
-    """
-    assert isinstance(it, AsyncGenerator)
-    return it
+async def _consume(intake: EventIntake, msg: _FakeMsg) -> _FakeMsg:
+    """Feed one delivery through the intake, returning the message for its dispositions."""
+    await intake._consume(cast("Msg", msg))
+    return msg
 
 
 async def _fresh_store() -> EventLogStore:
@@ -80,30 +121,64 @@ async def _fresh_store() -> EventLogStore:
     return store
 
 
-class _FakeBus:
-    """Captures the intake's subscription instead of talking to NATS."""
+class _FakeSub:
+    """A pull subscription that hands over queued batches, then idles like a real one."""
 
     def __init__(self) -> None:
-        self.subscribed: list[str] = []
+        self.batches: list[list[_FakeMsg]] = []
+        self.errors: list[Exception] = []
         self.unsubscribed = 0
+        self.fetches = 0
 
-    async def subscribe_any_tenant(
-        self, subject: str, handler: object, *, queue: str = ""
-    ) -> object:
+    async def fetch(self, batch: int = 1, timeout: float | None = 5) -> list[Msg]:
+        self.fetches += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        if self.batches:
+            return [cast("Msg", m) for m in self.batches.pop(0)]
+        # Nothing pending: park for the fetch window and time out, exactly as JetStream
+        # does. Returning immediately would turn the intake's loop into a spin.
+        await asyncio.sleep(timeout or 0)
+        raise TimeoutError("nats: timeout")
+
+    async def unsubscribe(self) -> None:
+        self.unsubscribed += 1
+
+
+class _FakeBus:
+    """Captures the intake's provisioning and binding instead of talking to NATS."""
+
+    def __init__(self) -> None:
+        self.streams: list[tuple[str, list[str]]] = []
+        self.subscribed: list[str] = []
+        self.durables: list[str] = []
+        self.bind_errors: list[Exception] = []
+        self.sub = _FakeSub()
+
+    async def ensure_stream(
+        self, name: str, subjects: list[str], *, max_age_s: float, max_bytes: int
+    ) -> None:
+        if self.bind_errors:
+            raise self.bind_errors.pop(0)
+        self.streams.append((name, list(subjects)))
+
+    async def pull_subscribe_any_tenant(
+        self, subject: str, *, durable: str, stream: str, ack_wait_s: float
+    ) -> _FakeSub:
         self.subscribed.append(subject)
-        outer = self
+        self.durables.append(durable)
+        return self.sub
 
-        class _Sub:
-            async def unsubscribe(self) -> None:
-                outer.unsubscribed += 1
-
-        return _Sub()
+    @property
+    def unsubscribed(self) -> int:
+        return self.sub.unsubscribed
 
 
 async def _fresh_intake() -> tuple[EventLogStore, EventIntake, _FakeBus]:
     store = await _fresh_store()
     bus = _FakeBus()
-    intake = EventIntake(store, bus)  # type: ignore[arg-type]  # structural: only subscribe_any_tenant
+    # Structural: the intake only ever calls ensure_stream / pull_subscribe_any_tenant.
+    intake = EventIntake(store, cast("Any", bus))
     return store, intake, bus
 
 
@@ -227,31 +302,106 @@ async def test_prune_keeps_rows_inside_the_window() -> None:
 # ── the intake ───────────────────────────────────────────────────────────────
 
 
-async def test_start_subscribes_across_tenants_and_is_idempotent() -> None:
+async def test_start_provisions_the_stream_and_binds_the_durable_consumer() -> None:
     _store, intake, bus = await _fresh_intake()
     await intake.start()
-    await intake.start()
-    # One subscription, cross-tenant: a per-tenant list would silently miss a tenant added
-    # at runtime.
-    assert bus.subscribed == ["events.>"]
-    await intake.stop()
+    try:
+        # One stream over one cross-tenant subject: a per-tenant stream or consumer would
+        # silently miss a tenant added at runtime (constraint #1).
+        assert bus.streams == [(EVENTS_STREAM, [EVENTS_STREAM_SUBJECT])]
+        assert bus.subscribed == ["events.>"]
+        assert bus.durables == [EVENTS_DURABLE]
+    finally:
+        await intake.stop()
     assert bus.unsubscribed == 1
 
 
-async def test_handle_records_a_wire_event() -> None:
-    store, intake, _bus = await _fresh_intake()
-    await intake._handle(_msg(_envelope(dedup_key="k1")))
-    rows = await store.recent(tenant=TENANT)
-    assert [r.dedup_key for r in rows] == ["k1"]
+async def test_start_is_idempotent() -> None:
+    # Called on every boot, and `start()` is re-entrant on a running intake. Provisioning
+    # twice must not create a second stream or a second cursor — a second durable name is
+    # how you silently replay the entire stream.
+    _store, intake, bus = await _fresh_intake()
+    await intake.start()
+    await intake.start()
+    try:
+        assert len(bus.streams) == 1
+        assert len(bus.subscribed) == 1
+    finally:
+        await intake.stop()
 
 
-async def test_handle_drops_malformed_json() -> None:
+async def test_start_retries_a_cold_boot_race_with_nats(monkeypatch: pytest.MonkeyPatch) -> None:
+    # compose starts the core on nats `service_started`, not on JetStream readiness, so a
+    # cold boot can lose a race by a beat. Without the retry that race is *permanent*: the
+    # spine records nothing until someone restarts the core.
+    monkeypatch.setattr(event_log, "_BIND_RETRY_S", 0.01)
+    _store, intake, bus = await _fresh_intake()
+    bus.bind_errors = [RuntimeError("jetstream not ready")]
+    await intake.start()
+    try:
+        assert len(bus.streams) == 1
+    finally:
+        await intake.stop()
+
+
+async def test_start_raises_once_the_retries_are_spent(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Loud, not silent: the caller logs it and the core comes up without intake, which an
+    # operator can see. A swallowed failure looks exactly like "no module emitted anything".
+    monkeypatch.setattr(event_log, "_BIND_RETRY_S", 0.01)
+    _store, intake, bus = await _fresh_intake()
+    bus.bind_errors = [RuntimeError("nats down")] * 5
+    with pytest.raises(RuntimeError, match="nats down"):
+        await intake.start()
+
+
+async def test_consume_records_a_wire_event_then_acks_it() -> None:
+    """The ordering that *is* the at-least-once guarantee: row first, ack second.
+
+    Both write into the same list, so this asserts the sequence rather than describing it.
+    Reversed, a core that died between ack and commit would drop the event with the broker
+    believing it delivered — the exact loss this transport removes.
+    """
     store, intake, _bus = await _fresh_intake()
-    await intake._handle(Event(subject="local.events.echo.pinged", data=b"not json"))
+    order: list[str] = []
+    real_append = store.append
+
+    async def _tracking_append(envelope: EventEnvelope) -> LoggedEvent | None:
+        result = await real_append(envelope)
+        order.append("append")
+        return result
+
+    store.append = _tracking_append  # type: ignore[method-assign]
+
+    msg = await _consume(intake, _msg(_envelope(dedup_key="k1"), log=order))
+    assert msg.dispositions == ["append", "ack"]
+    assert [r.dedup_key for r in await store.recent(tenant=TENANT)] == ["k1"]
+
+
+async def test_consume_naks_when_the_store_refuses_the_event() -> None:
+    # A database outage must cost latency, not history. Naked, so it comes back — the old
+    # transport logged the exception and dropped the event on the floor.
+    store, intake, _bus = await _fresh_intake()
+
+    async def _boom(envelope: EventEnvelope) -> LoggedEvent | None:
+        raise RuntimeError("db down")
+
+    store.append = _boom  # type: ignore[method-assign]
+
+    msg = await _consume(intake, _msg(_envelope(dedup_key="k1")))
+    assert msg.dispositions == ["nak:5.0"]
+    assert "ack" not in msg.dispositions
+
+
+async def test_consume_terminates_malformed_json() -> None:
+    # Terminate, not nak: unlimited redelivery plus an unparseable message is an infinite
+    # loop, and no number of attempts will make `not json` parse.
+    store, intake, _bus = await _fresh_intake()
+    msg = await _consume(intake, _FakeMsg("local.events.echo.pinged", b"not json"))
+    assert msg.dispositions == ["term"]
     assert await store.count() == 0  # logged and dropped; intake stays alive
 
 
-async def test_handle_drops_a_payload_that_breaks_the_contract() -> None:
+async def test_consume_terminates_a_payload_that_breaks_the_contract() -> None:
     # An emitter on an older library could put a credential or a mail body on the wire.
     # The contract is enforced on the way *in*, not merely requested at the source, so the
     # envelope's own validators reject it here and nothing is filed.
@@ -260,23 +410,51 @@ async def test_handle_drops_a_payload_that_breaks_the_contract() -> None:
         '{"schema_version":1,"tenant_id":"local","module":"echo","type":"echo.pinged",'
         '"occurred_at":"2026-07-17T12:00:00Z","dedup_key":"k1","payload":{"api_key":"sk-1"}}'
     )
-    await intake._handle(Event(subject="local.events.echo.pinged", data=raw.encode()))
+    msg = await _consume(intake, _FakeMsg("local.events.echo.pinged", raw.encode()))
+    assert msg.dispositions == ["term"]
     assert await store.count() == 0
 
 
-async def test_handle_drops_a_tenant_mismatch() -> None:
+async def test_consume_terminates_a_tenant_mismatch() -> None:
     # The subject and the envelope are two independent tenant claims. A module publishing
     # one tenant's subject with another's envelope is buggy or hostile; either way the
-    # event must not be filed under a guess.
+    # event must not be filed under a guess — and redelivering it would not change whose
+    # it is.
     store, intake, _bus = await _fresh_intake()
     envelope = _envelope(tenant=OTHER_TENANT, dedup_key="k1")
-    await intake._handle(_msg(envelope, subject="local.events.echo.pinged"))
+    msg = await _consume(intake, _msg(envelope, subject="local.events.echo.pinged"))
+    assert msg.dispositions == ["term"]
     assert await store.count() == 0
+
+
+async def test_a_redelivered_event_is_recorded_once_and_acked() -> None:
+    """Dedup is what makes at-least-once *safe*, and it is enforced, not advisory.
+
+    The second delivery re-runs `append`, the unique constraint rejects the insert, and the
+    consumer acks a no-op. One row, and the redelivery does not come back a third time.
+    """
+    store, intake, _bus = await _fresh_intake()
+    first = await _consume(intake, _msg(_envelope(dedup_key="same")))
+    second = await _consume(intake, _msg(_envelope(dedup_key="same")))
+    assert first.dispositions == ["ack"]
+    assert second.dispositions == ["ack"]
+    assert await store.count() == 1
+
+
+async def test_a_failed_ack_does_not_unwind_the_row() -> None:
+    # A lost ack costs one redelivery, which dedup absorbs. Rolling the row back instead
+    # would trade a harmless duplicate delivery for real data loss.
+    store, intake, _bus = await _fresh_intake()
+    msg = _msg(_envelope(dedup_key="k1"))
+    msg.ack_error = RuntimeError("broker gone")
+    await _consume(intake, msg)
+    assert await store.count() == 1
 
 
 async def test_listeners_fire_for_new_events_only() -> None:
     # The seam the automations matcher plugs into. A duplicate is not a change, so a
-    # consumer must not see it twice.
+    # consumer must not see it twice — which is also why a redelivery is invisible to a
+    # listener rather than a double-trigger.
     _store, intake, _bus = await _fresh_intake()
     seen: list[LoggedEvent] = []
 
@@ -284,8 +462,8 @@ async def test_listeners_fire_for_new_events_only() -> None:
         seen.append(entry)
 
     intake.on_event(_listener)
-    await intake._handle(_msg(_envelope(dedup_key="same")))
-    await intake._handle(_msg(_envelope(dedup_key="same")))
+    await _consume(intake, _msg(_envelope(dedup_key="same")))
+    await _consume(intake, _msg(_envelope(dedup_key="same")))
     assert [e.dedup_key for e in seen] == ["same"]
 
 
@@ -302,10 +480,59 @@ async def test_a_raising_listener_does_not_break_intake() -> None:
 
     intake.on_event(_bad)
     intake.on_event(_good)
-    await intake._handle(_msg(_envelope(dedup_key="k1")))
-    # The event is still recorded, and the second listener still ran.
+    msg = await _consume(intake, _msg(_envelope(dedup_key="k1")))
+    # The event is still recorded and acked, and the second listener still ran.
     assert await store.count() == 1
     assert calls == ["bad", "good"]
+    assert msg.dispositions == ["ack"]
+
+
+async def test_a_slow_listener_does_not_hold_the_ack() -> None:
+    """Fan-out runs *after* the ack, so a wedged consumer cannot cause a redelivery storm.
+
+    Holding the ack until every listener returned would let a slow one blow through
+    ``ack_wait`` — and the redelivery it triggered would dedup to a no-op that skips the
+    listeners anyway. All cost, no benefit.
+    """
+    _store, intake, _bus = await _fresh_intake()
+    order: list[str] = []
+
+    async def _slow(entry: LoggedEvent) -> None:
+        await asyncio.sleep(0)  # a real listener yields; the ack must already be gone
+        order.append("listener")
+
+    intake.on_event(_slow)
+    msg = await _consume(intake, _msg(_envelope(dedup_key="k1"), log=order))
+    assert order == ["ack", "listener"]
+    assert msg.dispositions is order
+
+
+async def test_the_pull_loop_survives_a_failing_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A NATS hiccup must not end intake for the life of the process — the loop backs off
+    # and keeps pulling.
+    monkeypatch.setattr(event_log, "_FETCH_BACKOFF_S", 0.01)
+    store, intake, bus = await _fresh_intake()
+    bus.sub.errors = [RuntimeError("connection reset")]
+    bus.sub.batches = [[_msg(_envelope(dedup_key="after-the-hiccup"))]]
+    await intake.start()
+    try:
+        for _ in range(100):
+            if await store.count():
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        await intake.stop()
+    assert bus.sub.fetches >= 2  # it pulled again after the failure
+    assert [r.dedup_key for r in await store.recent(tenant=TENANT)] == ["after-the-hiccup"]
+
+
+async def test_stop_is_safe_before_start_and_twice() -> None:
+    # Shutdown runs on paths where startup failed, so stop() must never assume a consumer.
+    _store, intake, _bus = await _fresh_intake()
+    await intake.stop()
+    await intake.start()
+    await intake.stop()
+    await intake.stop()
 
 
 # ── the feed ─────────────────────────────────────────────────────────────────
@@ -316,7 +543,7 @@ async def test_stream_replays_history_oldest_first() -> None:
     for i in range(3):
         await store.append(_envelope(dedup_key=f"k{i}"))
     seen: list[str] = []
-    agen = _as_agen(intake.stream(tenant=TENANT))
+    agen = intake.stream(tenant=TENANT)
     try:
         async for entry in agen:
             seen.append(entry.dedup_key)
@@ -330,10 +557,10 @@ async def test_stream_replays_history_oldest_first() -> None:
 
 async def test_stream_yields_live_events_after_history() -> None:
     _store, intake, _bus = await _fresh_intake()
-    agen = _as_agen(intake.stream(tenant=TENANT))
+    agen = intake.stream(tenant=TENANT)
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)  # let it register its queue and drain the empty history
-    await intake._handle(_msg(_envelope(dedup_key="live")))
+    await _consume(intake, _msg(_envelope(dedup_key="live")))
     entry = await asyncio.wait_for(pull, timeout=5)
     assert entry.dedup_key == "live"
     await agen.aclose()
@@ -357,10 +584,10 @@ async def test_stream_does_not_lose_an_event_that_lands_during_replay() -> None:
 
     store.recent = _slow_recent  # type: ignore[method-assign]
 
-    agen = _as_agen(intake.stream(tenant=TENANT))
+    agen = intake.stream(tenant=TENANT)
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)  # the generator is now blocked inside the history query
-    await intake._handle(_msg(_envelope(dedup_key="mid-replay")))
+    await _consume(intake, _msg(_envelope(dedup_key="mid-replay")))
     gate.set()
 
     seen: list[str] = []
@@ -376,11 +603,11 @@ async def test_stream_does_not_lose_an_event_that_lands_during_replay() -> None:
 
 async def test_stream_is_tenant_scoped() -> None:
     _store, intake, _bus = await _fresh_intake()
-    agen = _as_agen(intake.stream(tenant=TENANT))
+    agen = intake.stream(tenant=TENANT)
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)
-    await intake._handle(_msg(_envelope(tenant=OTHER_TENANT, dedup_key="theirs")))
-    await intake._handle(_msg(_envelope(tenant=TENANT, dedup_key="mine")))
+    await _consume(intake, _msg(_envelope(tenant=OTHER_TENANT, dedup_key="theirs")))
+    await _consume(intake, _msg(_envelope(tenant=TENANT, dedup_key="mine")))
     entry = await asyncio.wait_for(pull, timeout=5)
     assert entry.dedup_key == "mine"  # the other tenant's event never surfaced
     await agen.aclose()
@@ -388,11 +615,13 @@ async def test_stream_is_tenant_scoped() -> None:
 
 async def test_stream_filters_live_events_by_module() -> None:
     _store, intake, _bus = await _fresh_intake()
-    agen = _as_agen(intake.stream(tenant=TENANT, module="mail"))
+    agen = intake.stream(tenant=TENANT, module="mail")
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)
-    await intake._handle(_msg(_envelope(module="echo", dedup_key="e")))
-    await intake._handle(_msg(_envelope(module="mail", event_type="mail.received", dedup_key="m")))
+    await _consume(intake, _msg(_envelope(module="echo", dedup_key="e")))
+    await _consume(
+        intake, _msg(_envelope(module="mail", event_type="mail.received", dedup_key="m"))
+    )
     entry = await asyncio.wait_for(pull, timeout=5)
     assert entry.dedup_key == "m"
     await agen.aclose()
@@ -401,7 +630,7 @@ async def test_stream_filters_live_events_by_module() -> None:
 async def test_stream_unregisters_its_subscriber_on_close() -> None:
     # Otherwise every closed browser tab leaks a queue that intake keeps filling forever.
     _store, intake, _bus = await _fresh_intake()
-    agen = _as_agen(intake.stream(tenant=TENANT))
+    agen = intake.stream(tenant=TENANT)
     pull = asyncio.create_task(agen.__anext__())
     await asyncio.sleep(0.05)  # the generator has registered and is polling its queue
     assert len(intake._subscribers) == 1

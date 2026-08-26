@@ -5,26 +5,52 @@ the thing that listens. It owns three pieces that are separable on purpose:
 
 * :class:`EventLogStore` — the tenant-scoped ``module_events`` table. Append, read back,
   prune. Knows nothing about NATS.
-* :class:`EventIntake` — one cross-tenant subscription that parses each message, stores
-  it, and fans it out live. Knows nothing about HTTP.
+* :class:`EventIntake` — one cross-tenant durable consumer that parses each message, stores
+  it, acks it, and fans it out live. Knows nothing about HTTP.
 * the feed — :meth:`EventIntake.stream`, which replays recent history then trickles live
   events, for the observability console's Events tab (ADR-0031's second surface).
 
 ## Why the core keeps its own copy
 
-The bus is fire-and-forget: an event published while the core is down is gone, and NATS
-core holds no history to replay. So "what happened" cannot be a question you ask the bus
-— it has to be a table. That table is also what makes the automations engine possible to
-reason about (a run can point at the exact rows that triggered it) and what lets the feed
-survive a page reload, or a restart.
+"What happened" is a question you ask Postgres, not the bus. JetStream now holds the events
+for a week (see below), but that is a delivery buffer, not an archive: it is bounded by
+size, it discards its oldest under pressure, and it cannot be queried by tenant, module, or
+time the way the feed, the automations matcher, and the runs ledger all need. The table is
+also what makes a run auditable (it points at the exact rows that triggered it) and what
+lets the feed survive a page reload.
+
+## Delivery — at-least-once, and the ack is the contract
+
+The spine is a JetStream stream (``*.events.>``) consumed through a **durable pull
+consumer**. The rule that makes it worth anything is one line of ordering: **the message is
+acked only after the row is committed.** So:
+
+* A core that dies mid-message never acked it — JetStream redelivers it after ``ack_wait``.
+* A core that restarts binds the *same* durable and resumes at its own cursor. Events
+  emitted while it was down are still in the stream, and they arrive on the way back up.
+* A store that fails (database down) is **naked**, not acked: the event comes back rather
+  than being logged-and-lost. Redelivery is unlimited, deliberately — a delivery cap would
+  turn a long outage into permanent silent loss.
+* A message that can *never* be stored — malformed JSON, a failed envelope validator, a
+  tenant mismatch — is **terminated**, not naked. It will not become valid on the tenth
+  attempt, and an unlimited-redelivery consumer with no term is an infinite loop.
+
+Fan-out to :meth:`EventIntake.on_event` listeners happens *after* the ack, and that is on
+purpose. A slow listener holding the ack would eventually blow through ``ack_wait`` and
+trigger a redelivery — which dedup would then absorb as a no-op, skipping the listeners
+anyway. Acking at the durable write puts the guarantee exactly where the copy of record is.
 
 ## Dedup
 
-Uniqueness is ``(tenant, module, dedup_key)``, enforced by the database rather than a
-read-then-write check, so two deliveries of the same change collapse to one row even if
-they race. Emitters are expected to be chatty and repetitive — a poll loop re-seeing the
-same mail every 60s is the *normal* case, not the error case — so the second insert
-losing quietly is the designed outcome, not a failure.
+Uniqueness is ``(tenant, module, dedup_key)``, enforced by a database constraint rather than
+a read-then-write check, so two deliveries of the same change collapse to one row even if
+they race. That constraint is what makes at-least-once delivery *safe* rather than merely
+survivable: a redelivered message re-runs ``append``, the insert loses to the constraint,
+and the consumer acks a no-op.
+
+Emitters are expected to be chatty and repetitive — a poll loop re-seeing the same mail
+every 60s is the *normal* case, not the error case — so the second insert losing quietly is
+the designed outcome, not a failure.
 
 Note what this does **not** do: it never updates the stored row from the duplicate. First
 write wins. An event describes a change that already happened, so a later delivery of the
@@ -32,8 +58,8 @@ same change carries no newer truth.
 
 ## Tenancy
 
-The subscription is cross-tenant (``*.events.>``) — see
-:meth:`~epicurus_core.events.EventBus.subscribe_any_tenant` for why the core, and only
+The consumer is cross-tenant (``*.events.>``) — see
+:meth:`~epicurus_core.events.EventBus.pull_subscribe_any_tenant` for why the core, and only
 the core, does that. Each message therefore carries two independent tenant claims: the
 subject's leading token and the envelope's ``tenant_id``. They must agree. A module that
 publishes tenant A's subject with tenant B's envelope is either buggy or hostile, and
@@ -44,10 +70,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from nats.aio.msg import Msg
+from nats.js import JetStreamContext
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import (
     JSON,
@@ -65,9 +93,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import (
+    EVENTS_ACK_WAIT_S,
+    EVENTS_DURABLE,
+    EVENTS_STREAM,
+    EVENTS_STREAM_MAX_AGE_S,
+    EVENTS_STREAM_MAX_BYTES,
+    EVENTS_STREAM_SUBJECT,
     EVENTS_WILDCARD,
     EntityRef,
-    Event,
     EventBus,
     EventEnvelope,
     get_logger,
@@ -85,6 +118,28 @@ FEED_HISTORY = 200
 # not grow the core's memory without limit; past this, its oldest pending events are
 # dropped (the feed is a tail, not a ledger — the ledger is the table).
 _SUBSCRIBER_QUEUE_MAX = 500
+
+# How many messages one pull asks JetStream for, and how long it waits for them. The
+# batch is a latency/throughput knob only — every message in it is stored and acked
+# individually, so a larger batch never widens the at-risk window. The timeout is what
+# makes the loop cancellable promptly at shutdown: it spends its idle life parked here.
+_FETCH_BATCH = 32
+_FETCH_TIMEOUT_S = 1.0
+
+# Backoff after a *failed* pull (connection dropped, JetStream unavailable). Long enough
+# that a NATS outage does not become a hot loop, short enough that recovery is prompt.
+_FETCH_BACKOFF_S = 2.0
+
+# Redelivery delay asked for when a store fails. The usual cause is the database being
+# down or overloaded, so retrying in a second or two is pointless — give it room.
+_NAK_DELAY_S = 5.0
+
+# Boot-time retries for binding the consumer. compose starts the core on nats
+# `service_started`, not on a JetStream-ready healthcheck, so a cold boot can race the
+# server by a beat. Without this the race is permanent: `start()` fails once, the caller
+# logs it, and the spine records nothing until someone restarts the core.
+_BIND_ATTEMPTS = 3
+_BIND_RETRY_S = 1.0
 
 
 class LoggedEvent(BaseModel):
@@ -282,73 +337,180 @@ class EventLogStore:
 
 
 class EventIntake:
-    """Subscribes the whole spine, records what arrives, and fans it out live.
+    """Consumes the whole spine durably, records what arrives, and fans it out live.
 
-    One subscription serves every tenant. Handlers registered via :meth:`on_event` run
+    One durable consumer serves every tenant. Handlers registered via :meth:`on_event` run
     after a successful store — that is the seam the automations engine's matcher plugs
-    into (a companion issue), and the reason it is a list of callbacks rather than a
-    direct call: intake has no business knowing what consumes it.
+    into, and the reason it is a list of callbacks rather than a direct call: intake has no
+    business knowing what consumes it.
+
+    *ack_wait_s* is exposed for tests that need to observe a redelivery inside a test's
+    lifetime; production takes the default. It is set when the durable consumer is
+    *created* — a rebind to an existing durable keeps whatever it was created with, which
+    is how a durable is supposed to behave.
     """
 
-    def __init__(self, store: EventLogStore, bus: EventBus) -> None:
+    def __init__(
+        self, store: EventLogStore, bus: EventBus, *, ack_wait_s: float = EVENTS_ACK_WAIT_S
+    ) -> None:
         self._store = store
         self._bus = bus
+        self._ack_wait_s = ack_wait_s
         self._subscribers: list[asyncio.Queue[LoggedEvent]] = []
         self._listeners: list[Any] = []
-        self._sub: Any = None
+        self._sub: JetStreamContext.PullSubscription | None = None
+        self._task: asyncio.Task[None] | None = None
 
     def on_event(self, listener: Any) -> None:
         """Register ``async listener(LoggedEvent)``, called for each newly-stored event.
 
         Not called for duplicates — a consumer should act on a *change*, and a redelivery
-        of a change it already saw is not one.
+        of a change it already saw is not one. That is also what makes at-least-once
+        delivery invisible to a listener: only the delivery that actually wrote the row
+        reaches it.
         """
         self._listeners.append(listener)
 
     async def start(self) -> None:
-        """Subscribe to ``*.events.>`` (idempotent)."""
+        """Provision the stream, bind the durable consumer, start pulling (idempotent).
+
+        Both steps are safe to repeat on every boot: ``ensure_stream`` accepts an existing
+        stream, and binding a durable that already exists *resumes* it rather than
+        replaying from zero. Raises if the bind cannot be made after
+        :data:`_BIND_ATTEMPTS` tries — the caller logs it, and the spine records nothing
+        until the core is restarted, which is loud by design.
+        """
         if self._sub is not None:
             return
-        self._sub = await self._bus.subscribe_any_tenant(EVENTS_WILDCARD, self._handle)
-        log.info("event intake subscribed", subject=f"*.{EVENTS_WILDCARD}")
+        last: Exception | None = None
+        for attempt in range(1, _BIND_ATTEMPTS + 1):
+            try:
+                await self._bind()
+            except Exception as exc:
+                last = exc
+                log.warning(
+                    "event intake could not bind the durable consumer",
+                    attempt=attempt,
+                    attempts=_BIND_ATTEMPTS,
+                    error=str(exc),
+                )
+                if attempt < _BIND_ATTEMPTS:
+                    await asyncio.sleep(_BIND_RETRY_S)
+            else:
+                return
+        if last is not None:  # always true here; the loop only falls through on failure
+            raise last
+
+    async def _bind(self) -> None:
+        await self._bus.ensure_stream(
+            EVENTS_STREAM,
+            [EVENTS_STREAM_SUBJECT],
+            max_age_s=EVENTS_STREAM_MAX_AGE_S,
+            max_bytes=EVENTS_STREAM_MAX_BYTES,
+        )
+        self._sub = await self._bus.pull_subscribe_any_tenant(
+            EVENTS_WILDCARD,
+            durable=EVENTS_DURABLE,
+            stream=EVENTS_STREAM,
+            ack_wait_s=self._ack_wait_s,
+        )
+        self._task = asyncio.create_task(self._pull_forever(self._sub))
+        log.info(
+            "event intake consuming",
+            stream=EVENTS_STREAM,
+            durable=EVENTS_DURABLE,
+            subject=EVENTS_STREAM_SUBJECT,
+        )
 
     async def stop(self) -> None:
-        """Unsubscribe (best-effort) so shutdown is clean."""
-        if self._sub is None:
-            return
-        try:
-            await self._sub.unsubscribe()
-        except Exception as exc:  # draining/closed already — never fail shutdown on it
-            log.warning("event intake unsubscribe failed", error=str(exc))
-        finally:
-            self._sub = None
+        """Stop pulling and unsubscribe (best-effort) so shutdown is clean.
 
-    async def _handle(self, event: Event) -> None:
-        """Parse → verify tenancy → store → fan out. Never raises (the bus logs and drops).
+        A message being stored when this runs is simply never acked, so JetStream hands it
+        back after ``ack_wait``. That is the correct outcome and the reason the ordering in
+        :meth:`_consume` matters: losing the race costs a redelivery, never a row.
+        """
+        # Clear both handles *before* awaiting anything, so a second stop() (or a start()
+        # racing shutdown) sees terminal state rather than a half-torn-down consumer.
+        task, self._task = self._task, None
+        sub, self._sub = self._sub, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if sub is not None:
+            try:
+                await sub.unsubscribe()
+            except Exception as exc:  # draining/closed already — never fail shutdown on it
+                log.warning("event intake unsubscribe failed", error=str(exc))
 
-        A malformed or mis-tenanted message is logged and dropped, matching how the
-        inbound-messaging consumer treats a bad payload: one module's bad emit must not
-        take down intake for every other module.
+    async def _pull_forever(self, sub: JetStreamContext.PullSubscription) -> None:
+        """Pull batches until cancelled. Never dies on a broker hiccup.
+
+        ``CancelledError`` is a ``BaseException``, so it passes straight through the
+        ``except Exception`` below and out — shutdown is not an error to be retried.
+        """
+        while True:
+            try:
+                msgs = await sub.fetch(batch=_FETCH_BATCH, timeout=_FETCH_TIMEOUT_S)
+            except TimeoutError:
+                # No traffic in the window. `nats.errors.TimeoutError` subclasses the
+                # builtin, so this catches both it and asyncio's.
+                continue
+            except Exception as exc:
+                log.warning("event intake pull failed; retrying", error=str(exc))
+                await asyncio.sleep(_FETCH_BACKOFF_S)
+                continue
+            for msg in msgs:
+                await self._consume(msg)
+
+    async def _consume(self, msg: Msg) -> None:
+        """Parse → verify tenancy → store → **ack** → fan out. Never raises.
+
+        The ordering is the guarantee. Nothing is acked before the row is committed, so a
+        crash anywhere above the ack returns the event to the stream. Everything below the
+        ack is best-effort fan-out, which a redelivery would not re-run anyway (the
+        duplicate short-circuits before the listeners).
         """
         try:
-            envelope = EventEnvelope.model_validate_json(event.data)
+            envelope = EventEnvelope.model_validate_json(msg.data)
         except ValidationError as exc:
             # Includes a payload over the size cap or carrying a credential-shaped key:
             # the contract is enforced on the way in, not merely requested at the source.
-            log.warning("dropped malformed event", subject=event.subject, error=str(exc))
+            # Terminate rather than nak — no amount of redelivery makes it parse.
+            log.warning("dropped malformed event", subject=msg.subject, error=str(exc))
+            await self._terminate(msg)
             return
 
-        subject_tenant = event.subject.split(".", 1)[0]
+        subject_tenant = msg.subject.split(".", 1)[0]
         if subject_tenant != envelope.tenant_id:
             log.warning(
                 "dropped event with mismatched tenant",
-                subject=event.subject,
+                subject=msg.subject,
                 subject_tenant=subject_tenant,
                 envelope_tenant=envelope.tenant_id,
             )
+            await self._terminate(msg)
             return
 
-        stored = await self._store.append(envelope)
+        try:
+            stored = await self._store.append(envelope)
+        except Exception as exc:
+            # The database is the copy of record and it did not take this event. Do not
+            # ack: a nak sends it back so a database outage costs latency, not history.
+            log.error(
+                "event not recorded; asking for redelivery",
+                tenant=envelope.tenant_id,
+                module=envelope.module,
+                type=envelope.type,
+                error=str(exc),
+            )
+            await self._nak(msg)
+            return
+
+        # Durable now — either this delivery wrote the row, or an earlier one did and the
+        # unique constraint rejected this one. Both mean "on file", so both ack.
+        await self._ack(msg)
+
         if stored is None:
             log.debug(
                 "duplicate event ignored",
@@ -372,6 +534,34 @@ class EventIntake:
             except Exception as exc:  # a bad consumer must never break intake
                 log.warning("event listener raised", type=stored.type, error=str(exc))
 
+    async def _ack(self, msg: Msg) -> None:
+        """Acknowledge, tolerating a broker that has gone away.
+
+        A lost ack costs one redelivery, which the unique constraint absorbs — so this
+        failing is a log line, never a reason to unwind the row we just committed.
+        """
+        try:
+            await msg.ack()
+        except Exception as exc:
+            log.warning(
+                "event ack failed; expect a redelivery", subject=msg.subject, error=str(exc)
+            )
+
+    async def _nak(self, msg: Msg) -> None:
+        """Return the message to the stream after a delay."""
+        try:
+            await msg.nak(delay=_NAK_DELAY_S)
+        except Exception as exc:
+            # Not acking has the same effect once ack_wait expires, just later.
+            log.warning("event nak failed", subject=msg.subject, error=str(exc))
+
+    async def _terminate(self, msg: Msg) -> None:
+        """Refuse the message permanently — it can never become valid."""
+        try:
+            await msg.term()
+        except Exception as exc:
+            log.warning("event terminate failed", subject=msg.subject, error=str(exc))
+
     def _publish(self, entry: LoggedEvent) -> None:
         """Hand *entry* to every live feed subscriber, dropping into a full queue."""
         for queue in self._subscribers:
@@ -384,7 +574,7 @@ class EventIntake:
         tenant: str,
         module: str | None = None,
         event_type: str | None = None,
-    ) -> AsyncIterator[LoggedEvent]:
+    ) -> AsyncGenerator[LoggedEvent, None]:
         """Replay recent history (oldest first), then yield live events as they arrive.
 
         Mirrors the log console's contract (:meth:`LogBuffer.stream`) — including the

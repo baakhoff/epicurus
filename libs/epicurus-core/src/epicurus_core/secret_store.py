@@ -33,7 +33,7 @@ from epicurus_core.config import CoreSettings
 from epicurus_core.logging import get_logger
 from epicurus_core.tenancy import scope_secret_path
 
-__all__ = ["SecretError", "SecretStore"]
+__all__ = ["SecretError", "SecretNotFoundError", "SecretStore"]
 
 log = get_logger("epicurus_core.secret_store")
 
@@ -59,6 +59,17 @@ _TOKEN_HINT = (
 
 class SecretError(RuntimeError):
     """Raised when a secret cannot be read or written (missing, auth, or backend error)."""
+
+
+class SecretNotFoundError(SecretError):
+    """The store answered, and there is nothing at that path.
+
+    A subclass rather than a flag, so ``except SecretError`` keeps catching it and no caller
+    breaks. The distinction matters because collapsing it into its parent loses the only
+    thing a diagnostic screen needs to know: *"there is no key here"* and *"we could not
+    ask"* look identical from the outside and mean opposite things — which is exactly how
+    #728's expired token got read as an unconfigured provider for as long as it did.
+    """
 
 
 def _secret_error(action: str, scoped: str, exc: VaultError) -> SecretError:
@@ -277,7 +288,7 @@ class SecretStore:
             try:
                 return self._call(_op)
             except InvalidPath as exc:
-                raise SecretError(f"secret not found: {scoped}") from exc
+                raise SecretNotFoundError(f"secret not found: {scoped}") from exc
             except VaultError as exc:
                 raise _secret_error("read", scoped, exc) from exc
 

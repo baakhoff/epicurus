@@ -55,10 +55,46 @@ catalog. Relaxing that later is backward-compatible; tightening it later would n
 
 ## Delivery
 
-Core NATS pub/sub — at-most-once, fire-and-forget. An event emitted while the core is
-down is *gone*, not queued: the bus's JetStream is enabled but this spine does not use it
-yet. That is a deliberate v1 posture (see the ADR) and the reason the durable log is the
-core's copy of record rather than the bus itself.
+**At-least-once from the NATS server to the core's durable log.** The spine's subjects are
+covered by a JetStream stream (:data:`EVENTS_STREAM`), and the core consumes it through a
+durable pull consumer (:data:`EVENTS_DURABLE`) that acks a message only once the row exists
+in Postgres. A core that is down — restarting, deploying, crashed — misses nothing: the
+stream holds the events, and the durable cursor resumes where the last ack left off.
+Redelivery is safe by construction, because ``dedup_key`` is unique in the log.
+
+**Best-effort from the emitter to the NATS server.** Emitting is still a plain core-NATS
+publish: :func:`emit_event` returns once the local NATS client has accepted the message for
+transmission, *not* once the server has stored it. Nothing about the emitter changed, which
+is the point — persistence here is a property of the subject, not of the publisher's API.
+"Accepted for transmission" is weaker than it sounds, so state it exactly: nats-py appends
+the message to a pending buffer and merely *queues* a flush — the socket write happens
+afterwards, in its flusher task. What that leaves open:
+
+* **The emitter dies after publish, before the flush.** The message is still sitting in the
+  client's pending buffer and never reaches the server. This needs **no outage at all** — an
+  ordinary restart, redeploy, or OOM kill landing in that gap is enough, and it is the widest
+  window here precisely because it is open on a *healthy* connection.
+* **Stream at its limit.** The stream discards *old* messages to accept new ones, so a
+  runaway emitter costs the oldest unconsumed events, silently, rather than the newest;
+  anything past ``max_age`` expires regardless of who has read it.
+* **Unclean server crash.** A message the server accepted but had not yet written to the
+  stream file can be lost.
+
+Only one publish-side failure is loud: :attr:`~epicurus_core.events.EventBus.client` refuses
+to hand out a client that is not connected, so a publish attempted while the bus is down (or
+reconnecting) raises rather than buffering across the reconnect — the caller sees that one.
+
+So **the guarantee starts at publish, not at the source of truth.** The failure this design
+exists to remove — *the core restarted and the world's changes vanished* — is closed, but a
+module that must not lose an event needs an **outbox**: record it in the module's own
+database in the same transaction as the change it describes, and emit from there. That is an
+emitter-side change, not a transport one. Publisher-side acks (``js.publish``) would narrow
+the flush window but are not available here at all — see
+:meth:`~epicurus_core.events.EventBus.ensure_stream` on why ``no_ack`` is forced by the
+tenant-first subject scheme. See the ADR for the full trade.
+
+The durable log stays the copy of record regardless: "what happened" is a question you ask
+Postgres, not the bus. The stream is a delivery buffer in front of it, not a second archive.
 """
 
 from __future__ import annotations
@@ -78,7 +114,13 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle guard; EventBus imports not
     from epicurus_core.events import EventBus
 
 __all__ = [
+    "EVENTS_ACK_WAIT_S",
+    "EVENTS_DURABLE",
     "EVENTS_PREFIX",
+    "EVENTS_STREAM",
+    "EVENTS_STREAM_MAX_AGE_S",
+    "EVENTS_STREAM_MAX_BYTES",
+    "EVENTS_STREAM_SUBJECT",
     "EVENTS_WILDCARD",
     "MAX_PAYLOAD_BYTES",
     "SCHEMA_VERSION",
@@ -93,6 +135,47 @@ existing per-module subjects (``echo.request``, ``llm.usage``, …)."""
 
 EVENTS_WILDCARD = f"{EVENTS_PREFIX}.>"
 """Every module event, for the core's intake. Tenant-scoped to ``<tenant>.events.>``."""
+
+EVENTS_STREAM = "EPICURUS_EVENTS"
+"""The JetStream stream that persists the spine. Uppercase by NATS convention (stream names
+are an operator-facing namespace, not a subject), and prefixed so an operator sharing a
+server can tell whose stream it is."""
+
+EVENTS_STREAM_SUBJECT = f"*.{EVENTS_WILDCARD}"
+"""What the stream captures: ``*.events.>`` — every tenant's spine and nothing else.
+
+Deliberately the same wildcard the intake subscribes, and for the same reason: the
+single-token ``*`` sits exactly where :func:`~epicurus_core.tenancy.scope_subject` puts the
+tenant. A stream scoped to one tenant would violate constraint #1 the moment a second tenant
+existed, and a broader stream (``>``) would swallow ``llm.usage``, ``echo.request`` and every
+other non-envelope subject into a persisted log they were never meant to enter."""
+
+EVENTS_DURABLE = "core-event-intake"
+"""The core's durable consumer on :data:`EVENTS_STREAM` — the cursor that makes a restart
+survivable. Named for the consumer, not the release, because its identity must not change
+across upgrades: a renamed durable is a *new* cursor, which silently replays the whole
+stream. Hyphens only; NATS forbids ``.``, ``*`` and ``>`` in a durable name."""
+
+EVENTS_STREAM_MAX_AGE_S = 7 * 24 * 60 * 60.0
+"""How long the stream holds an event: 7 days.
+
+The stream is a delivery buffer, not the archive — the archive is the ``module_events``
+table, on its own (longer, operator-set) retention. Sized so that a core down for a weekend
+still catches up, and short enough that the buffer never becomes a second copy of the log
+that nobody prunes."""
+
+EVENTS_STREAM_MAX_BYTES = 512 * 1024 * 1024
+"""Hard disk ceiling for the stream: 512 MiB — roughly 100k events at the 4 KiB payload cap.
+
+A bound is not optional: without one, a module stuck in an emit loop fills the NATS volume
+and takes down every other subject with it. At the ceiling the stream discards its oldest
+messages (see :meth:`~epicurus_core.events.EventBus.ensure_stream`)."""
+
+EVENTS_ACK_WAIT_S = 30.0
+"""How long JetStream waits for the core's ack before redelivering. Sized well above a
+Postgres insert and well below an operator's patience — long enough that a slow write is not
+mistaken for a dead consumer, short enough that a consumer killed mid-message gets its work
+back promptly."""
 
 SCHEMA_VERSION = 1
 """Current envelope schema. Bumped only on a *breaking* shape change; additive optional
@@ -272,8 +355,13 @@ async def emit_event(
 
     Raises ``ValueError`` (via the envelope's validators) on a malformed type, a
     mismatched module prefix, an oversized payload, or a credential-shaped payload key —
-    before anything reaches the bus. Publishing itself is fire-and-forget: this returns
-    once the client accepts the message, not once anything consumes it.
+    before anything reaches the bus.
+
+    Publishing itself is unacknowledged: this returns once the local NATS client accepts the
+    message, not once the server has stored it and certainly not once anything has consumed
+    it. Once the server *does* have it, delivery to the core's durable log is at-least-once
+    and survives a core restart — see **Delivery** in this module's docstring for the three
+    windows that stay open on the publish side.
     """
     envelope = EventEnvelope(
         tenant_id=tenant_id,

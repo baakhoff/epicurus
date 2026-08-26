@@ -14,7 +14,7 @@ contract. This is the map of every running block — each row links its full ref
 | **knowledge** | module | Obsidian-vault RAG — incremental index into a tenant-scoped Qdrant collection | `8085` | [knowledge](knowledge.md) |
 | **websearch** | module | self-hosted web search via SearXNG — no API key required | `8086` | [websearch](websearch.md) |
 | **calendar** | module | provider-neutral calendar — events and scheduling (local + Google) | `8087` | [calendar](calendar.md) |
-| **mail** | module | provider-agnostic mail — search, read, and send via Gmail (v0.1) | `8090` | [mail](mail.md) |
+| **mail** | module | provider-agnostic mail — search, read, and send via Gmail (the only provider today; IMAP/SMTP and Microsoft are planned) | `8090` | [mail](mail.md) |
 | **tasks** | module | task management — Google Tasks plus a local store (ADR-0016) | `8091` | [tasks](tasks.md) |
 | **notes** | module | author Obsidian-style notes into a private collection — the agent can list titles and propose changes (reviewed) but never reads a body | `8092` | [notes](notes.md) |
 | **messaging** | module | chat bridges — external channels (Telegram, Discord, …) drive a turn and replies route back out; provider-pluggable, loopback built in (ADR-0058) | `8093` | [messaging](messaging.md) |

@@ -1055,8 +1055,9 @@ interrupted by shutdown is recorded to history too (#733) but publishes no event
 ### Scheduled turns (ADR-0092)
 
 Recurring prompts that run **unattended** and deliver into their own chat session — the
-time-driven half of proactivity (the event-driven half, listeners/alerts, is a later
-milestone). An operator authors a prompt, a cadence (daily/weekly at a local hour), and it
+time-driven half of proactivity (the event-driven half, listeners/alerts, shipped
+alongside it inside 1.0 — see the [Automations engine](#automations-engine-adr-0105) below,
+#662–#672). An operator authors a prompt, a cadence (daily/weekly at a local hour), and it
 fires on its own with no HTTP caller — the same headless-turn shape the inbound messaging
 consumer above already uses for a bridge message (`Agent.run(tenant_id=..., session_id=...)`,
 no SSE).

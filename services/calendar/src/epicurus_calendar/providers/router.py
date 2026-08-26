@@ -33,22 +33,40 @@ the selection, so a value passed in is ignored.
 ``create_event``/``update_event``/``delete_event`` are also the module-event-spine emission
 seam (#664, ADR-0103): ``event_created``/``event_updated``/``event_cancelled`` fire here, the
 one place every operator/agent-driven write already passes through regardless of which backend
-handles it. This is the *provider-write* seam only — a change made directly in Google Calendar's
-UI, outside epicurus, is never observed (calendar has no sync/reconcile layer analogous to
-mail's ADR-0096, #623; building one is out of scope for this PR — see the event catalog's
-provider-caveats section).
+handles it. This is the *provider-write* seam — it sees every change made **through** this
+module, the instant it lands. Since #831 it is no longer the only emitter: changes made
+*outside* epicurus (in Google Calendar's own UI) are observed by the reconcile loop
+(:mod:`epicurus_calendar.sync`), which emits the same three events from the other side.
+
+The two emitters must never both announce one change, so each write here also records a
+short-lived marker in the :class:`~epicurus_calendar.sync_store.SelfWriteLedger` — for the id
+it acted on and, when the write was series-scoped, for the series — which the reconcile checks
+before emitting. Both sides build their payloads and keys from :mod:`epicurus_calendar.spine`,
+so "the same change" means the same thing on both. Markers are recorded only for writes that
+landed on an **external** provider: a local-store write cannot come back through anyone's sync
+feed, so a local-only deployment writes no markers at all.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Protocol
 
 from epicurus_calendar.models import Attendee, DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider, EditScope
+from epicurus_calendar.spine import (
+    EVENT_CANCELLED,
+    EVENT_CREATED,
+    EVENT_UPDATED,
+    cancelled_dedup_key,
+    created_dedup_key,
+    event_change_hash,
+    event_summary_payload,
+    self_write_key,
+    updated_dedup_key,
+)
+from epicurus_calendar.sync_store import SelfWriteLedger
 from epicurus_core import (
     LOCAL_ACCOUNT,
     Collection,
@@ -101,11 +119,15 @@ class CollectionRouter(CalendarProvider):
         external: dict[str, CalendarProvider],
         prefs: CollectionPrefsSource,
         bus: EventBus | None = None,
+        ledger: SelfWriteLedger | None = None,
     ) -> None:
         self._local = local
         self._external = external
         self._prefs = prefs
         self._bus = bus
+        # The self-write ledger (#831). ``None`` disables suppression — the pre-#831 behaviour,
+        # and what a unit test with no reconcile loop wants.
+        self._ledger = ledger
 
     def _provider_for(self, account: str) -> CalendarProvider | None:
         """The provider backing *account*, or ``None`` if it isn't configured/connected."""
@@ -397,7 +419,9 @@ class CollectionRouter(CalendarProvider):
                     calendar_id=ref.collection or None,
                     edit_scope=edit_scope,
                 ):
-                    await self._emit_cancelled(tenant_id, before, fallback_id=event_id)
+                    await self._emit_cancelled(
+                        tenant_id, before, fallback_id=event_id, provider_name=provider.name
+                    )
                     return True
             except Exception as exc:
                 log.warning(
@@ -411,17 +435,49 @@ class CollectionRouter(CalendarProvider):
 
     # ── event spine (#664) ──────────────────────────────────────────────────
 
+    async def _record_self_write(
+        self, tenant_id: str, *, event_type: str, provider: str, ids: Iterable[str | None]
+    ) -> None:
+        """Tell the reconcile loop this module made this change (#831) — best-effort.
+
+        Recorded **before** the emit and only for a non-local provider: a local write can never
+        come back through a sync feed, so marking one would be pure churn in the common
+        local-only deployment. Several ids because a series-scoped write is announced once here
+        and comes back from the provider as one change per occurrence — the occurrences carry
+        the series id, so recording it too is what lets the reconcile recognise them.
+
+        A failure is logged and swallowed: the write already landed and the event is about to
+        go out, so the worst case is one duplicate announcement, never a lost one.
+        """
+        if self._ledger is None or provider == LOCAL_ACCOUNT:
+            return
+        keys = [self_write_key(event_type, provider, i) for i in ids if i]
+        try:
+            await self._ledger.record(tenant=tenant_id, keys=keys)
+        except Exception as exc:
+            log.warning(
+                "calendar self-write marker not recorded; reconcile may re-announce (#831)",
+                event_type=event_type,
+                error=str(exc),
+            )
+
     async def _emit_created(self, tenant_id: str, event: Event) -> None:
         if self._bus is None:
             return
+        await self._record_self_write(
+            tenant_id,
+            event_type=EVENT_CREATED,
+            provider=event.provider,
+            ids=(event.id, event.recurring_event_id),
+        )
         try:
             await emit_event(
                 self._bus,
                 tenant_id=tenant_id,
                 module="calendar",
-                event_type="calendar.event_created",
-                dedup_key=f"{event.provider}:{event.id}",
-                payload=_event_summary_payload(event),
+                event_type=EVENT_CREATED,
+                dedup_key=created_dedup_key(event.provider, event.id),
+                payload=event_summary_payload(event),
                 entity_ref=EntityRef(
                     ref_id=event.id, module="calendar", kind="event", title=event.title
                 ),
@@ -439,18 +495,24 @@ class CollectionRouter(CalendarProvider):
             if before is not None
             else requested_time_change
         )
-        payload = _event_summary_payload(after)
+        payload = event_summary_payload(after)
         payload["time_changed"] = time_changed
+        await self._record_self_write(
+            tenant_id,
+            event_type=EVENT_UPDATED,
+            provider=after.provider,
+            ids=(after.id, after.recurring_event_id),
+        )
         try:
             await emit_event(
                 self._bus,
                 tenant_id=tenant_id,
                 module="calendar",
-                event_type="calendar.event_updated",
+                event_type=EVENT_UPDATED,
                 # "dedup per provider id + change hash" — the SAME update re-observed twice
                 # (e.g. a retried write) dedups in the core's log; a genuinely different edit
                 # gets its own dedup_key so it is logged as its own entry, not merged away.
-                dedup_key=f"{after.provider}:{after.id}:{_event_change_hash(after)}",
+                dedup_key=updated_dedup_key(after.provider, after.id, event_change_hash(after)),
                 payload=payload,
                 entity_ref=EntityRef(
                     ref_id=after.id, module="calendar", kind="event", title=after.title
@@ -460,19 +522,33 @@ class CollectionRouter(CalendarProvider):
             log.warning("calendar.event_updated emit failed", event_id=after.id, error=str(exc))
 
     async def _emit_cancelled(
-        self, tenant_id: str, event: Event | None, *, fallback_id: str
+        self,
+        tenant_id: str,
+        event: Event | None,
+        *,
+        fallback_id: str,
+        provider_name: str | None = None,
     ) -> None:
         if self._bus is None:
             return
         title = event.title[:200] if event is not None else "(unknown)"
-        provider_name = event.provider if event is not None else "unknown"
+        # Prefer the provider that actually carried out the delete (#831): the snapshot may be
+        # missing (a delete of something ``get_event`` could not resolve), and a dedup key
+        # reading ``unknown:<id>`` would never line up with the reconcile's ``google:<id>``.
+        provider = provider_name or (event.provider if event is not None else "unknown")
+        await self._record_self_write(
+            tenant_id,
+            event_type=EVENT_CANCELLED,
+            provider=provider,
+            ids=(fallback_id, event.recurring_event_id if event is not None else None),
+        )
         try:
             await emit_event(
                 self._bus,
                 tenant_id=tenant_id,
                 module="calendar",
-                event_type="calendar.event_cancelled",
-                dedup_key=f"{provider_name}:{fallback_id}",
+                event_type=EVENT_CANCELLED,
+                dedup_key=cancelled_dedup_key(provider, fallback_id),
                 payload={"title": title},
                 entity_ref=EntityRef(
                     ref_id=fallback_id, module="calendar", kind="event", title=title
@@ -482,6 +558,43 @@ class CollectionRouter(CalendarProvider):
             log.warning(
                 "calendar.event_cancelled emit failed", event_id=fallback_id, error=str(exc)
             )
+
+    # ── reconcile targets (#831) ────────────────────────────────────────────
+
+    async def sync_targets(self, *, tenant_id: str) -> list[tuple[CalendarProvider, CollectionRef]]:
+        """The collections the reconcile loop watches — the same selection reads overlay.
+
+        Watching exactly what the operator enabled keeps "what the Calendar page shows" and
+        "what the spine reports" one set rather than two. With nothing enabled it falls back to
+        the *write default* (:meth:`_active_ref`), so a connected-but-not-yet-toggled account
+        still has the calendar new events land on watched, rather than a module that writes
+        somewhere it refuses to observe.
+
+        Every ref goes through the one degrade rule (#814/#815): a ref whose provider is gone
+        degrades to the local collection — and local declares ``supports_sync = False``, so it
+        drops out here. That is the whole missing-provider story: **no target, no provider call,
+        an idle tick.** A provider that is configured but not connected is likewise skipped on
+        the cheap credential probe (#209), never a live API call.
+        """
+        prefs = await self._load_prefs()
+        refs = prefs.enabled or [await self._active_ref(tenant_id=tenant_id)]
+        targets: list[tuple[CalendarProvider, CollectionRef]] = []
+        for provider, ref in self._dedup_refs(refs):
+            if not provider.supports_sync:
+                continue
+            try:
+                if not await provider.is_available(tenant_id=tenant_id):
+                    continue
+            except Exception as exc:  # a flaky probe is "not available", never a failed tick
+                log.warning(
+                    "calendar sync target probe failed; skipping (#209)",
+                    account=ref.account,
+                    collection=ref.collection,
+                    error=str(exc),
+                )
+                continue
+            targets.append((provider, ref))
+        return targets
 
     async def find_free_slots(
         self,
@@ -556,32 +669,3 @@ class CollectionRouter(CalendarProvider):
         except Exception as exc:
             log.warning("collection prefs unavailable; using local default", error=str(exc))
             return CollectionPrefs()
-
-
-def _event_summary_payload(event: Event) -> dict[str, object]:
-    """Pointers + minimal metadata for a calendar event — never attendee emails or the
-    description body (#664, mirrors mail's payload discipline)."""
-    return {
-        "title": event.title[:200],
-        "start": event.start.isoformat(),
-        "end": event.end.isoformat(),
-        "all_day": event.all_day,
-    }
-
-
-def _event_change_hash(event: Event) -> str:
-    """A short, stable fingerprint of an event's mutable fields (#664's "dedup provider id +
-    change hash"). Deliberately not Python's ``hash()`` — it is salted per-process
-    (``PYTHONHASHSEED``), so the same content would hash differently across restarts, breaking
-    the log's dedup guarantee for an update that straddles one.
-    """
-    fingerprint = {
-        "title": event.title,
-        "start": event.start.isoformat(),
-        "end": event.end.isoformat(),
-        "description": event.description,
-        "location": event.location,
-        "all_day": event.all_day,
-    }
-    digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()
-    return digest[:12]

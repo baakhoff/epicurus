@@ -450,23 +450,83 @@ wire subject gains the spine's `events.` prefix and is tenant-scoped.
 
 | Event | Emitted from | Condition |
 | --- | --- | --- |
-| `calendar.event_created` | `CollectionRouter.create_event` | A new event was created through this module — the **provider-write** seam, so only operator/agent-driven writes are observed (see the caveat below). |
-| `calendar.event_updated` | `CollectionRouter.update_event` | An existing event was edited. Payload's `time_changed` flags whether `start`/`end` actually moved (a before/after comparison); `dedup_key` includes a change hash of the event's mutable fields so each distinct edit is its own log entry, while a retried write with identical resulting state dedups. |
-| `calendar.event_cancelled` | `CollectionRouter.delete_event` | An event was deleted through this module. |
+| `calendar.event_created` | `CollectionRouter.create_event` **or** the reconcile loop | A new event exists — created through this module (announced the instant the write lands), or created outside epicurus and noticed on the next incremental sync (#831). |
+| `calendar.event_updated` | `CollectionRouter.update_event` **or** the reconcile loop | An existing event was edited. Payload's `time_changed` flags whether `start`/`end` actually moved — a real before/after comparison either way (the write seam against the pre-write state, the reconcile against its cached observation). `dedup_key` includes a change hash of the event's mutable fields, so each distinct edit is its own log entry while a retried write with identical resulting state dedups. |
+| `calendar.event_cancelled` | `CollectionRouter.delete_event` **or** the reconcile loop | An event was deleted — through this module, or in the provider's own UI (a sync tombstone; the title comes from the reconcile's cache, since a tombstone is little more than an id). |
 | `calendar.event_starting_soon` | The lead-time scheduler (`epicurus_calendar.scheduler`) | An event is within its configured lead time of starting (tenant setting, default 15 minutes) — fires at most once per event via a durable marker. |
 | `calendar.event_ended` | The lead-time scheduler | An event's end time has passed — fires at most once per event. |
 
-**Provider-write seam only.** Calendar has no sync/reconcile layer analogous to mail's
-(ADR-0096, #623) — `event_created`/`event_updated`/`event_cancelled` only observe changes made
-*through this module*. A change made directly in Google Calendar's own UI, outside epicurus, is
-never seen and never emits. Building the equivalent of mail's local cache + incremental sync for
-calendar (which would also be the natural home for Google-only `invitation_received` /
-`attendee_responded` — deliberately **not implemented** in this PR) is out of scope here; a
-declared-but-never-published event would repeat the exact mistake `docs/services/mail.md`
-documents as a lesson already learned once.
+### Reconcile layer — external changes reach the spine (#831)
 
-**The lead-time scheduler** (`epicurus_calendar.scheduler`) is calendar's first periodic
-background job — a poll loop started/stopped with the app lifespan, ticking every
+Until #831 the three change events had exactly one emitter, the **provider-write seam**
+(`CollectionRouter`), which sees every change made *through* this module and, structurally,
+nothing else: a change made directly in Google Calendar's own UI was never seen and never
+emitted. The reconcile loop (`epicurus_calendar.sync`) is the second emitter, built on the
+shape mail's reconcile proved (ADR-0096):
+
+- **Incremental, not a re-poll.** Each watched collection keeps Google's opaque `syncToken` in
+  `calendar_sync_state`; a tick asks `events.list` what changed since, and usually gets
+  nothing. `singleEvents=true` + `showDeleted=true` are bound to the token when it is minted,
+  so the loop classifies the same expanded occurrences every other read path sees, and a
+  deletion arrives as a tombstone rather than a silent disappearance.
+- **A lapsed cursor is recoverable, not a failure.** Google answers an expired token with
+  `410 GONE`; the provider seam reports that as `None`, and the loop full-syncs and **diffs
+  against its own cache** — so the gap is reported exactly (what appeared, what changed, what
+  went) rather than replayed blindly or swallowed. A cached row that merely fell out of the
+  forward-moving window is pruned in silence: the passage of time is not an operator action.
+- **A first-ever sync is silent** (the no-firehose rule). A calendar you already had is not
+  news. The signal is the `calendar_sync_state` row's mere existence, so a *restart* resumes
+  from its stored cursor and reports the outage's changes instead of absorbing them into a
+  silent prime.
+- **One operator action, one event.** See *Self-write suppression* below.
+- **A recurring series is one event, not thirty.** A series arrives as one change per
+  occurrence, so changes are collapsed per `(series, event type)` within a pass: one emission,
+  keyed on the *series* when more than one occurrence moved and on the occurrence itself when
+  only one did. The cost, stated plainly: two occurrences of one series edited differently
+  inside a single pass yield one event, not two — both cache rows are still updated, so the
+  quiet one is never re-announced later, it is simply not announced. A pass is additionally
+  capped at `SYNC_MAX_EMISSIONS_PER_PASS` announcements (the cache is still updated in full,
+  so a truncated pass does not re-announce the shortfall next tick).
+- **Idle is free and quiet.** With no external calendar connected or enabled, `sync_targets`
+  resolves nothing — no provider call, no log line. That is the #815 one-rule degrade doing
+  its job: a ref whose provider is missing degrades to the local collection, and the local
+  store declares no sync feed (`supports_sync = False`). A connected-but-not-yet-enabled
+  account still has its *write default* calendar watched, so the module never writes somewhere
+  it refuses to observe. A configured-but-disconnected account is skipped on the cheap
+  credential probe (#209), never a live API call.
+
+Polling, not push: Google's `events.watch` + a webhook channel would be lower-latency but needs
+a publicly reachable HTTPS endpoint a local-first self-host cannot assume, and channels expire
+and must be renewed — the same reasoning mail's poller records for Gmail's Pub/Sub push.
+
+**Self-write suppression.** Two emitters must never both announce one change: a duplicate is
+indistinguishable, downstream, from a second edit. So every write through the router records a
+short-lived marker in `calendar_self_writes` — keyed `"<event type>|<provider>:<id>"`, plus the
+*series* id when the write was series-scoped — and the reconcile checks that ledger before
+every emission. An exact-id hit is **consumed** (so a genuinely external change to the same
+event ten minutes later is announced normally); a series-id hit is only **peeked**, because one
+series-wide write legitimately matches many occurrences. The suppression key deliberately omits
+the change hash the `dedup_key` carries: suppression must survive the provider normalising
+content on the way back, and must match across the series → occurrence identity shift. Markers
+are recorded only for writes that landed on an **external** provider — a local-store write
+cannot come back through any sync feed, so a local-only deployment writes no markers at all.
+Both emitters build payloads, dedup keys and suppression keys from one module,
+`epicurus_calendar.spine`, so "the same change" means the same thing on both sides.
+
+Accepted races: the marker is written after the provider write returns and before the emit, so
+a millisecond-wide window exists in which a delta fetched in between could still duplicate; an
+*external* edit landing in the same poll window as our own write to the same event is
+suppressed along with it; and `edit_scope="following"` (a series split) is announced by the
+write seam as one `event_updated` and additionally by the reconcile as the truncated tail's
+cancellation plus the new series' creation.
+
+**Deliberately not emitted:** `invitation_received` / `attendee_responded`. They are
+Google-only, and a declared-but-never-published event would repeat the exact mistake
+`docs/services/mail.md` documents as a lesson already learned once. They have their own issue.
+
+**The lead-time scheduler** (`epicurus_calendar.scheduler`) is the first of calendar's two
+periodic background jobs (the reconcile loop above is the second) — a poll loop
+started/stopped with the app lifespan, ticking every
 `SCHEDULER_POLL_INTERVAL_S` (default 60s). Fire-once state lives in the
 `calendar_fired_markers` table (below), keyed `(tenant, event_id, marker)` with a database
 uniqueness constraint deciding races, not a read-then-write check — proven to survive a process
@@ -483,8 +543,8 @@ Two starter presets on the Templates tab — never auto-instantiated, see
 | `tomorrow-at-a-glance` | Schedule: daily, 18:00 | `notify` | `push` |
 | `on-event-starting-soon` | Event: `calendar.event_starting_soon` | `notify` | `push` |
 
-"Notify on a new invitation" was considered and dropped — there is no event for it (see the
-provider-write-seam caveat above); `event_starting_soon` is the real, well-supported equivalent.
+"Notify on a new invitation" was considered and dropped — there is no event for it (see
+*Deliberately not emitted* above); `event_starting_soon` is the real, well-supported equivalent.
 Both templates need `calendar_list_events`/`calendar_find_free` reachable at `notify` — the
 reason those two tools are annotated `side_effect="read"`.
 
@@ -499,6 +559,11 @@ lives in the core (`module_prefs`), not in service config.
 | `DATABASE_URL` | `postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus` | Postgres DSN for the local default event store. |
 | `PLATFORM_URL` | `http://localhost:8080` | Core service URL for OAuth token fetching (Google provider) and platform API calls. On the Docker network: `http://core-app:8080`. |
 | `SCHEDULER_POLL_INTERVAL_S` | `60` | How often the lead-time scheduler ticks (#664) — `event_starting_soon`/`event_ended`. |
+| `SYNC_POLL_INTERVAL_S` | `300` | How often the reconcile loop pulls each watched calendar's delta (#831) — the loop that makes `event_created`/`event_updated`/`event_cancelled` fire for a change made in Google Calendar's own UI. **On by default**; a tick with nothing connected or enabled costs nothing. `0` disables the loop entirely. |
+| `SYNC_POLL_JITTER_FRAC` | `0.1` | Fraction of the interval each reconcile sleep is randomised by (±), so calendar's two periodic loops don't settle into lockstep. `0` disables jitter. |
+| `SYNC_WINDOW_DAYS` | `30` | How far back a first sync anchors its window. Google binds `timeMin` to the sync token it mints, so this is the window every later incremental call inherits. |
+| `SYNC_SELF_WRITE_TTL_S` | `900` | How long a self-write marker stays valid — the window in which the reconcile still recognises a change this module made itself. |
+| `SYNC_MAX_EMISSIONS_PER_PASS` | `50` | Ceiling on how many events one collection's reconcile pass may announce. A bound on the notification burst, never on the sync itself. |
 | `DEFAULT_TENANT_ID` | `local` | Tenant this instance serves. |
 | `NATS_URL` | `nats://nats:4222` | NATS broker URL. |
 | `LOG_LEVEL` | `info` | Structured-log level. |
@@ -547,10 +612,11 @@ added after the table's first release. There is no migration framework, so
 existing table (mirroring `TaskStore._ensure_columns`, #248); rows written before a given
 column existed read `NULL`, coerced to the documented fallback above.
 
-The **Google provider** stores no data locally; all state lives in Google
-Calendar and in the core's OAuth vault. An all-day Google event uses `start.date`/`end.date`
-(date-only) rather than `start.dateTime`/`end.dateTime`; the provider maps between those and
-the `all_day` flag.
+The **Google provider** stores no data locally; all its *event* state lives in Google Calendar
+and in the core's OAuth vault. An all-day Google event uses `start.date`/`end.date` (date-only)
+rather than `start.dateTime`/`end.dateTime`; the provider maps between those and the `all_day`
+flag. (What the reconcile layer caches below is not a copy of the calendar — it is a record of
+what this module last *observed*, which is what lets it tell a creation from an edit.)
 
 The **lead-time scheduler** (#664) owns two more tables, in the same shared Postgres:
 
@@ -559,13 +625,26 @@ The **lead-time scheduler** (#664) owns two more tables, in the same shared Post
 | `calendar_lead_time_prefs` | `(tenant)` PK | The `event_starting_soon` lead time in minutes; `NULL`/missing falls back to `DEFAULT_LEAD_MINUTES` (15). |
 | `calendar_fired_markers` | `(tenant, event_id, marker)` unique | A fire-once claim — `event_id` is provider-qualified (`"<provider>:<id>"`), `marker` is `"starting_soon"` or `"ended"`, `fired_at_ns` (`BigInteger`, nanosecond epoch) records when. A row's mere existence is the claim; a second insert attempt for the same key violates the unique constraint and is read as "already fired," not an error. |
 
+The **reconcile layer** (#831) owns three more, all tenant-scoped, all in the same database:
+
+| Table | Scope | Holds |
+| --- | --- | --- |
+| `calendar_sync_state` | `(tenant, account, collection)` unique | The collection's incremental-sync cursor. `sync_token` is the provider's opaque value (Google's `nextSyncToken`), never parsed — a future CalDAV backend fills the same column and reuses the schema. `window_start` remembers the `timeMin` anchor the token inherited (what a resync prunes aged-out rows against); `synced_at` stamps the last advance. The row's **existence** is the first-sync-vs-resume signal; a `NULL` `sync_token` means "primed, but no resumable cursor" — the next pass full-syncs and diffs. |
+| `calendar_synced_event` | `(tenant, account, collection, event_id)` unique | What this module last observed about one event: `series_id` (kept denormalised — a tombstone has no event object left to read it from), `title`, `start_dt`/`end_dt`, `all_day`, and `change_hash` (`spine.event_change_hash` of the last observed state). This is what turns a provider's "here is a changed event" into a creation, an edit (with a real `time_changed`) or a cancellation with a printable title. |
+| `calendar_self_writes` | `(tenant, marker_key)` unique | The self-write ledger. `marker_key` is `"<event type>|<provider>:<id>"`; `expires_at_ns` is a nanosecond epoch (~1.8e18) and therefore `BigInteger`, never `Integer`. Durable rather than in-memory on purpose: a write can land seconds before a restart, and the reconcile that then notices it must still know it was already announced. Expired rows are pruned once per reconcile pass. |
+
+All three are created by `CalendarSyncStore.init` / `SelfWriteLedger.init` via `create_all` +
+the shared additive `ensure_columns` reconcile (ADR-0067) — this is their first release, so the
+reconciled-column lists are empty; they exist so a *later* column lands in an already-provisioned
+database instead of 500ing every read.
+
 ## Dependencies
 
 | Service | Purpose |
 |---------|---------|
-| Postgres | Local provider event store + lead-time scheduler tables; schema auto-created on startup. |
-| NATS | Module event spine (#664: `event_created`/`event_updated`/`event_cancelled`/`event_starting_soon`/`event_ended`). |
-| `core-app` (platform API) | OAuth token fetch (Google provider). Discovery / MCP host. |
+| Postgres | Local provider event store, lead-time scheduler tables, and the reconcile layer's sync cursor / observed-event cache / self-write ledger; schema auto-created on startup. |
+| NATS | Module event spine (#664: `event_created`/`event_updated`/`event_cancelled`/`event_starting_soon`/`event_ended`), from both the provider-write seam and the reconcile loop (#831). |
+| `core-app` (platform API) | OAuth token fetch (Google provider, via `PlatformClient.get_oauth_token` — ADR-0020). Collection prefs. Discovery / MCP host. |
 
 The Google provider additionally talks outbound to `https://www.googleapis.com/calendar/v3`.
 
@@ -588,7 +667,12 @@ The service is now reachable at `http://localhost:8080`.
 ### Add a new provider
 
 1. Implement the `CalendarProvider` ABC (including `is_available` and `list_collections`)
-   in `services/calendar/src/epicurus_calendar/providers/`.
+   in `services/calendar/src/epicurus_calendar/providers/`. To join the reconcile loop (#831),
+   also set `supports_sync = True` and implement `full_sync` / `changed_events_since`,
+   returning neutral `EventChange`s (a deletion is a tombstone: `cancelled=True`, no `event`)
+   and an opaque `next_cursor`; return `None` from `changed_events_since` when the backend says
+   the cursor can no longer be replayed. Leave `supports_sync` alone and the loop simply never
+   watches the backend — no other change is needed.
 2. Add it to the `external` provider map in `app.py` (keyed by its account id) and to
    `PROVIDER_LABELS` + the `collections.providers` list in `service.py` so it appears in the
    connected-accounts picker.

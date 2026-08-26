@@ -53,7 +53,7 @@ images to GHCR.
   since #728, so a provider list read as *unconfigured* during a vault outage. `ProviderInfo`
   now carries `key_state` (`not_required` / `present` / `missing` / `unavailable`) plus the
   store's reason, with `configured` unchanged for existing readers.
-  `epicurus-core` 0.34.0→0.35.0 (MINOR). `core-app` 0.114.2→0.115.0 (MINOR).
+  `epicurus-core` 0.34.0→0.35.0 (MINOR). · `core-app` 0.114.2→0.115.0 (MINOR).
 
 - **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
   `writes_document` call *lands*, by which point the model has already written the whole body;

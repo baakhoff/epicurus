@@ -1,7 +1,8 @@
 # NATS — authenticated event backbone
 
 NATS is the data-plane message bus: tenant-scoped pub/sub and request/reply between the
-core and every module, plus JetStream (enabled, persistence is a follow-up). The server
+core and every module, plus JetStream, which now carries the durable module event spine
+(#832 — see [Data model](#data-model) below). The server
 **requires authentication** — it rejects un-credentialed clients (#50, ADR-0066). This
 page documents the auth model, how services authenticate, and how credentials flow.
 

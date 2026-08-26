@@ -14,7 +14,12 @@ Shared contract and runtime used by every epicurus service.
 - **`observability`** — `add_ops_routes` / `create_ops_router`: the shared
   `GET /health` + `GET /metrics` (Prometheus) surface.
 - **`events`** — `EventBus`: async NATS client (the event backbone). Tenant-scoped
-  `publish` / `subscribe` / `request` / `reply`.
+  `publish` / `subscribe` / `request` / `reply`, plus the JetStream surface the module
+  event spine is durable on (`jetstream` / `ensure_stream` / `pull_subscribe_any_tenant`).
+- **`module_events`** — `emit_event` and the `EventEnvelope` contract, with the spine's
+  stream/durable/retention constants (`EVENTS_STREAM`, `EVENTS_DURABLE`, …). Delivery is
+  at-least-once from the NATS server to the core's durable log; see the module docstring
+  for what the publish side does *not* promise.
 - **`tracing`** — `setup_tracing` / `get_tracer`: optional OpenTelemetry distributed
   tracing to Tempo (OTLP/HTTP), covering FastAPI requests + the `EventBus` (trace
   context propagates across NATS). Env-driven on/off (`OTEL_TRACES_ENABLED`), a no-op
@@ -26,10 +31,6 @@ Shared contract and runtime used by every epicurus service.
   the descriptor a module ships (ADR-0004); basis for the template and installer.
 - **`secret_store`** — `SecretStore`: tenant-scoped secret access in OpenBao
   (KV v2, via `hvac`); `get` / `set` / `delete`.
-
-## Pending (follow-up changes)
-
-- NATS JetStream persistence (durable streams)
 
 ## Usage
 

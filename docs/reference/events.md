@@ -186,8 +186,11 @@ window and the feed order by.
 
 Raises `ValueError` (via the envelope's validators) **before anything reaches the bus** on
 a malformed type, a mismatched module prefix, an oversized payload, or a credential-shaped
-payload key. Publishing is fire-and-forget: it returns once the client accepts the
-message, not once anything consumes it.
+payload key. Publishing itself is **unacknowledged**: it returns once the local client
+accepts the message, not once the server has stored it. Once the server *does* have it,
+delivery to the core's durable log is **at-least-once** and survives a core restart — see
+[Delivery posture](#delivery-posture) for the exact guarantee and the windows it leaves
+open on the publish side.
 
 ### `EventEnvelope`
 
@@ -286,6 +289,18 @@ ADR-0103 §4 as amended by the JetStream ADR.
 
 The `module_events` table remains the copy of record. The stream is a **delivery buffer** in
 front of it — bounded (7 days, 512 MiB, discarding oldest first), not a second archive.
+
+The shape is exported from `epicurus_core` so a caller never hardcodes it. These are
+constants, not configuration — changing one is a contract change, not a deployment knob:
+
+| Constant | Value | What it is |
+| --- | --- | --- |
+| `EVENTS_STREAM` | `"EPICURUS_EVENTS"` | The JetStream stream covering the spine. |
+| `EVENTS_STREAM_SUBJECT` | `"*.events.>"` | Its subject filter — every tenant, every module. |
+| `EVENTS_DURABLE` | `"core-event-intake"` | The core's durable consumer; the name *is* the cursor, so changing it replays the stream from the start. |
+| `EVENTS_STREAM_MAX_AGE_S` | `604800.0` (7 days) | Retention window. |
+| `EVENTS_STREAM_MAX_BYTES` | `536870912` (512 MiB) | Size cap; at the limit the oldest is discarded. |
+| `EVENTS_ACK_WAIT_S` | `30.0` | How long the server waits for an ack before redelivering. |
 
 ### The durable log
 

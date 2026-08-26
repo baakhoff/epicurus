@@ -783,7 +783,8 @@ class LlmGateway:
         answering* — an expired app token, the container down — means we do not know, and
         reporting `configured: false` there sends them hunting for a key they already set.
         That is precisely how #728 stayed misdiagnosed, so the distinction is now carried in
-        the data (the shell renders it).
+        the data. The core reports it; drawing it is the shell's job (ADR-0018) and is not
+        wired up yet — nothing in ``services/web`` reads ``key_state`` today.
         """
         if secret_path is None:  # the local runtime holds no key at all
             return "not_required", None

@@ -10,7 +10,7 @@ import hvac
 import pytest
 from testcontainers.core.container import DockerContainer
 
-from epicurus_core.secret_store import SecretError, SecretStore
+from epicurus_core.secret_store import SecretError, SecretNotFoundError, SecretStore
 
 pytestmark = pytest.mark.integration
 
@@ -64,6 +64,26 @@ async def test_bad_token_raises(openbao_url: str) -> None:
     store = SecretStore(openbao_url, "wrong-token")
     with pytest.raises(SecretError):
         await store.get("api/key", tenant_id="acme")
+
+
+async def test_a_missing_secret_and_an_unreachable_store_raise_different_errors(
+    openbao_url: str,
+) -> None:
+    """ "There is no secret here" and "we could not ask" are different facts (#728).
+
+    Both are a ``SecretError`` — every existing caller keeps working — but only the first is
+    a ``SecretNotFoundError``. Collapsing them is how an expired app token got read as a
+    fleet of unconfigured providers; a caller that renders a diagnostic needs to tell them
+    apart, and it can only do that if the store says which one happened.
+    """
+    good = SecretStore(openbao_url, _TOKEN)
+    with pytest.raises(SecretNotFoundError):
+        await good.get("nothing/here", tenant_id="acme")
+
+    denied = SecretStore(openbao_url, "wrong-token")
+    with pytest.raises(SecretError) as caught:
+        await denied.get("nothing/here", tenant_id="acme")
+    assert not isinstance(caught.value, SecretNotFoundError)
 
 
 async def test_authentication_is_checked_once(

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 from structlog.testing import capture_logs
 
-from epicurus_core import SecretError
+from epicurus_core import EventBus, SecretError, SecretNotFoundError, SecretStore
 from epicurus_core_app.llm.gateway import (
     _CONNECT_TIMEOUT_S,
     _UNBOUNDED_READ_S,
@@ -27,15 +27,25 @@ from epicurus_core_app.llm.saved_models import SavedHostedModelStore, SavedModel
 
 
 class _FakeSecrets:
-    """A stand-in for SecretStore: returns seeded secrets, else raises SecretError."""
+    """A stand-in for SecretStore: returns seeded secrets, else says there is none.
 
-    def __init__(self, data: dict[str, dict[str, Any]] | None = None) -> None:
+    ``unreachable`` makes every read fail the *other* way — the store could not be asked at
+    all (an expired token, OpenBao down). The real store distinguishes the two by exception
+    type, so this one must too, or no test could tell them apart either.
+    """
+
+    def __init__(
+        self, data: dict[str, dict[str, Any]] | None = None, *, unreachable: bool = False
+    ) -> None:
         self._data = data or {}
+        self._unreachable = unreachable
 
     async def get(self, path: str, tenant_id: str | None = None) -> dict[str, Any]:
+        if self._unreachable:
+            raise SecretError(f"failed to read secret {path}: HTTP 403 — token expired")
         if path in self._data:
             return self._data[path]
-        raise SecretError(f"not found: {path}")
+        raise SecretNotFoundError(f"secret not found: {path}")
 
 
 class _FakeBus:
@@ -88,9 +98,10 @@ def _gateway(
         default_model="llama3.2",
         keep_alive="5m",
         power=power or PowerController(),
-        secrets=secrets or _FakeSecrets(),
+        # Structural stand-ins: the gateway only ever calls `get`/`set`/`delete` and `publish`.
+        secrets=cast("SecretStore", secrets or _FakeSecrets()),
         default_tenant="local",
-        bus=bus or _FakeBus(),
+        bus=cast("EventBus", bus or _FakeBus()),
         fallbacks=fallbacks or [],
         num_retries=2,
         timeout=timeout,
@@ -201,6 +212,39 @@ async def test_providers_reports_configured() -> None:
     assert infos["local"].local and infos["local"].configured
     assert infos["claude"].configured  # key seeded
     assert not infos["gpt"].configured  # no key
+
+
+async def test_providers_names_the_three_key_states() -> None:
+    # `configured` is one bit over three facts. It stays (existing readers depend on it);
+    # `key_state` carries what it cannot say.
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}})
+    infos = {p.alias: p for p in await _gateway(secrets=secrets).providers()}
+    assert infos["local"].key_state == "not_required"  # the local runtime holds no key
+    assert infos["claude"].key_state == "present"
+    assert infos["gpt"].key_state == "missing"  # OpenBao answered: nothing there
+    assert all(info.key_error is None for info in infos.values())
+
+
+async def test_an_unreachable_secret_store_is_not_reported_as_unconfigured() -> None:
+    """#728's misdiagnosis, pinned.
+
+    An expired app token made every hosted provider read as `configured: false`, which sends
+    an operator to re-enter keys they already set instead of to the token. "We could not
+    ask" is a different fact from "there is no key", and it must be said differently.
+    """
+    secrets = _FakeSecrets({"llm/anthropic": {"api_key": "k"}}, unreachable=True)
+    infos = {p.alias: p for p in await _gateway(secrets=secrets).providers()}
+
+    assert infos["claude"].key_state == "unavailable"
+    assert infos["gpt"].key_state == "unavailable"
+    # Still falsy, so nothing downstream starts routing to a provider we cannot key…
+    assert not infos["claude"].configured
+    # …but the payload now says *why*, and the reason names the token (the #728 hint).
+    assert infos["claude"].key_error is not None
+    assert "403" in infos["claude"].key_error
+    # The local runtime needs no store at all, so an outage must not touch it.
+    assert infos["local"].key_state == "not_required"
+    assert infos["local"].configured
 
 
 async def test_falls_back_when_primary_fails(monkeypatch: pytest.MonkeyPatch) -> None:

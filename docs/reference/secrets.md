@@ -30,7 +30,7 @@ class SecretStore:
 
 | Method | Description |
 | --- | --- |
-| `get(path, tenant_id=None) -> dict[str, Any]` | Read a secret's data. Raises [`SecretError`](#secreterror) if it does not exist. |
+| `get(path, tenant_id=None) -> dict[str, Any]` | Read a secret's data. Raises [`SecretNotFoundError`](#secreterror) when there is nothing at that path, [`SecretError`](#secreterror) when the store could not be asked. |
 | `set(path, data, tenant_id=None) -> None` | Create or update a secret. |
 | `delete(path, tenant_id=None) -> None` | Delete a secret and all its versions. |
 | `renew_self() -> int` | Renew the token's own lease; returns the granted TTL in seconds. |
@@ -60,6 +60,18 @@ belongs to the token, not the client. See
 
 Raised when a secret can't be read or written — missing, authentication failure,
 or a backend error.
+
+`SecretNotFoundError` is a **subclass** raised by `get` for exactly one of those: the store
+answered, and there is nothing at that path. Everything else — an expired token, a 403,
+OpenBao unreachable — stays a plain `SecretError`. `except SecretError` therefore keeps
+catching both, and no existing caller changes.
+
+Catch them apart when you are *reporting* rather than *recovering*. "There is no key here"
+and "we could not ask" mean opposite things to an operator: the first says go set one, the
+second says look at the token. Collapsing them is what made #728's expired app token read as
+a fleet of unconfigured LLM providers, which sent the operator to re-enter keys that were
+already there. The LLM gateway's `ProviderInfo.key_state` (`not_required` / `present` /
+`missing` / `unavailable`) is the shape that distinction takes on the wire.
 
 ### Example
 

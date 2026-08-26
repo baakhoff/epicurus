@@ -96,7 +96,7 @@ from epicurus_core.review import (
     ReviewSuggestion,
 )
 from epicurus_core.routing import route_paths
-from epicurus_core.secret_store import SecretError, SecretStore
+from epicurus_core.secret_store import SecretError, SecretNotFoundError, SecretStore
 from epicurus_core.tenancy import (
     TenantError,
     current_tenant,
@@ -180,6 +180,7 @@ __all__ = [
     "Role",
     "S3FileStore",
     "SecretError",
+    "SecretNotFoundError",
     "SecretStore",
     "SideEffect",
     "TenantError",

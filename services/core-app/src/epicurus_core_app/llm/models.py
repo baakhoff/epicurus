@@ -9,6 +9,7 @@ gateway-internal.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -17,6 +18,7 @@ from epicurus_core import ChatMessage, ChatResult, Role
 __all__ = [
     "ChatMessage",
     "ChatResult",
+    "KeyState",
     "ModelDetails",
     "ModelInfo",
     "PowerState",
@@ -109,14 +111,32 @@ class ModelDetails(BaseModel):
     capabilities: list[str] = []
 
 
+KeyState = Literal["not_required", "present", "missing", "unavailable"]
+"""What the secret store said about a provider's key.
+
+Three real answers, not two: ``missing`` means OpenBao replied and has nothing at that path;
+``unavailable`` means OpenBao could not be asked at all. Collapsing them is #728's
+misdiagnosis — an expired app token made every hosted provider read as *unconfigured*, which
+sends an operator hunting for a key they already set instead of at the token. ``not_required``
+is the local runtime, which has no key to hold.
+"""
+
+
 class ProviderInfo(BaseModel):
-    """A configured LLM provider and whether its key is present."""
+    """A configured LLM provider and what the secret store knows about its key."""
 
     alias: str
     local: bool
+    # True for `not_required` and `present`. Kept as-is — it is what the picker and the
+    # Models page already read — with `key_state` carrying the distinction it cannot make.
     configured: bool
     # The "custom" (any-OpenAI-compatible) provider also needs an endpoint URL.
     needs_base_url: bool = False
+    key_state: KeyState = "not_required"
+    # Why the store could not answer, when `key_state` is `unavailable`. The message names
+    # the path and the HTTP status, and a 403 already names token expiry as the likely cause
+    # (#728). Never a credential — the store raises about access, not contents.
+    key_error: str | None = None
 
 
 class UsageEvent(BaseModel):

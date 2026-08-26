@@ -23,7 +23,7 @@ from typing import Any
 import httpx
 import litellm
 
-from epicurus_core import EventBus, SecretError, SecretStore, get_logger
+from epicurus_core import EventBus, SecretError, SecretNotFoundError, SecretStore, get_logger
 from epicurus_core_app.llm import providers as registry
 from epicurus_core_app.llm.compaction import (
     compact_messages,
@@ -34,6 +34,7 @@ from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsSto
 from epicurus_core_app.llm.models import (
     ChatMessage,
     ChatResult,
+    KeyState,
     ModelDetails,
     ModelInfo,
     ProviderInfo,
@@ -757,29 +758,45 @@ class LlmGateway:
         await self._secrets.delete(provider.secret_path, tenant_id or self._default_tenant)
 
     async def providers(self, tenant_id: str | None = None) -> list[ProviderInfo]:
-        """List the providers and whether each one's key is present in OpenBao."""
+        """List the providers and what the secret store knows about each one's key."""
         tenant = tenant_id or self._default_tenant
         infos: list[ProviderInfo] = []
         for alias, provider in registry.PROVIDERS.items():
-            configured = provider.is_local or await self._key_present(provider.secret_path, tenant)
+            state, detail = await self._key_state(provider.secret_path, tenant)
             infos.append(
                 ProviderInfo(
                     alias=alias,
                     local=provider.is_local,
-                    configured=configured,
+                    configured=state in ("not_required", "present"),
                     needs_base_url=provider.needs_base_url,
+                    key_state=state,
+                    key_error=detail,
                 )
             )
         return infos
 
-    async def _key_present(self, secret_path: str | None, tenant: str) -> bool:
-        if secret_path is None:
-            return True
+    async def _key_state(self, secret_path: str | None, tenant: str) -> tuple[KeyState, str | None]:
+        """Whether the provider's key is there — or whether we could even ask (#728).
+
+        The two failures are not the same fact and must not report the same one. OpenBao
+        answering "nothing at that path" means the operator has not set a key. OpenBao *not
+        answering* — an expired app token, the container down — means we do not know, and
+        reporting `configured: false` there sends them hunting for a key they already set.
+        That is precisely how #728 stayed misdiagnosed, so the distinction is now carried in
+        the data (the shell renders it).
+        """
+        if secret_path is None:  # the local runtime holds no key at all
+            return "not_required", None
         try:
             await self._secrets.get(secret_path, tenant)
-        except SecretError:
-            return False
-        return True
+        except SecretNotFoundError:
+            return "missing", None
+        except SecretError as exc:
+            # Auth, network, a 403 that already names token expiry as the likely cause — all
+            # of them "we could not ask", none of them "there is no key".
+            log.warning("provider key state unknown", path=secret_path, error=str(exc))
+            return "unavailable", str(exc)
+        return "present", None
 
     async def models(
         self, tenant_id: str | None = None, *, with_capabilities: bool = False

@@ -77,25 +77,81 @@ reverse proxy, auth proxy) in front — see [Configuration](configuration.md).
 > — copy-pasteable Tailscale / reverse-proxy / OIDC recipes and a security checklist —
 > before setting `BIND_ADDRESS` to anything but loopback.
 
-| Service | Port(s) |
-| --- | --- |
-| Postgres | 5432 |
-| Valkey | 6379 |
-| NATS | 4222 (client), 8222 (monitoring) |
-| Qdrant | 6333 (HTTP), 6334 (gRPC) |
-| OpenBao | 8200 |
-| MinIO | 9000 (S3 API), 9001 (console) |
-| Gateway (Traefik) | 8088 (web), 8089 (dashboard) |
-| core-app (runtime) | 8082 |
-| web (UI shell) | 8084 |
-| echo (module) | 8080 |
-| Grafana | 3000 |
-| Prometheus | 9090 |
-| Loki | 3100 |
-| Tempo (OTLP) | 4317 (gRPC), 4318 (HTTP) |
+The core, web shell, and every module (`docker compose up`) each publish a **host** port in
+the `8080`–`8093` band; the [edge gateway](../infrastructure/index.md) fronts them all at
+`8088` and is the intended front door, so reaching a module's own port directly is mostly
+for debugging. This table is rebuilt from the canonical
+[host-port registry](../reference/ports.md), which is generated from what the compose
+fragments actually publish — check there first if a port below looks out of date.
+
+| Service | Kind | Port | Env override |
+| --- | --- | --- | --- |
+| echo | module (reference) | 8080 | `ECHO_PORT` |
+| core-app | core | 8082 | `CORE_PORT` |
+| storage | module | 8083 | `STORAGE_PORT` |
+| web (UI shell) | core | 8084 | `WEB_PORT` |
+| knowledge | module | 8085 | `KNOWLEDGE_PORT` |
+| websearch | module | 8086 | `WEBSEARCH_PORT` |
+| calendar | module | 8087 | `CALENDAR_PORT` |
+| Gateway (Traefik) — HTTP entrypoint | edge | 8088 | `EDGE_HTTP_PORT` |
+| Gateway (Traefik) — dashboard | edge | 8089 | `EDGE_DASHBOARD_PORT` |
+| mail | module | 8090 | `MAIL_PORT` |
+| tasks | module | 8091 | `TASKS_PORT` |
+| notes | module | 8092 | `NOTES_PORT` |
+| messaging | module | 8093 | `MESSAGING_PORT` |
+
+Data plane — up with `task infra-up` or the full `docker compose up`:
+
+| Service | Port(s) | Env override |
+| --- | --- | --- |
+| Postgres | 5432 | `POSTGRES_PORT` |
+| Valkey | 6379 | `VALKEY_PORT` |
+| NATS | 4222 (client), 8222 (monitoring) | `NATS_PORT` / `NATS_MONITOR_PORT` |
+| Qdrant | 6333 (HTTP), 6334 (gRPC) | `QDRANT_HTTP_PORT` / `QDRANT_GRPC_PORT` |
+| OpenBao | 8200 | `OPENBAO_PORT` |
+| MinIO | 9000 (S3 API), 9001 (console) | `MINIO_API_PORT` / `MINIO_CONSOLE_PORT` |
+
+Observability — **opt-in**: these only bind when the stack is started with
+`docker compose --profile observability up` (a plain `docker compose up` never publishes
+them, so the ports are free for other use until you enable the profile):
+
+| Service | Port | Env override |
+| --- | --- | --- |
+| Grafana | 3000 | `GRAFANA_PORT` |
+| Prometheus | 9090 | `PROMETHEUS_PORT` |
+| Alertmanager | 9093 | `ALERTMANAGER_PORT` |
+| Loki | 3100 | `LOKI_PORT` |
+| Tempo (OTLP) | 4317 (gRPC), 4318 (HTTP) | `OTLP_GRPC_PORT` / `OTLP_HTTP_PORT` |
 
 Once the stack is up, open the **web UI** at <http://localhost:8088/> — chat with
 the agent, manage models and provider keys, configure modules, and toggle power.
-**Grafana** at <http://localhost:3000> has logs, metrics, and traces. To change any
-host port, set it in your root `.env` (the full stack reads it) — see
-[Configuration](configuration.md).
+**Grafana** (once the `observability` profile is enabled) has logs, metrics, and traces at
+<http://localhost:3000>. To change any host port, set it in your root `.env` (the full
+stack reads it) — see [Configuration](configuration.md).
+
+## First-run models
+
+Model weights are never baked into the image, so a fresh Ollama volume starts empty. The
+**core** ensures its default local models exist automatically the first time it starts
+(#773, ADR-0118): a background task waits for Ollama to become reachable, resolves the
+*effective* chat and embedding defaults — the default tenant's saved preference, else
+`LLM_DEFAULT_MODEL` (`llama3.2`) and `MEMORY_EMBED_MODEL` (`nomic-embed-text`) — and pulls
+whichever of the two are missing, applying the same size-aware context-window suggestion a
+manual pull from the Models page gets.
+
+This never blocks startup, readiness, or a live chat turn — the pull runs in the background
+while the rest of the core serves normally, so the very first chat, or a background job
+like the knowledge indexer or memory recall, may briefly error until the pull finishes. A
+failed pull retries with backoff and resumes a partial download; if it keeps failing, the
+core logs a warning and leaves the Models page as the manual fallback. A hosted model id
+(e.g. `claude/…`) is skipped — there is nothing to pull locally — and a deployment running
+no Ollama at all costs one warning after a bounded wait, never a crash loop. A deployment
+that already has its models present no-ops after a single check.
+
+Tune it with `LLM_BOOTSTRAP_MODELS` in your `.env`:
+
+| Value | Behavior |
+| --- | --- |
+| `auto` (default) | Pulls the effective chat + embedding defaults. |
+| *(blank)* | Disables the bootstrap — air-gapped installs, or anywhere you'd rather pick models by hand. |
+| `model-a,model-b` | Pulls exactly this comma-separated list instead. |

@@ -2,9 +2,10 @@
 
 The agent is purely reactive: every turn today needs an HTTP caller or an inbound bridge
 message. A scheduled turn is the time-driven half of proactivity (the event-driven half —
-listeners/alerts — is a later milestone): an operator-authored prompt ("summarize today's
-calendar, unread mail, and due tasks") that fires on its own, daily or weekly, at a local
-hour, and lands in an ordinary chat session the operator can open like any other.
+listeners/alerts — shipped alongside it; see the automations engine in ``automations/``):
+an operator-authored prompt ("summarize today's calendar, unread mail, and due tasks")
+that fires on its own, daily or weekly, at a local hour, and lands in an ordinary chat
+session the operator can open like any other.
 
 This module owns:
 

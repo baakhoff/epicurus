@@ -8,9 +8,11 @@ It is designed to run on your own machine or server under Docker and to stay
 private — you choose how to reach it (locally, over your LAN, behind a VPN, or
 however you expose your own server).
 
-> **Status.** Phase 1 is complete: the agent, LLM gateway, cross-chat memory, and
-> the web UI shell are live. This documentation covers what exists today and grows
-> as capabilities land. Phase 2 (knowledge & storage) is next.
+> **Status.** Working toward the **1.0.0 — Foundation complete & stable** milestone — a
+> quality gate reached when the basics are solid in daily use, not a feature checklist:
+> the agent, LLM gateway, cross-chat memory, and web UI shell are live, alongside the
+> knowledge, storage, web-search, calendar, mail, tasks, notes, and messaging modules.
+> This documentation covers what exists today and grows as capabilities land.
 
 ## Navigate
 
@@ -38,9 +40,11 @@ epicurus
 ├─ modules        (sidecars; add one by running one more container)
 │  ├─ storage     MinIO object store + chat-upload sink; agent file tools over the core file space
 │  ├─ knowledge   Obsidian-vault RAG (incremental index + search)
+│  ├─ websearch   self-hosted web search (SearXNG) — no API key required
 │  ├─ calendar    provider-neutral calendar (local + Google)
 │  ├─ mail        Gmail-backed mail — full client page (browse · read · reply · compose)
 │  ├─ tasks       task management (Google Tasks + local store)
+│  ├─ notes       Obsidian-style notes — agent proposes changes, never reads a body
 │  ├─ messaging   chat bridges (external channels drive a turn; reply routes back)
 │  └─ echo        the contract-proof reference module
 ├─ data plane     Postgres · Valkey · NATS · Qdrant · OpenBao · MinIO

@@ -264,7 +264,7 @@ async def _review(tmp_path: Path) -> tuple[SuggestionReview, SuggestionStore, _F
     review = SuggestionReview(
         store,
         pages,
-        indexer,
+        indexer,  # type: ignore[arg-type]
         reader=DiskVaultReader(vault),
         tenant=TENANT,
         audit=await _audit_store(),
@@ -380,7 +380,7 @@ async def _read_only_review(
     review = SuggestionReview(
         store,
         pages,
-        indexer,
+        indexer,  # type: ignore[arg-type]
         reader=DiskVaultReader(vault),
         tenant=TENANT,
         audit=await _audit_store(),
@@ -543,7 +543,7 @@ async def _module_with_store(store: SuggestionStore, files_root: Path, *, review
 
 
 def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
-    return ToolEnvelope.model_validate_json(content[0].text)  # type: ignore[attr-defined]
+    return ToolEnvelope.model_validate_json(content[0].text)
 
 
 async def test_propose_edit_stages_a_suggestion(tmp_path: Path) -> None:

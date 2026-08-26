@@ -97,7 +97,7 @@ async def _client_for(
             )
         )
         async with AsyncClient(
-            transport=ASGITransport(app=app),  # type: ignore[arg-type]
+            transport=ASGITransport(app=app),
             base_url="http://test",
         ) as c:
             yield c
@@ -113,11 +113,31 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
         yield c
 
 
-async def _poll_until_idle(client: AsyncClient, *, attempts: int = 300) -> dict[str, Any]:
-    """Poll ``GET`` until ``current_run`` clears — the HTTP-level way to await completion."""
+async def _poll_until_idle(
+    client: AsyncClient, *, after_id: int | None, attempts: int = 300
+) -> dict[str, Any]:
+    """Poll ``GET`` until a run newer than *after_id* has completed and landed in ``last_run``.
+
+    ``current_run`` reads ``None`` both *before* a run starts and *after* it finishes —
+    polling for "cleared" alone races the background task's very first checkpoint
+    (``POST /run`` returns before the batch runs, #561) and can report the pre-run idle
+    state instead of waiting at all (#833). It's worse on repeated runs in the same
+    test: a *stale* ``last_run`` from a prior call is just as non-``None`` as a fresh
+    one, so "current_run is None and last_run is not None" isn't enough either.
+    *after_id* — ``last_run["id"]`` (or ``None`` for a client that has never run) as it
+    stood *before* the triggering ``POST`` — disambiguates the two: history ids are
+    assigned on persist and only ever increase, so the first ``last_run`` whose id
+    differs from *after_id* is unambiguously the new one. (A ``started_at`` string
+    comparison looks tempting instead, but the value round-trips through SQLite's
+    ``DateTime`` column and loses its UTC offset on the way — ``+00:00`` in, bare
+    naive-looking string out — so it never compares equal to the one the ``POST``
+    response carried.) Callers chain calls by feeding each return's ``last_run["id"]``
+    back in as the next ``after_id``.
+    """
     for _ in range(attempts):
         body: dict[str, Any] = (await client.get("/platform/v1/maintenance")).json()
-        if body["current_run"] is None:
+        last = body["last_run"]
+        if body["current_run"] is None and last is not None and last["id"] != after_id:
             return body
         await asyncio.sleep(0.01)
     pytest.fail("maintenance run never completed")
@@ -210,7 +230,7 @@ async def test_run_returns_202_with_pending_progress_then_completion_updates_las
     # time this response is decoded — the batch runs concurrently with the response send).
     assert all(j["status"] in ("pending", "running", "ok") for j in body["jobs"])
 
-    status = await _poll_until_idle(client)
+    status = await _poll_until_idle(client, after_id=None)
     assert status["last_run"]["scope"] == "all"
     assert len(status["last_run"]["jobs"]) == 2
     assert all(j["status"] == "ok" for j in status["last_run"]["jobs"])
@@ -226,14 +246,15 @@ async def test_post_run_does_not_block_on_a_gated_job(tmp_path: Path) -> None:
     async with _client_for(tmp_path, [_gated_job("slow", gate)]) as client:
         resp = await asyncio.wait_for(client.post("/platform/v1/maintenance/run"), timeout=2)
         assert resp.status_code == 202
-        assert resp.json()["jobs"][0]["status"] in ("pending", "running")
+        run = resp.json()
+        assert run["jobs"][0]["status"] in ("pending", "running")
 
         status = (await client.get("/platform/v1/maintenance")).json()
         assert status["current_run"] is not None
         assert status["last_run"] is None  # still in flight — nothing published yet
 
         gate.set()
-        await _poll_until_idle(client)
+        await _poll_until_idle(client, after_id=None)
 
 
 async def test_concurrent_post_run_returns_409_and_joins_the_inflight_run(tmp_path: Path) -> None:
@@ -251,7 +272,7 @@ async def test_concurrent_post_run_returns_409_and_joins_the_inflight_run(tmp_pa
         assert status["current_run"]["started_at"] == started_at
 
         gate.set()
-        await _poll_until_idle(client)
+        await _poll_until_idle(client, after_id=None)
 
 
 async def test_get_exposes_current_run_shape_while_running(tmp_path: Path) -> None:
@@ -273,7 +294,7 @@ async def test_get_exposes_current_run_shape_while_running(tmp_path: Path) -> No
         assert current["jobs"][0]["status"] in ("pending", "running")
 
         gate.set()
-        await _poll_until_idle(client)
+        await _poll_until_idle(client, after_id=None)
 
 
 # ── persisted run history (#733) ──────────────────────────────────────────────────
@@ -281,7 +302,7 @@ async def test_get_exposes_current_run_shape_while_running(tmp_path: Path) -> No
 
 async def test_manual_run_history_reports_source_manual(client: AsyncClient) -> None:
     await client.post("/platform/v1/maintenance/run")
-    status = await _poll_until_idle(client)
+    status = await _poll_until_idle(client, after_id=None)
     last = status["last_run"]
     assert last["source"] == "manual"
     assert last["id"] is not None
@@ -290,9 +311,9 @@ async def test_manual_run_history_reports_source_manual(client: AsyncClient) -> 
 
 async def test_run_history_page_lists_newest_first(client: AsyncClient) -> None:
     await client.post("/platform/v1/maintenance/run")
-    await _poll_until_idle(client)
+    first_status = await _poll_until_idle(client, after_id=None)
     await client.post("/platform/v1/maintenance/run")
-    await _poll_until_idle(client)
+    await _poll_until_idle(client, after_id=first_status["last_run"]["id"])
 
     page = (await client.get("/platform/v1/maintenance/runs")).json()
     assert len(page["runs"]) == 2
@@ -301,9 +322,11 @@ async def test_run_history_page_lists_newest_first(client: AsyncClient) -> None:
 
 
 async def test_run_history_page_respects_limit_and_cursor(client: AsyncClient) -> None:
+    after_id = None
     for _ in range(3):
         await client.post("/platform/v1/maintenance/run")
-        await _poll_until_idle(client)
+        status = await _poll_until_idle(client, after_id=after_id)
+        after_id = status["last_run"]["id"]
 
     first_page = (await client.get("/platform/v1/maintenance/runs", params={"limit": 2})).json()
     assert len(first_page["runs"]) == 2

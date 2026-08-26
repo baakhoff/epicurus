@@ -132,7 +132,7 @@ def test_source_ref_is_deterministic_so_the_core_can_dedupe_across_calls() -> No
         "kind": "article",
         "site": "Example",
     }
-    assert encode_source_ref(**args) == encode_source_ref(**args)  # type: ignore[arg-type]
+    assert encode_source_ref(**args) == encode_source_ref(**args)
 
 
 def test_source_and_result_refs_of_the_same_url_are_distinct() -> None:

@@ -8,10 +8,11 @@
 > plus a growing fleet of sidecar modules (calendar, notes, tasks, mail, chat,
 > knowledge base, storage), private and self-hosted on your own machine or server.
 
-**Status:** ✅ _Phases 0–3 complete, consolidated through 3.5 / 3.7 / 3.8 — the agent,
-LLM gateway, cross-chat memory, and web shell, plus the **knowledge, storage, web-search,
-calendar, mail, tasks, and notes** modules, module-contributed left-nav pages, and chat
-entity-references + attachments. First public release: **v0.2.0**. Next: chat bridges (Phase 4)._ ·
+**Status:** 🟡 _Working toward the **1.0.0 — Foundation complete & stable** gate (a quality
+bar, not a feature checklist): the agent, LLM gateway, cross-chat memory, and web shell, the
+**knowledge, storage, web-search, calendar, mail, tasks, and notes** modules, and the
+**messaging** module (chat bridges — loopback, Discord, Telegram) have all shipped; Slack and
+WhatsApp arrive at milestone **2.0.0**. Latest tagged release: **v0.2.0**._ ·
 **License:** [AGPL-3.0](LICENSE)
 
 epicurus runs on your own machine under Docker. A **core** service runs the agent

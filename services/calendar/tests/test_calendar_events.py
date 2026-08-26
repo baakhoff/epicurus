@@ -99,7 +99,7 @@ async def test_no_bus_skips_emission_without_error() -> None:
     store = LocalEventStore(engine)
     await store.init()
     local = LocalCalendarProvider(store=store)
-    router = CollectionRouter(local=local, external={}, prefs=_StaticPrefs())  # type: ignore[arg-type]
+    router = CollectionRouter(local=local, external={}, prefs=_StaticPrefs())
     await router.create_event(tenant_id=TENANT, title="x", start=_dt(9), end=_dt(10))  # no raise
 
 
@@ -224,8 +224,8 @@ async def test_starting_soon_fires_for_an_event_inside_the_lead_window() -> None
         provider=provider,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        now=now,  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        now=now,
     )
     [envelope] = bus.envelopes_of_type("calendar.event_starting_soon")
     assert envelope.dedup_key == f"local:{event.id}:starting_soon"
@@ -247,8 +247,8 @@ async def test_starting_soon_does_not_fire_outside_the_lead_window() -> None:
         provider=provider,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        now=now,  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        now=now,
     )
     assert bus.envelopes_of_type("calendar.event_starting_soon") == []
 
@@ -269,8 +269,8 @@ async def test_starting_soon_fires_only_once_across_ticks() -> None:
             provider=provider,
             lead_prefs=lead_prefs,
             markers=markers,
-            bus=bus,
-            now=now,  # type: ignore[arg-type]
+            bus=bus,  # type: ignore[arg-type]
+            now=now,
         )
     assert len(bus.envelopes_of_type("calendar.event_starting_soon")) == 1
 
@@ -304,8 +304,8 @@ async def test_starting_soon_honors_a_custom_lead_time() -> None:
         provider=provider,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        now=now,  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        now=now,
     )
     # 10 minutes out, 5-minute lead → not yet due.
     assert bus.envelopes_of_type("calendar.event_starting_soon") == []
@@ -326,8 +326,8 @@ async def test_event_ended_fires_after_the_end_time_passes() -> None:
         provider=provider,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        now=now,  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        now=now,
     )
     [envelope] = bus.envelopes_of_type("calendar.event_ended")
     assert envelope.dedup_key == f"local:{event.id}:ended"
@@ -348,8 +348,8 @@ async def test_event_ended_does_not_fire_for_a_still_running_event() -> None:
         provider=provider,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        now=now,  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        now=now,
     )
     assert bus.envelopes_of_type("calendar.event_ended") == []
 
@@ -369,8 +369,8 @@ async def test_a_starting_soon_event_does_not_also_fire_ended() -> None:
         provider=provider,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        now=now,  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        now=now,
     )
     assert bus.envelopes_of_type("calendar.event_ended") == []
     assert len(bus.envelopes_of_type("calendar.event_starting_soon")) == 1

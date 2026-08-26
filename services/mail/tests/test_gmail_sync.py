@@ -29,11 +29,11 @@ from epicurus_mail.provider import MailCursor
 def _make_platform(access_token: str = "tok") -> PlatformClient:
     platform = MagicMock(spec=PlatformClient)
     platform.get_oauth_token = AsyncMock(return_value=access_token)
-    return platform  # type: ignore[return-value]
+    return platform
 
 
 def _provider() -> GmailProvider:
-    return GmailProvider(platform=_make_platform(), tenant_id="local")  # type: ignore[arg-type]
+    return GmailProvider(platform=_make_platform(), tenant_id="local")
 
 
 def _resp(data: dict[str, Any], *, status: int = 200, error: bool = False) -> MagicMock:

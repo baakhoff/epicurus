@@ -13,8 +13,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from epicurus_calendar.models import DateTimeRange, Event
-from epicurus_calendar.providers.base import CalendarProvider
+from epicurus_calendar.models import Attendee, DateTimeRange, Event
+from epicurus_calendar.providers.base import CalendarProvider, EditScope
 from epicurus_core import Collection, CollectionPrefs
 
 
@@ -47,6 +47,10 @@ class _FakeProvider(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool = False,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
+        add_meet: bool = False,
     ) -> Event:  # pragma: no cover - not exercised by these tests
         raise NotImplementedError
 
@@ -62,11 +66,20 @@ class _FakeProvider(CalendarProvider):
         location: str | None = None,
         calendar_id: str | None = None,
         all_day: bool | None = None,
+        recurrence: str | None = None,
+        attendees: list[Attendee] | None = None,
+        recurrence_timezone: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> Event | None:  # pragma: no cover - not exercised by these tests
         return self._events.get(event_id)
 
     async def delete_event(
-        self, *, tenant_id: str, event_id: str, calendar_id: str | None = None
+        self,
+        *,
+        tenant_id: str,
+        event_id: str,
+        calendar_id: str | None = None,
+        edit_scope: EditScope = "this",
     ) -> bool:  # pragma: no cover - not exercised by these tests
         return self._events.pop(event_id, None) is not None
 

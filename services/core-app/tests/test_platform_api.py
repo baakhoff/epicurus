@@ -99,9 +99,12 @@ def _app(
     prefs: LlmPrefsStore | None = None,
 ) -> FastAPI:
     app = FastAPI()
-    app.include_router(  # type: ignore[arg-type]
-        create_platform_router(_settings(embed_model=embed_model), gw, prefs=prefs)
+    router = create_platform_router(
+        _settings(embed_model=embed_model),
+        gw,  # type: ignore[arg-type]
+        prefs=prefs,
     )
+    app.include_router(router)
 
     @app.exception_handler(GatewayPausedError)
     async def _on_paused(_request: Request, exc: GatewayPausedError) -> JSONResponse:

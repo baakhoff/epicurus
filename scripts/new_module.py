@@ -125,12 +125,33 @@ def _add_to_toml_array(text: str, key: str, value: str) -> str:
     return text[: match.start("inner")] + joined + text[match.end("inner") :]
 
 
-def wire_pyproject(root: Path, pkg: str) -> None:
-    """Register the package with mypy and ruff's isort (root pyproject.toml)."""
+def _add_line_to_multiline_array(text: str, key: str, line: str) -> str:
+    """Insert ``line`` as a new entry before the closing ``]`` of the multi-line
+    TOML array ``key = [\\n ... \\n]`` (idempotent).
+
+    Mirrors ``_add_to_toml_array`` above but for mypy's ``mypy_path``/``files``
+    arrays, which are one-entry-per-line for readability (unlike ruff's
+    single-line ``known-first-party``).
+    """
+    pattern = re.compile(rf"(?m)^{re.escape(key)} = \[\n(?P<inner>(?:.*\n)*?)\]")
+    match = pattern.search(text)
+    if match is None:
+        raise RuntimeError(f"could not find multi-line `{key} = [...]` in pyproject.toml")
+    if line in match.group("inner"):
+        return text
+    insert_at = match.end("inner")
+    return text[:insert_at] + f"    {line}\n" + text[insert_at:]
+
+
+def wire_pyproject(root: Path, pkg: str, slug: str) -> None:
+    """Register the package with mypy (``mypy_path`` + ``files``) and ruff's
+    isort (root pyproject.toml)."""
     path = root / "pyproject.toml"
     text = path.read_text(encoding="utf-8")
     text = _add_to_toml_array(text, "known-first-party", pkg)
-    text = _add_to_toml_array(text, "packages", pkg)
+    src, tests = f"services/{slug}/src", f"services/{slug}/tests"
+    text = _add_line_to_multiline_array(text, "mypy_path", f'"{src}",')
+    text = _add_line_to_multiline_array(text, "files", f'"{src}", "{tests}",')
     path.write_text(text, encoding="utf-8")
 
 
@@ -245,7 +266,7 @@ def run(
         chosen = next_free_port(root)
 
     service_dir = scaffold(root, service_name, chosen, output_dir=root / "services")
-    wire_pyproject(root, pkg)
+    wire_pyproject(root, pkg, slug)
     wire_compose_include(root, slug)
     wire_module_urls(root, slug)
     wire_ci_port_reset(root, slug)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from mcp.types import TextContent
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import CONTRACT_VERSION, LIST_CAP, Collection, CollectionPrefs, CollectionRef
@@ -12,6 +13,7 @@ from epicurus_core.contracts import ToolEnvelope
 from epicurus_tasks.db import TaskStore
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task
+from epicurus_tasks.providers import TasksProvider
 from epicurus_tasks.router import TasksRouter
 from epicurus_tasks.service import (
     TASK_KIND,
@@ -33,6 +35,12 @@ TENANT = "test-tenant"
 def _parse_envelope(content: list[Any]) -> ToolEnvelope:
     """Parse the ToolEnvelope from the first text-content item of a call_tool result."""
     return ToolEnvelope.model_validate_json(content[0].text)
+
+
+def _text_of(item: object) -> str:
+    """Narrow a call_tool content item (a ContentBlock union) to its text."""
+    assert isinstance(item, TextContent)
+    return item.text
 
 
 @pytest.fixture()
@@ -605,6 +613,7 @@ def test_hover_card_shows_in_progress_status() -> None:
 
 def test_task_summary_shows_in_progress() -> None:
     ref = task_entity_ref(_task(status="in_progress"))
+    assert ref.summary is not None
     assert "In Progress" in ref.summary
 
 
@@ -957,7 +966,7 @@ async def test_tasks_update_tool_moves_via_router() -> None:
     router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
     google.tasks = [Task(id="d1", title="Move me")]
     module = build_module(router, tenant_id=TENANT)
-    await module.call_tool(  # type: ignore[attr-defined]
+    await module.call_tool(
         "tasks_update", {"task_id": "d1", "list_id": "@default", "to_list_id": "work"}
     )
     assert ("@default", "d1") in google.deleted
@@ -982,16 +991,16 @@ async def test_tasks_lists_tool_reports_categories() -> None:
         return [("@default", "My Tasks"), ("work", "Work")]
 
     module = build_module(_FakeGoogleTasks(), tenant_id=TENANT, categories=cats)
-    content, _ = await module.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
-    text = content[0].text
+    content, _ = await module.call_tool("tasks_lists", {})
+    text = _text_of(content[0])
     assert "My Tasks — id: @default" in text
     assert "Work — id: work" in text
 
 
 async def test_tasks_lists_tool_reports_default_only_without_categories() -> None:
     module = build_module(_FakeGoogleTasks(), tenant_id=TENANT)  # no discovery hook
-    content, _ = await module.call_tool("tasks_lists", {})  # type: ignore[attr-defined]
-    assert "default task list" in content[0].text.lower()
+    content, _ = await module.call_tool("tasks_lists", {})
+    assert "default task list" in _text_of(content[0]).lower()
 
 
 # ── Cross-list resolution when list_id is omitted (#475) ──────────────────────
@@ -1074,7 +1083,7 @@ async def test_tasks_complete_tool_resolves_across_lists_without_list_id() -> No
     router, _local, google = await _local_router(CollectionPrefs(enabled=refs))
     google.tasks_by_list = {"@default": [], "work": [Task(id="w1", title="Hiding in work")]}
     module = build_module(router, tenant_id=TENANT)
-    await module.call_tool("tasks_complete", {"task_id": "w1"})  # type: ignore[attr-defined]
+    await module.call_tool("tasks_complete", {"task_id": "w1"})
     assert google.last_list_id == "work"
 
 
@@ -1104,7 +1113,10 @@ async def test_router_create_list_raises_when_ambiguous() -> None:
     store = TaskStore(engine)
     await store.init()
     local = LocalTasksProvider(store)
-    external = {"google": _FakeGoogleTasks(), "google2": _FakeGoogleTasks()}
+    external: dict[str, TasksProvider] = {
+        "google": _FakeGoogleTasks(),
+        "google2": _FakeGoogleTasks(),
+    }
     router = TasksRouter(local=local, external=external, prefs=_StaticPrefs(CollectionPrefs()))
     with pytest.raises(ValueError, match="more than one"):
         await router.create_list(TENANT, "Groceries")
@@ -1120,9 +1132,7 @@ async def _empty_store() -> TaskStore:
 async def test_tasks_create_list_tool_returns_the_new_collection() -> None:
     router, _local, _google = await _local_router(CollectionPrefs())
     module = build_module(router, tenant_id=TENANT)
-    _, result = await module.call_tool(  # type: ignore[attr-defined]
-        "tasks_create_list", {"title": "Groceries"}
-    )
+    _, result = await module.call_tool("tasks_create_list", {"title": "Groceries"})
     assert result["account"] == "google"
     assert result["collection"] == "new-list-id"
     assert result["title"] == "Groceries"
@@ -1131,6 +1141,4 @@ async def test_tasks_create_list_tool_returns_the_new_collection() -> None:
 async def test_tasks_create_list_tool_raises_with_no_external_provider() -> None:
     module = build_module(LocalTasksProvider(await _empty_store()), tenant_id=TENANT)
     with pytest.raises(Exception, match="connect Google"):
-        await module.call_tool(  # type: ignore[attr-defined]
-            "tasks_create_list", {"title": "Groceries"}
-        )
+        await module.call_tool("tasks_create_list", {"title": "Groceries"})

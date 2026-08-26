@@ -75,7 +75,7 @@ async def _review(
 
 
 def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
-    return ToolEnvelope.model_validate_json(content[0].text)  # type: ignore[attr-defined]
+    return ToolEnvelope.model_validate_json(content[0].text)
 
 
 # ── validate / store ──────────────────────────────────────────────────────────

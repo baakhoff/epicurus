@@ -12,6 +12,7 @@ every test here asserts on **both**, and the important assertions are the ``rout
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -47,7 +48,7 @@ async def _host(*, classes: dict[str, SideEffect] | None = None) -> McpHost:
     return host
 
 
-def _provider(classes: dict[str, SideEffect]):
+def _provider(classes: dict[str, SideEffect]) -> Callable[[], Awaitable[dict[str, SideEffect]]]:
     async def _get() -> dict[str, SideEffect]:
         return classes
 

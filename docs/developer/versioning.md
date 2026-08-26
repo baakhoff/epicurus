@@ -10,15 +10,16 @@ Everything is `0.x` while the platform settles — see [The 0.x phase](#the-0x-p
 
 **1. Per-component version.** Every deployable unit owns its version in its own
 manifest — `pyproject.toml` for `libs/epicurus-core` and the Python services
-(core-app, echo, knowledge, storage, websearch, calendar, mail, tasks), and
-`package.json` for `web`, the one JS/TS service. Versions move
+(core-app, echo, knowledge, storage, websearch, calendar, mail, messaging, notes,
+tasks), and `package.json` for `web`, the one JS/TS service. Versions move
 **independently**: a change to the mail module never forces a core-app bump.
 
 **2. Bundled-stack version.** A repo **git tag** (`vMAJOR.MINOR.PATCH`) marks a
-coherent release of the whole platform. Until the Phase-7 "add by domain"
-installer makes modules individually installable, the stack ships as one bundle
-(ADR-0012): a pushed tag triggers the [release workflow](releases.md), which
-publishes a GitHub Release and pushes every service image to GHCR.
+coherent release of the whole platform. Until modules become individually
+installable — milestone **4.0.0**, module ecosystem & distribution — the stack
+ships as one bundle (ADR-0012): a pushed tag triggers the [release
+workflow](releases.md), which publishes a GitHub Release and pushes every service
+image to GHCR.
 
 > The repo-root `pyproject.toml` stays at `0.0.0` on purpose: it is the
 > uv-workspace aggregator, not a release unit. The stack version lives in the git
@@ -71,3 +72,31 @@ See **[Releases](releases.md)** for the mechanics (tag → workflow → GHCR). N
 changes are recorded in
 [`CHANGELOG.md`](https://github.com/baakhoff/epicurus/blob/main/CHANGELOG.md),
 following [Keep a Changelog](https://keepachangelog.com/).
+
+## Module graduation at v1.0.0
+
+Reaching the `v1.0.0` stack tag triggers a one-time, coordinated bump for a fixed
+set of components — distinct from each component earning its own MAJOR
+independently under the table above (ADR-0017 amendment, 2026-07-11).
+
+**Graduates to `1.0.0`:** `epicurus-core`, `core-app`, `web`, `storage`,
+`knowledge`, `websearch`, `mail`, `notes`, `calendar`, `tasks` — every component
+that carried the "foundation complete & stable" milestone.
+
+**Stays `0.x`:** `messaging` (still finding its shape ahead of its own 2.0.0
+milestone — more bridges and provider-seam changes are expected) and `echo` (a
+reference/example module, never meant to signal production-readiness).
+
+After the tag, ordinary per-component SemVer resumes — a module's next MAJOR is
+its own again. The graduation bump is its **own commit** (version fields only, no
+code change bundled in), timed after every in-flight pre-1.0.0 PR has landed — an
+early bump collides with their own version-line edits.
+
+## Schema changes before 1.0
+
+The startup reconcile (`epicurus_core.db.ensure_columns` — see the
+[reference](../reference/db.md), ADR-0067) is **additive-only by design**: it adds
+columns the ORM model declares but the live table lacks, and never drops,
+renames, retypes, or backfills. Until a real migration framework replaces it
+(#834), the same limit is policy: **no destructive schema change before
+`1.0.0`.** Model the need additively — a new column, a new table — or defer it.

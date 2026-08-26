@@ -61,7 +61,7 @@ async def files_env(tmp_path: Path) -> AsyncIterator[tuple[AsyncClient, _FakeBus
         )
     )
     async with AsyncClient(
-        transport=ASGITransport(app=app),  # type: ignore[arg-type]
+        transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
         yield client, bus
@@ -184,10 +184,10 @@ class _StubRegistry(ModuleRegistry):
 def _registry(bus: _FakeBus, *, core: Any = None) -> _StubRegistry:
     return _StubRegistry(
         manifest=_review_manifest(),
-        mcp=_FakeMcp(),  # type: ignore[arg-type]
-        secrets=_FakeSecrets(),  # type: ignore[arg-type]
+        mcp=_FakeMcp(),
+        secrets=_FakeSecrets(),
         tenant=TENANT,
-        prefs=_FakeModulePrefs(),  # type: ignore[arg-type]
+        prefs=_FakeModulePrefs(),
         core=core,
         events=CoreEventEmitter(bus),  # type: ignore[arg-type]
     )

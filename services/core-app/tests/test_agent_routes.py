@@ -94,9 +94,9 @@ def _app(probe: object | None) -> FastAPI:
     app.include_router(
         create_agent_router(
             _FakeAgent(),  # type: ignore[arg-type]
-            object(),  # memory — unused by the routes under test  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]  # memory — unused by the routes under test
             "local",
-            object(),  # attachment store — unused  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]  # attachment store — unused
             probe=probe,  # type: ignore[arg-type]
         )
     )
@@ -120,6 +120,13 @@ def _parse_sse(text: str) -> list[tuple[str, dict[str, object]]]:
     return frames
 
 
+def _readiness(frame: dict[str, object]) -> dict[str, object]:
+    """Narrow a parsed SSE frame's ``readiness`` payload (itself a JSON object) for indexing."""
+    val = frame["readiness"]
+    assert isinstance(val, dict)
+    return val
+
+
 async def _post_stream(app: FastAPI) -> list[tuple[str, dict[str, object]]]:
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -137,8 +144,8 @@ async def test_chat_stream_leads_with_readiness_then_the_turn() -> None:
     types = [event for event, _ in frames]
     # Readiness leads (pending → resolved), then the turn streams.
     assert types == ["readiness", "readiness", "delta", "done"]
-    assert frames[0][1]["readiness"]["ready"] is False  # pending
-    assert frames[1][1]["readiness"]["ready"] is True  # resolved
+    assert _readiness(frames[0][1])["ready"] is False  # pending
+    assert _readiness(frames[1][1])["ready"] is True  # resolved
     # Every readiness frame precedes the first content delta.
     assert types.index("delta") > max(i for i, t in enumerate(types) if t == "readiness")
 
@@ -157,7 +164,7 @@ async def test_slow_readiness_probe_does_not_delay_the_answer(
     frames = await _post_stream(_app(_FakeProbe(delay=0.2)))
     types = [event for event, _ in frames]
     assert types == ["readiness", "delta", "done"]
-    assert frames[0][1]["readiness"]["ready"] is False
+    assert _readiness(frames[0][1])["ready"] is False
 
 
 async def test_readiness_endpoint_returns_a_snapshot() -> None:
@@ -250,7 +257,7 @@ def _memory_app(
             agent or _FakeAgent(),  # type: ignore[arg-type]
             memory,  # type: ignore[arg-type]
             "local",
-            object(),  # attachment store — unused by the memory routes  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]  # attachment store — unused by the memory routes
             # Unset → the router builds a private, empty registry, so the edit route's
             # active-run guard sees no live turn (what every non-#552 test here wants).
             live_runs=live_runs,
@@ -681,7 +688,7 @@ def _profile_app(profile: StandingProfileStore, memory: object | None = None) ->
             _FakeAgent(),  # type: ignore[arg-type]
             memory or _FakeMemory(),  # type: ignore[arg-type]
             "local",
-            object(),  # attachment store — unused by the profile routes  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]  # attachment store — unused by the profile routes
             profile=profile,
         )
     )
@@ -933,9 +940,9 @@ def _runs_app(
     app.include_router(
         create_agent_router(
             agent,  # type: ignore[arg-type]
-            object(),  # memory — unused by the live-run routes  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]  # memory — unused by the live-run routes
             "local",
-            object(),  # attachment store — unused  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]  # attachment store — unused
             probe=probe,  # type: ignore[arg-type]
             suspended=suspended,  # type: ignore[arg-type]
             pending_drafts=pending_drafts,  # type: ignore[arg-type]

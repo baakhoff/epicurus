@@ -52,6 +52,119 @@ images to GHCR.
   the gate while the Modules page badge read it; the manifest is corrected and the test now reads
   the declared version, so it cannot drift again. `calendar` 0.19.0→0.20.0 (MINOR).
 
+- **The module event spine survives a restart** (#832) — the spine was at-most-once by
+  deliberate choice (ADR-0103 §4): core NATS pub/sub, JetStream enabled on the server and
+  pointedly unused, because in July nothing consumed events so nothing could miss them. That
+  stopped being true when proactivity — listeners → automations → alerts → the notification
+  centre — moved inside 1.0, and a core restart began quietly costing the world's changes.
+  It is now **at-least-once**: a JetStream stream (`EPICURUS_EVENTS`) over the *unchanged*
+  `<tenant>.events.>` subjects, provisioned idempotently on every boot, and a **durable pull
+  consumer** (`core-event-intake`) whose server-side cursor outlives the process. Not one
+  emitter changed — persistence is a property of the subject, not of the publisher's API, so
+  a stream captures whatever lands on its subjects whoever published it. The rule that makes
+  it worth anything is one line of ordering: **the message is acked only after the row is
+  committed** to `module_events`. A core killed mid-message never acked it and gets it back;
+  a store that fails is *naked*, so a database outage costs latency rather than history; and
+  a message that can never be stored — unparseable, or claiming one tenant on the subject and
+  another in the envelope — is *terminated*, because unlimited redelivery with no terminal
+  case is an infinite loop. Fan-out to `on_event` listeners deliberately runs *after* the
+  ack: holding it would blow through `ack_wait` and trigger a redelivery that dedup then
+  absorbs as a no-op, skipping the listeners anyway. Redelivery is safe because the log's
+  `(tenant, module, dedup_key)` uniqueness is a **database constraint**, not a convention —
+  verified rather than assumed, and now asserted on the consume path and not only on the
+  store. The honest half: emitting is still an *unacknowledged* publish, and that is not a
+  trade that was available to make differently. A tenant-scoped subject puts the tenant in
+  the leading token, so the stream's subject starts with `*` — and NATS refuses a stream
+  whose subjects overlap its reserved `$JS.>` namespace unless publisher acks are disabled
+  (`no_ack`). Publisher-side acks would mean changing the *subject scheme*, which is a
+  contract change, not a transport one. So the guarantee is: **at-least-once from the NATS
+  server to the durable log; best-effort from the emitter to the NATS server**, with the
+  windows documented rather than glossed — and the widest is open on a *healthy* connection:
+  nats-py appends a publish to a pending buffer and only *queues* the flush, so `emit_event`
+  returns before the bytes are on the wire, and an emitter killed in that gap loses the event
+  with NATS entirely up. **The guarantee starts at publish, not at the source of truth**;
+  closing that needs an outbox in the emitter, not a transport change. The rest — a stream at
+  its limit discarding oldest-first, an unclean server crash — are documented beside it, and
+  the one loud case is a publish while the bus is disconnected, which raises rather than
+  buffering across a reconnect. The `module_events` table stays the copy of record; the stream
+  is a bounded delivery buffer in front of it (7 days, 512 MiB, discard oldest), not a second
+  archive. Also folded in: the LLM diagnostics no longer report "no key configured" when the
+  truth is "OpenBao could not be reached" — a bare `except SecretError` had collapsed the two
+  since #728, so a provider list read as *unconfigured* during a vault outage. `ProviderInfo`
+  now carries `key_state` (`not_required` / `present` / `missing` / `unavailable`) plus the
+  store's reason, with `configured` unchanged for existing readers.
+  `epicurus-core` 0.34.0→0.35.0 (MINOR). · `core-app` 0.114.2→0.115.0 (MINOR).
+
+- **`mypy --strict` now actually checks test code** (#833) — the root `[tool.mypy]` block was
+  packages-only, so CI's bare `uv run mypy` step structurally never looked inside any service's
+  or lib's `tests/`, and 606 strict-mode errors had piled up invisibly behind that blind spot
+  (mostly mcp 2.0's content union replacing the SDK's older, looser types — `content[0].text` is
+  now a real `union-attr` error against `TextContent | ImageContent | AudioContent |
+  ResourceLink | EmbeddedResource`, plus a long tail of `# type: ignore` comments nobody had
+  re-validated in years). The config moves from `packages` to `files`, because mypy's own CLI
+  rejects combining `packages` with `files`/`modules` in one run ("May only specify one of:
+  module/package, files, or command"); `explicit_package_bases` + `namespace_packages`, plus a
+  `mypy_path` matching every package's `src`, keep same-named test files across services (several
+  ship their own `test_service.py`) resolving to distinct module names instead of colliding on a
+  bare one, and keep a file reached directly the same module as the one reached by import —
+  otherwise mypy reports the source "found twice under different module names."
+  `scripts/new_module.py` now wires a new module's `mypy_path`/`files` entries too, so `task new-module`
+  keeps producing a gate-clean scaffold with no manual follow-up. All 606 errors fixed, test-side
+  only: `.text` access on an mcp content union narrowed with a small `isinstance(x, TextContent)`
+  helper per file rather than erased to `Any`, ignore comments whose bracketed code had drifted
+  stale corrected to what mypy actually reports now (`[attr-defined]` where it's really
+  `[method-assign]`), and a few dict/list literals annotated at their wider expected type at the
+  point of construction instead of left to infer the narrower concrete one.
+- **De-raced `test_manual_run_history_reports_source_manual`** — `current_run` reads `None` both
+  *before* a maintenance run starts and *after* it finishes, so polling for "cleared" immediately
+  after `POST /run` (itself fire-and-forget, #561) could observe the pre-run idle state and never
+  actually wait. The poll now matches on the completed run's own history `id` — assigned once
+  persisted, and strictly increasing — instead of the transient flag, which is unambiguous even
+  across repeated runs in the same test. (A `started_at` string comparison looked simpler but
+  doesn't survive the round trip through SQLite's `DateTime` column, which quietly drops the UTC
+  offset on the way back out.)
+- **`services/web/src/components/EventAlertsCard.tsx` carried a raw NUL byte** — `keyOf`'s
+  map-key separator, sitting inside a template literal since the file was first added, which made
+  git treat the whole file as binary and drop it from every reviewable diff from day one. Escaped
+  to `\0` instead (identical at runtime); a new fast repo-wide test (`tests/test_no_nul_bytes.py`)
+  guards against the next one slipping through the same way unnoticed.
+- **`compose-validate` now also lints the observability profile** — the existing step resolves
+  every service regardless of active profile, which doesn't actually prove
+  `infra/observability/compose.yaml` (gated behind `profiles: [observability]`) activates cleanly
+  under its own profile; a second `--profile observability` invocation does.
+  `web` 0.137.0→0.137.1 (PATCH). · `tasks` 0.23.0→0.23.1 (PATCH). · `core-app` 0.114.1→0.114.2
+  (PATCH). · `mail` 0.19.0→0.19.1 (PATCH). · `knowledge` 0.27.3→0.27.4 (PATCH). · `notes`
+  0.12.1→0.12.2 (PATCH). · `echo` 0.5.1→0.5.2 (PATCH). · `messaging` 0.3.0→0.3.1 (PATCH). ·
+  `storage` 0.9.1→0.9.2 (PATCH). · `websearch` 0.3.0→0.3.1 (PATCH). `epicurus-core` and
+  `calendar` also had test files fixed here but carry **no line of their own**: both take a
+  MINOR in this same wave (#832, #831), and a PATCH landing first would only collide with
+  their version-line edits.
+
+- **Every public status surface told a retired story — reconciled to the milestone
+  roadmap** (#830) — `README.md` and `docs/index.md` still opened with "Phases 0–3
+  complete… Phase 2/chat bridges next," a model the project moved off of. Both now state
+  the actual gate: working toward **1.0.0 — Foundation complete & stable** (a quality bar,
+  not a feature checklist), with the `messaging` module (loopback, Discord, Telegram)
+  already shipped and Slack/WhatsApp landing at milestone 2.0.0; latest tagged release
+  stays v0.2.0. `docs/index.md`'s at-a-glance module tree was missing `notes` and
+  `websearch`; both added. `docs/user/installation.md`'s port table listed 3 of the
+  platform's 11 module ports; rebuilt against the source-of-truth
+  `docs/reference/ports.md` (module band, data plane, and the opt-in observability
+  profile), plus a new First-run models section documenting what the ADR-0118 bootstrap
+  (#773) actually does — the effective chat/embedding defaults it resolves, its
+  backoff/skip/no-op behavior, and the `LLM_BOOTSTRAP_MODELS` knob. `docs/services/index.md`'s
+  mail row dropped a stale, unrelated-to-current-version "(v0.1)" tag. `docs/services/web.md`'s
+  Chat row was a single ~9,690-character table cell; it's now a one-line summary pointing at
+  a new prose `### Chat` subsection carrying the exact same content (verified word-for-word
+  against the original, nothing dropped). That page's "two board pages from one module"
+  illustrative example (tasks' board + Can) has had no live instance since #820 folded Can
+  into the Tasks page, so the dead example was dropped and the underlying `BoardView` keying
+  behavior kept, described generically. `docs/services/core-app.md` and
+  `scheduled_turns.py`'s module docstring both still called event-driven listeners/alerts
+  "a later milestone"; that shipped inside 1.0 via #662–#672 (the module event spine,
+  automations engine, push notifications, and event alerts) — both corrected to point at the
+  automations engine. `core-app` 0.114.0→0.114.1 (PATCH).
+
 - **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
   `writes_document` call *lands*, by which point the model has already written the whole body;
   v2 shows it arriving. The blocker was never the pane: tool-call fragments were assembled

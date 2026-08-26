@@ -39,7 +39,7 @@ def _service(
     store.delete = fake_delete
 
     svc = OAuthService(
-        store,  # type: ignore[arg-type]
+        store,
         redirect_base_url=TEST_REDIRECT,
         state_secret=TEST_SECRET,
     )
@@ -62,7 +62,7 @@ async def test_placeholder_or_empty_state_secret_refuses_to_run() -> None:
     store = AsyncMock()
     for weak in ("change-this-before-use", ""):
         svc = OAuthService(
-            store,  # type: ignore[arg-type]
+            store,
             redirect_base_url=TEST_REDIRECT,
             state_secret=weak,
         )
@@ -91,7 +91,7 @@ def test_state_tampered_raises_oauth_error() -> None:
 def test_state_wrong_secret_raises_oauth_error() -> None:
     svc_a, *_ = _service()
     svc_b = OAuthService(
-        AsyncMock(),  # type: ignore[arg-type]
+        AsyncMock(),
         redirect_base_url=TEST_REDIRECT,
         state_secret="different-secret",
     )
@@ -237,7 +237,7 @@ async def test_get_token_refreshes_expired_token() -> None:
     store.get.side_effect = _fake_get
     store.set = AsyncMock()
     svc = OAuthService(
-        store,  # type: ignore[arg-type]
+        store,
         redirect_base_url=TEST_REDIRECT,
         state_secret=TEST_SECRET,
     )
@@ -409,7 +409,7 @@ async def test_handle_callback_unions_scopes_with_existing() -> None:
     store.set = AsyncMock()
 
     svc = OAuthService(
-        store,  # type: ignore[arg-type]
+        store,
         redirect_base_url=TEST_REDIRECT,
         state_secret=TEST_SECRET,
     )
@@ -452,7 +452,7 @@ async def test_handle_callback_first_connect_no_existing_token() -> None:
     store.set = AsyncMock()
 
     svc = OAuthService(
-        store,  # type: ignore[arg-type]
+        store,
         redirect_base_url=TEST_REDIRECT,
         state_secret=TEST_SECRET,
     )

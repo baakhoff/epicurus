@@ -171,15 +171,15 @@ def _frozen_at(when: datetime) -> Iterator[None]:
 
     class _Frozen(datetime):
         @classmethod
-        def now(cls, tz: Any = None) -> datetime:
+        def now(cls, tz: Any = None) -> datetime:  # type: ignore[override]
             return when if tz is None else when.astimezone(tz)
 
-    real = maintenance_module.datetime
-    maintenance_module.datetime = _Frozen  # type: ignore[assignment]
+    real = maintenance_module.datetime  # type: ignore[attr-defined]
+    maintenance_module.datetime = _Frozen  # type: ignore[attr-defined]
     try:
         yield
     finally:
-        maintenance_module.datetime = real
+        maintenance_module.datetime = real  # type: ignore[attr-defined]
 
 
 async def test_tick_is_a_noop_when_disabled() -> None:

@@ -63,7 +63,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.3.0",
+        version="0.3.1",
         description=(
             "Self-hosted web search via SearXNG, plus guarded reading of any link —"
             " no API key required."

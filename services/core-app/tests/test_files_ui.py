@@ -17,7 +17,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from epicurus_core.files import LocalFileStore
+from epicurus_core.files import FileKind, LocalFileStore
 from epicurus_core_app.file_index import FileIndex
 from epicurus_core_app.file_scan import scan
 from epicurus_core_app.object_backend import ObjectDownload, ObjectEntry, ObjectText
@@ -37,7 +37,7 @@ class FakeObjects:
 
     def __init__(self) -> None:
         # path -> (kind, bytes); a small "uploads/" subtree of objects.
-        self._tree: dict[str, tuple[str, bytes]] = {
+        self._tree: dict[str, tuple[FileKind, bytes]] = {
             "uploads": ("dir", b""),
             "uploads/note.txt": ("file", b"obj-body"),
         }
@@ -124,7 +124,7 @@ async def _make_client(
         )
     )
     client = AsyncClient(
-        transport=ASGITransport(app=app),  # type: ignore[arg-type]
+        transport=ASGITransport(app=app),
         base_url="http://test",
     )
     return client, index, store

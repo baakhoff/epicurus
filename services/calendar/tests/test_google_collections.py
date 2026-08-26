@@ -29,7 +29,7 @@ def _client_cm(items: list[dict[str, Any]]) -> MagicMock:
 async def test_list_collections_sorts_primary_first() -> None:
     # The calendarList API's order is unspecified; the primary must sort first so it is
     # the natural default wherever "the first Google calendar" is picked (#433).
-    items = [
+    items: list[dict[str, Any]] = [
         {"id": "holidays@group", "summary": "Holidays", "accessRole": "reader"},
         {
             "id": "me@example.com",
@@ -51,7 +51,7 @@ async def test_list_collections_sorts_primary_first() -> None:
 
 
 async def test_list_collections_maps_titles_roles_and_colour() -> None:
-    items = [
+    items: list[dict[str, Any]] = [
         {
             "id": "me@example.com",
             "summary": "me@example.com",

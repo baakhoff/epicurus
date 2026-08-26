@@ -305,7 +305,7 @@ def test_build_s3_constructs() -> None:
 
 @pytest.mark.integration
 async def test_s3_round_trip() -> None:
-    from testcontainers.minio import MinioContainer  # type: ignore[import-untyped]
+    from testcontainers.minio import MinioContainer
 
     with MinioContainer() as minio:
         store = S3FileStore(

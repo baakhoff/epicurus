@@ -5,9 +5,10 @@ full policy — per-component versions plus the bundled-stack tag — is in
 **[Versioning](versioning.md)** (ADR-0017).
 
 A **release** is the bundled stack: one git tag ships the whole platform (core, web,
-and every module) as a single unit, until the Phase-7 installer makes modules
-individually installable (ADR-0012). **v0.1.0** was the first release (the core
-runtime); each later tag is cut when a meaningful set of changes has shipped.
+and every module) as a single unit, until modules become individually installable
+— milestone **4.0.0**, module ecosystem & distribution (ADR-0012). **v0.1.0** was
+the first release (the core runtime); each later tag is cut when a meaningful set
+of changes has shipped.
 
 ## Cutting a release
 
@@ -25,6 +26,30 @@ git push origin v0.2.0
 - Release notes are grouped by `type:*` label (Features, Fixes, Documentation,
   Maintenance), so good labels and Conventional Commit messages produce good
   notes.
+
+### Pre-release checklist
+
+Work through this before pushing the tag:
+
+- [ ] **CHANGELOG audited** — `[Unreleased]` reconciled against `git log
+      <last-tag>..HEAD` and the merged PR list, so every user-facing change has an
+      entry and the section reads true against actual merged history. Rename
+      `[Unreleased]` to the release version + date, and open a fresh empty
+      `[Unreleased]` above it for what comes next.
+- [ ] **Every merged PR since the last tag carries a `type:*` label** (`type:feat` /
+      `type:fix` / `type:chore` / `type:docs` / `type:test`) — the GitHub Release's
+      auto-generated notes group by this label, so a gap here means a missing or
+      miscategorized line in the public release notes. *In practice this hasn't
+      caught on — most recently merged PRs carry no `type:*` label at all — so
+      don't assume the gate holds; verify actual coverage and backfill labels
+      before relying on the generated notes.*
+- [ ] **After the workflow runs, verify every `ghcr.io/baakhoff/epicurus-*:{version}`
+      tag actually exists** (one per `services/*/Dockerfile`) before announcing — a
+      green workflow run doesn't guarantee every image published; check the package
+      list itself.
+- [ ] **Call out in the release notes that `:latest`-tracking operators auto-upgrade**
+      — an operator with `EPICURUS_VERSION` unset in `.env` pulls `:latest` on their
+      next reconcile cycle and lands on the new release with no explicit action.
 
 ## Deploying a specific release
 

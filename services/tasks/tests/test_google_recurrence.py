@@ -56,7 +56,7 @@ def _client(
 def _platform() -> PlatformClient:
     platform = MagicMock(spec=PlatformClient)
     platform.get_oauth_token = AsyncMock(return_value="ya29.mock")
-    return platform  # type: ignore[return-value]
+    return platform
 
 
 @pytest.fixture()

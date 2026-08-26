@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -19,7 +21,7 @@ async def store() -> SuspendedRunStore:
 
 
 async def test_save_then_take_round_trips(store: SuspendedRunStore) -> None:
-    convo = [
+    convo: list[dict[str, Any]] = [
         {"role": "user", "content": "open the file"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
     ]

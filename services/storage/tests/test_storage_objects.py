@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from testcontainers.minio import MinioContainer  # type: ignore[import-untyped]
+from testcontainers.minio import MinioContainer
 
 from epicurus_storage.object_store import ObjectStore
 

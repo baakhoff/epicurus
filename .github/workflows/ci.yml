@@ -34,7 +34,8 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Mypy (strict)
-        # The package list lives in [tool.mypy] in pyproject.toml.
+        # What gets checked lives in [tool.mypy] `files` in pyproject.toml — every
+        # package's `src` *and* its `tests`.
         run: uv run mypy
 
       - name: Tests
@@ -89,6 +90,15 @@ jobs:
 
       - name: Validate the assembled compose stack
         run: docker compose -f compose.yaml config -q
+
+      # The default invocation above resolves every service regardless of profile, but
+      # doesn't prove the observability fragment (infra/observability/compose.yaml, gated
+      # behind `profiles: [observability]` — see infra/observability/compose.yaml and the
+      # observability-lint job below) actually activates cleanly under its own profile.
+      # `--profile` changes what `up`/`config` *select*, which can surface profile-specific
+      # interpolation issues the unfiltered run wouldn't.
+      - name: Validate the assembled compose stack (observability profile)
+        run: docker compose -f compose.yaml --profile observability config -q
 
   # Validates Prometheus and Alertmanager configs without booting the
   # observability stack. The runtime-smoke gate skips that stack, so a bad rule

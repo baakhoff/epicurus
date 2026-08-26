@@ -64,9 +64,55 @@ strict = true
 python_version = "3.11"
 pretty = true
 # The single source of truth for what gets type-checked: `uv run mypy` (no
-# args) reads this. Register every new workspace package here (and in ruff's
-# known-first-party above).
-packages = ["epicurus_core", "epicurus_core_app", "epicurus_echo", "epicurus_storage", "epicurus_knowledge", "epicurus_websearch", "epicurus_calendar", "epicurus_mail", "epicurus_tasks", "epicurus_notes", "epicurus_messaging"]
+# args) reads this. Register every new workspace package here — its `src` in
+# both `mypy_path` and `files`, its `tests` in `files` only — and in ruff's
+# known-first-party above. `task new-module` wires all of it for you.
+#
+# `files`, not `packages`: mypy's own CLI rejects combining `packages` with
+# `files`/`modules` in one run ("May only specify one of: module/package,
+# files, or command"), and `packages` mode requires each entry to be a real
+# importable package (`__init__.py`) — most `tests/` dirs deliberately lack
+# one, since pytest's importlib import-mode is what lets several services
+# each ship their own `test_service.py` without colliding (see AGENTS.md).
+# `explicit_package_bases` + `namespace_packages` make mypy treat every listed
+# `tests/` dir as its own namespace package rooted at that dir, so same-named
+# test files across services get distinct qualified module names
+# (`services.mail.tests.test_service` vs `services.tasks.tests.test_service`)
+# instead of colliding on a bare `test_service`. `mypy_path` must list the
+# same `src` dirs so a file reached directly (via `files`) and the same file
+# reached via import (e.g. a test doing `from epicurus_tasks... import`,
+# resolved through the editable install on sys.path) resolve to the *same*
+# module name — otherwise mypy reports the source file "found twice under
+# different module names".
+explicit_package_bases = true
+namespace_packages = true
+mypy_path = [
+    "libs/epicurus-core/src",
+    "services/calendar/src",
+    "services/core-app/src",
+    "services/echo/src",
+    "services/knowledge/src",
+    "services/mail/src",
+    "services/messaging/src",
+    "services/notes/src",
+    "services/storage/src",
+    "services/tasks/src",
+    "services/websearch/src",
+]
+# services/web is the Node/TypeScript web shell — excluded (see [tool.uv.workspace]).
+files = [
+    "libs/epicurus-core/src", "libs/epicurus-core/tests",
+    "services/calendar/src", "services/calendar/tests",
+    "services/core-app/src", "services/core-app/tests",
+    "services/echo/src", "services/echo/tests",
+    "services/knowledge/src", "services/knowledge/tests",
+    "services/mail/src", "services/mail/tests",
+    "services/messaging/src", "services/messaging/tests",
+    "services/notes/src", "services/notes/tests",
+    "services/storage/src", "services/storage/tests",
+    "services/tasks/src", "services/tasks/tests",
+    "services/websearch/src", "services/websearch/tests",
+]
 
 # Third-party packages without a py.typed marker; don't fail strict on them.
 [[tool.mypy.overrides]]

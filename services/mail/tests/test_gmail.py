@@ -32,7 +32,7 @@ def _b64(text: str) -> str:
 def _make_platform(access_token: str = "tok") -> PlatformClient:
     platform = MagicMock(spec=PlatformClient)
     platform.get_oauth_token = AsyncMock(return_value=access_token)
-    return platform  # type: ignore[return-value]
+    return platform
 
 
 def _gmail_msg(
@@ -345,14 +345,14 @@ def test_build_mime_sets_cc_when_present() -> None:
 async def test_health_check_returns_false_when_not_connected() -> None:
     platform = MagicMock(spec=PlatformClient)
     platform.get_oauth_token = AsyncMock(side_effect=Exception("not connected"))
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     assert await provider.health_check() is False
 
 
 async def test_is_available_true_when_token_present() -> None:
     # A fast token-presence check (#209) — no live Gmail call.
     platform = _make_platform("tok")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     assert await provider.is_available() is True
 
 
@@ -360,13 +360,13 @@ async def test_is_available_false_on_http_error() -> None:
     # Not connected (4xx) or the core unreachable both read as "not available".
     platform = MagicMock(spec=PlatformClient)
     platform.get_oauth_token = AsyncMock(side_effect=httpx.ConnectError("core down"))
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     assert await provider.is_available() is False
 
 
 async def test_get_token_uses_platform_client() -> None:
     platform = _make_platform("my_access_token")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     token = await provider._get_token()
     assert token == "my_access_token"
     platform.get_oauth_token.assert_called_once_with("google")  # type: ignore[attr-defined]
@@ -375,7 +375,7 @@ async def test_get_token_uses_platform_client() -> None:
 async def test_search_fetches_token_and_calls_list() -> None:
     """search() fetches a token then calls the Gmail list API."""
     platform = _make_platform("tok123")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
 
     # Stub _list_message_ids and _fetch_message so no real HTTP is made.
     list_mock = AsyncMock(return_value=["m1"])
@@ -392,7 +392,7 @@ async def test_search_fetches_token_and_calls_list() -> None:
 
 async def test_read_fetches_token_and_full_message() -> None:
     platform = _make_platform("tok456")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
 
     full_msg = _parse_message(_gmail_msg("m2", body_text="body"), full=True)
     fetch_mock = AsyncMock(return_value=full_msg)
@@ -413,7 +413,7 @@ async def test_read_fetches_token_and_full_message() -> None:
 async def test_transmit_encodes_mime_and_calls_api(subject: str, to: str, body: str) -> None:
     """transmit() builds MIME from a ComposedMessage, base64-encodes it, and POSTs to Gmail."""
     platform = _make_platform("tok_send")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
 
     captured: dict[str, Any] = {}
 
@@ -444,7 +444,7 @@ async def test_transmit_encodes_mime_and_calls_api(subject: str, to: str, body: 
 async def test_transmit_includes_thread_id_for_a_reply() -> None:
     """A ComposedMessage carrying a thread_id sends it so a confirmed reply threads (#461)."""
     platform = _make_platform("tok_send")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     captured: dict[str, Any] = {}
 
     async def fake_post(url: str, **kwargs: Any) -> MagicMock:
@@ -490,7 +490,7 @@ async def test_compose_reply_fetches_original_and_derives_fields() -> None:
     before anything is transmitted (ADR-0085).
     """
     platform = _make_platform("tok_reply")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     captured: dict[str, Any] = {}
 
     async def fake_get(url: str, **kwargs: Any) -> MagicMock:
@@ -524,7 +524,7 @@ async def test_compose_reply_fetches_original_and_derives_fields() -> None:
 async def test_compose_reply_thread_id_none_when_original_has_none() -> None:
     """A Gmail response with no threadId yields a draft with thread_id=None (transmit omits it)."""
     platform = _make_platform("tok_reply2")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
 
     async def fake_get(url: str, **kwargs: Any) -> MagicMock:
         resp = MagicMock()
@@ -554,7 +554,7 @@ async def test_set_unread_modifies_unread_label(
 ) -> None:
     """set_unread() POSTs a messages.modify that adds/removes the UNREAD label."""
     platform = _make_platform("tok_mark")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
 
     captured: dict[str, Any] = {}
 
@@ -687,7 +687,7 @@ def test_extract_attachments_ignores_inline_parts_without_filename() -> None:
 
 async def test_list_labels_fills_counts_only_for_requested_ids() -> None:
     platform = _make_platform("tok")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     client = _mock_client()
 
     async def fake_get(url: str, **kwargs: Any) -> MagicMock:
@@ -716,7 +716,7 @@ async def test_list_labels_fills_counts_only_for_requested_ids() -> None:
 
 async def test_list_threads_pages_with_cursor_and_summaries() -> None:
     platform = _make_platform("tok")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     client = _mock_client()
 
     def _thread(tid: str, subject: str) -> dict[str, Any]:
@@ -762,7 +762,7 @@ async def test_list_threads_pages_with_cursor_and_summaries() -> None:
 
 async def test_list_threads_forwards_query_and_cursor() -> None:
     platform = _make_platform("tok")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     client = _mock_client()
     captured: dict[str, Any] = {}
 
@@ -783,7 +783,7 @@ async def test_list_threads_forwards_query_and_cursor() -> None:
 
 async def test_get_thread_returns_all_messages_with_bodies() -> None:
     platform = _make_platform("tok")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     client = _mock_client()
 
     async def fake_get(url: str, **kwargs: Any) -> MagicMock:
@@ -819,7 +819,7 @@ async def test_archive_and_trash_post_expected(
     method: str, expected_url: str, expected_body: dict[str, Any] | None
 ) -> None:
     platform = _make_platform("tok")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     client = _mock_client()
     captured: dict[str, Any] = {}
 
@@ -838,7 +838,7 @@ async def test_archive_and_trash_post_expected(
 
 async def test_get_attachment_resolves_metadata_then_bytes() -> None:
     platform = _make_platform("tok")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     client = _mock_client()
     raw = _b64("PDF-BYTES")
 
@@ -873,7 +873,7 @@ async def test_get_attachment_resolves_metadata_then_bytes() -> None:
 
 async def test_get_attachment_unknown_id_raises_404() -> None:
     platform = _make_platform("tok")
-    provider = GmailProvider(platform=platform, tenant_id="local")  # type: ignore[arg-type]
+    provider = GmailProvider(platform=platform, tenant_id="local")
     client = _mock_client()
 
     async def fake_get(url: str, **kwargs: Any) -> MagicMock:
@@ -901,7 +901,7 @@ def _platform_raising(status: int) -> PlatformClient:
             str(status), request=request, response=httpx.Response(status, request=request)
         )
     )
-    return platform  # type: ignore[return-value]
+    return platform
 
 
 @pytest.mark.parametrize("status", [404, 400])

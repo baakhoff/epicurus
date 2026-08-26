@@ -92,7 +92,7 @@ async def test_task_created_payload_never_carries_notes() -> None:
 
 async def test_no_bus_skips_emission_without_error() -> None:
     local = await _local_provider()
-    router = TasksRouter(local=local, external={}, prefs=_StaticPrefs())  # type: ignore[arg-type]
+    router = TasksRouter(local=local, external={}, prefs=_StaticPrefs())
     await router.add_task(TENANT, "x")  # must not raise
 
 
@@ -181,7 +181,7 @@ async def _today_str(offset_days: int = 0) -> str:
 
 async def _scheduler_fixtures() -> tuple[TasksRouter, LeadTimePrefsStore, FiredMarkerStore]:
     local = await _local_provider()
-    router = TasksRouter(local=local, external={}, prefs=_StaticPrefs())  # type: ignore[arg-type]
+    router = TasksRouter(local=local, external={}, prefs=_StaticPrefs())
     lead_prefs = LeadTimePrefsStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
     await lead_prefs.init()
     markers = FiredMarkerStore(create_async_engine("sqlite+aiosqlite:///:memory:"))
@@ -198,8 +198,8 @@ async def test_due_soon_fires_for_a_task_due_tomorrow_with_the_default_lead() ->
         provider=router,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        today=await _today_str(),  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        today=await _today_str(),
     )
     [envelope] = bus.envelopes_of_type("tasks.task_due_soon")
     assert envelope.dedup_key == f"local:{task.id}:due_soon"
@@ -215,8 +215,8 @@ async def test_due_soon_does_not_fire_for_a_task_due_far_in_the_future() -> None
         provider=router,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        today=await _today_str(),  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        today=await _today_str(),
     )
     assert bus.envelopes_of_type("tasks.task_due_soon") == []
 
@@ -231,8 +231,8 @@ async def test_due_soon_fires_only_once_across_ticks() -> None:
             provider=router,
             lead_prefs=lead_prefs,
             markers=markers,
-            bus=bus,
-            today=await _today_str(),  # type: ignore[arg-type]
+            bus=bus,  # type: ignore[arg-type]
+            today=await _today_str(),
         )
     assert len(bus.envelopes_of_type("tasks.task_due_soon")) == 1
 
@@ -258,8 +258,8 @@ async def test_due_soon_honors_a_custom_lead() -> None:
         provider=router,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        today=await _today_str(),  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        today=await _today_str(),
     )
     [envelope] = bus.envelopes_of_type("tasks.task_due_soon")
     assert envelope.payload["lead_days"] == 7
@@ -274,8 +274,8 @@ async def test_overdue_fires_for_a_task_due_yesterday() -> None:
         provider=router,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        today=await _today_str(),  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        today=await _today_str(),
     )
     [envelope] = bus.envelopes_of_type("tasks.task_overdue")
     assert envelope.dedup_key == f"local:{task.id}:overdue"
@@ -291,8 +291,8 @@ async def test_a_completed_task_never_fires_due_soon_or_overdue() -> None:
         provider=router,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        today=await _today_str(),  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        today=await _today_str(),
     )
     assert bus.envelopes_of_type("tasks.task_overdue") == []
     assert bus.envelopes_of_type("tasks.task_due_soon") == []
@@ -307,8 +307,8 @@ async def test_a_task_with_no_due_date_never_fires() -> None:
         provider=router,
         lead_prefs=lead_prefs,
         markers=markers,
-        bus=bus,
-        today=await _today_str(),  # type: ignore[arg-type]
+        bus=bus,  # type: ignore[arg-type]
+        today=await _today_str(),
     )
     assert bus.envelopes_of_type("tasks.task_due_soon") == []
     assert bus.envelopes_of_type("tasks.task_overdue") == []

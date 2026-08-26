@@ -259,7 +259,7 @@ async def _env(tmp_path: Any, *, rate_cap_per_hour: int = 0, timezone: Any = _ut
     runner = AutomationRunner(
         store,
         queue,
-        _FakeAgent(),  # type: ignore[arg-type]
+        _FakeAgent(),
         _FakePower(),  # type: ignore[arg-type]
         kill,
         sinks,

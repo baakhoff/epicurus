@@ -500,7 +500,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the model's public library **tags page** (the catalog index lists *sizes*, not quants). Returns `{model, variants:[{tag, quant, size_gb}]}` — `size_gb` is the tag row's real on-disk size (#571; `null` when upstream shows none, e.g. a cloud alias). Best-effort — an empty list (offline, or a model not in the public library) makes the UI fall back to a manual tag box. A successful lookup also piggybacks its sizes onto the catalog snapshot. `model` is a query param. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
 | `POST /platform/v1/llm/unload` | Drop model(s) from memory now (`keep_alive=0`) **without** changing power state (#331). Body `{model: str\|null}` — `null`/omitted unloads every loaded model, a name unloads just that one. Returns `{status, model}` (`"all"` when none given). The standalone unload the Models page calls; the `loaded` flag refreshes on the next poll. |
-| `GET /platform/v1/llm/providers` | Providers and whether each one's key is set. |
+| `GET /platform/v1/llm/providers` | Providers and what the secret store knows about each one's key. Each row is `{alias, local, configured, needs_base_url, key_state, key_error}`. `key_state` is `not_required` (the local runtime holds no key) / `present` / `missing` (OpenBao answered and has nothing there) / `unavailable` (OpenBao could not be asked — an expired app token, the service down), with `key_error` naming the reason for the last one. `configured` is unchanged (`true` for `not_required` and `present`) — it was one bit over three facts, and collapsing "we could not ask" into "there is no key" is how #728's expired token read as a fleet of unconfigured providers, sending the operator to re-enter keys that were already set. The core reports the distinction; rendering it is the shell's job (ADR-0018) and is not wired up yet — nothing in `services/web` reads `key_state` today. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
 | `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `kv_cache_type` (Ollama KV-cache), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
 | `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
@@ -1055,8 +1055,9 @@ interrupted by shutdown is recorded to history too (#733) but publishes no event
 ### Scheduled turns (ADR-0092)
 
 Recurring prompts that run **unattended** and deliver into their own chat session — the
-time-driven half of proactivity (the event-driven half, listeners/alerts, is a later
-milestone). An operator authors a prompt, a cadence (daily/weekly at a local hour), and it
+time-driven half of proactivity (the event-driven half, listeners/alerts, shipped
+alongside it inside 1.0 — see the [Automations engine](#automations-engine-adr-0105) below,
+#662–#672). An operator authors a prompt, a cadence (daily/weekly at a local hour), and it
 fires on its own with no HTTP caller — the same headless-turn shape the inbound messaging
 consumer above already uses for a bridge message (`Agent.run(tenant_id=..., session_id=...)`,
 no SSE).
@@ -1116,12 +1117,19 @@ Emits **`<tenant>.maintenance.completed`** after each maintenance batch (ADR-006
 ### Module event spine — durable intake (ADR-0103)
 
 The core is the spine's recorder: modules announce world changes with
-[`emit_event`](../reference/events.md#emit_event), and the core keeps the copy of record.
-The bus is fire-and-forget and replays nothing, so "what happened" is a question you ask
-Postgres, not NATS.
+[`emit_event`](../reference/events.md#emit_event), and the core keeps the copy of record in
+Postgres. "What happened" is a question you ask the `module_events` table, not the bus.
 
-`EventIntake` **consumes `*.events.>`** — one subscription, **every tenant**
-(`EventBus.subscribe_any_tenant`). This deliberately departs from the inbound-messaging
+**Delivery is at-least-once** (#832). On startup the core provisions the JetStream stream
+`EPICURUS_EVENTS` over `*.events.>` — idempotent, so an existing stream is adopted, and one
+whose config cannot be updated is kept with a warning rather than failing the boot — and
+binds the durable pull consumer **`core-event-intake`**. The cursor lives on the server, so
+a core that was down while a module emitted picks those events up on the way back up. See
+[events → delivery posture](../reference/events.md#delivery-posture) for the exact
+guarantee, including what the *publish* side does not promise.
+
+`EventIntake` **consumes `*.events.>`** — one consumer, **every tenant**
+(`EventBus.pull_subscribe_any_tenant`). This deliberately departs from the inbound-messaging
 consumer's per-tenant subscribe: a tenant added at runtime would otherwise be silently
 unheard until restart, and an intake that drops a tenant's events looks exactly like a
 tenant that emitted none. It is core-only by construction — on the bus the core
@@ -1132,13 +1140,26 @@ Per message it: parses the [`EventEnvelope`](../reference/events.md#eventenvelop
 validators reject an oversized or credential-carrying payload *on the way in*, so the
 contract is enforced rather than trusted); checks that the **subject's tenant and the
 envelope's `tenant_id` agree** — two independent claims, and a mismatch is dropped rather
-than filed under a guess; records it in `module_events`; then fans it out to the live feed
-and to any registered `on_event` listener. Malformed and mis-tenanted messages are logged
-and dropped — one module's bad emit must not take down intake for every other module.
+than filed under a guess; records it in `module_events`; **acks**; then fans it out to the
+live feed and to any registered `on_event` listener.
+
+The message's disposition follows the durable write, and that ordering *is* the guarantee:
+
+| Outcome | Disposition | Why |
+| --- | --- | --- |
+| Row committed, or a duplicate the unique constraint rejected | **ack** | It is on file either way. |
+| The store failed — database down | **nak** (5s delay) | Nothing is durable yet. A database outage must cost latency, not history; redelivery is unlimited, so a long outage is survivable. |
+| Malformed JSON, a failed envelope validator, or a tenant mismatch | **term** | It will never become valid, and unlimited redelivery with no terminal case is an infinite loop. One module's bad emit must not wedge intake for every other module. |
+
+Fan-out happens **after** the ack on purpose: a slow listener holding the ack would blow
+through `ack_wait` (30s) and trigger a redelivery that dedup then absorbs as a no-op —
+skipping the listeners anyway. Nothing is acked before the row exists, so a core killed
+mid-message gets that message back.
 
 `on_event(listener)` is the seam consumers attach to (the automations engine, #666). It
 fires only for **newly-stored** events: a duplicate is not a change, so a consumer never
-sees the same one twice.
+sees the same one twice — which is also what makes a redelivery invisible to a listener
+rather than a double-trigger.
 
 `EventRetention` prunes the log on an hourly loop to `EVENTS_RETENTION_DAYS` (default 30;
 `0` disables).

@@ -68,7 +68,11 @@ def test_run_scaffolds_and_wires(new_module: ModuleType, tmp_path: Path) -> None
     assert f"${{THROWAWAY_THING_PORT:-{result.port}}}" in compose
 
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    assert pyproject.count('"epicurus_throwaway_thing"') == 2  # mypy packages + ruff isort
+    assert pyproject.count('"epicurus_throwaway_thing"') == 1  # ruff known-first-party
+    # mypy: registered as both an import-resolution base (mypy_path) and a
+    # checked target (files) — src once each, tests only in files.
+    assert pyproject.count('"services/throwaway-thing/src"') == 2
+    assert pyproject.count('"services/throwaway-thing/tests"') == 1
 
     root_compose = (root / "compose.yaml").read_text(encoding="utf-8")
     assert "- services/throwaway-thing/compose.yaml" in root_compose
@@ -107,7 +111,7 @@ def test_wiring_is_idempotent(new_module: ModuleType, tmp_path: Path) -> None:
 
     before = snapshot()
     new_module.wire_module_urls(root, "throwaway-thing")
-    new_module.wire_pyproject(root, "epicurus_throwaway_thing")
+    new_module.wire_pyproject(root, "epicurus_throwaway_thing", "throwaway-thing")
     new_module.wire_compose_include(root, "throwaway-thing")
     new_module.wire_ci_port_reset(root, "throwaway-thing")
 

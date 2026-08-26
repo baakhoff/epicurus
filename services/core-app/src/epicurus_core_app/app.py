@@ -354,9 +354,10 @@ def create_app() -> FastAPI:
     # tenant-scoped row store; the scheduler poll loop is built below, once `agent` exists.
     scheduled_turns = ScheduledTurnStore(engine)
     # The module event spine: modules announce world changes on the bus, and the core keeps
-    # the copy of record (the bus is fire-and-forget and replays nothing). The store is the
-    # log, the intake is the one cross-tenant subscription that fills it, and retention bounds
-    # it. Consumers (the automations engine) attach to the intake via `on_event`.
+    # the copy of record. Delivery is at-least-once over JetStream — the intake is one
+    # cross-tenant *durable* consumer, so events emitted while the core was down arrive on
+    # the way back up and nothing is acked before its row is committed. The store is the log,
+    # retention bounds it, and consumers (the automations engine) attach via `on_event`.
     event_log = EventLogStore(engine)
     event_intake = EventIntake(event_log, bus)
     event_retention = EventRetention(
@@ -1048,8 +1049,10 @@ def create_app() -> FastAPI:
                 await inbound_messaging.start()
             except Exception as exc:
                 log.error("inbound messaging consumer failed to start", error=str(exc))
-        # Record every module event (the spine's durable intake). Best-effort like the consumer
-        # above: a NATS hiccup costs the event log, not the core.
+        # Record every module event (the spine's durable intake): provision the JetStream
+        # stream and bind the durable consumer, which resumes at its own cursor. `start()`
+        # retries a cold-boot race with NATS itself; if it still fails, the core comes up
+        # without intake rather than not at all — a NATS hiccup costs the event log, not chat.
         try:
             await event_intake.start()
         except Exception as exc:

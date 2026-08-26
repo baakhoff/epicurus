@@ -437,7 +437,9 @@ async def test_review_audit_page_serves_the_trail() -> None:
     await h.page.reject(p.sid)
 
     data = await h.page.review_audit(CORE_REVIEW_PAGE_ID)
-    assert len(data["decisions"]) == 1
+    decisions = data["decisions"]
+    assert isinstance(decisions, list)
+    assert len(decisions) == 1
 
 
 # ── the dispatch surface the registry calls ──────────────────────────────────
@@ -477,4 +479,6 @@ async def test_get_page_serves_the_review_archetype_shape() -> None:
     )
     data = await h.page.get_page(CORE_REVIEW_PAGE_ID)
     assert data["title"] == "Playbooks"
-    assert len(data["suggestions"]) == 1
+    suggestions = data["suggestions"]
+    assert isinstance(suggestions, list)
+    assert len(suggestions) == 1

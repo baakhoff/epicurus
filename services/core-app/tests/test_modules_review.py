@@ -83,10 +83,10 @@ class _StubRegistry(ModuleRegistry):
 def _registry(manifest: ModuleManifest) -> _StubRegistry:
     return _StubRegistry(
         manifest=manifest,
-        mcp=_FakeMcp(),  # type: ignore[arg-type]
-        secrets=_FakeSecrets(),  # type: ignore[arg-type]
+        mcp=_FakeMcp(),
+        secrets=_FakeSecrets(),
         tenant="local",
-        prefs=_FakeModulePrefs(),  # type: ignore[arg-type]
+        prefs=_FakeModulePrefs(),
     )
 
 

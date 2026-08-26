@@ -60,7 +60,16 @@ async def _env(tmp_path: Path) -> _Env:
     await automations.init()
     await proposals.init()
     page = CoreAutomationReviewPage(store=proposals, automations=automations, tenant=TENANT)
-    propose = make_propose_automation_handler(proposals, automations)
+    # make_propose_automation_handler's real signature takes an optional trailing
+    # `_session_id` (BuiltinHandler, a 3-arg Callable) — but Callable types can't express
+    # "trailing param has a default", so every one of this suite's ~14 call sites (all
+    # 2-arg, matching the tool-call shape they're actually testing) would need a third
+    # positional None added to satisfy that wider type. Adapting once here instead.
+    propose_impl = make_propose_automation_handler(proposals, automations)
+
+    async def propose(arguments: dict[str, Any], tenant: str) -> str:
+        return await propose_impl(arguments, tenant, None)
+
     return _Env(engine, automations, proposals, page, propose)
 
 

@@ -258,12 +258,13 @@ async def test_remove_under_deindexes_notes_below_prefix(
     (tmp_path / "kb_b" / "keep.md").write_text("# Keep\n\nC.")
     indexer = _make_indexer(note_index, tmp_path)
     await indexer.run()
-    qdrant = indexer._qdrant  # type: ignore[attr-defined]
-    qdrant.delete.reset_mock()
+    qdrant = indexer._qdrant
+    qdrant.delete.reset_mock()  # type: ignore[attr-defined]
 
     removed = await indexer.remove_under("kb_a/")
     assert removed == 2
-    qdrant.delete.assert_awaited()  # vectors purged for the removed notes
+    # vectors purged for the removed notes
+    qdrant.delete.assert_awaited()  # type: ignore[attr-defined]
     remaining = await note_index.list_paths(tenant=TENANT)
     assert "kb_b/keep.md" in remaining
     assert all(not p.startswith("kb_a/") for p in remaining)
@@ -290,11 +291,12 @@ async def test_index_path_replaces_old_vectors_on_reindex(
 ) -> None:
     indexer = _make_indexer(note_index, vault)
     await indexer.run()  # note_a is now tracked
-    qdrant = indexer._qdrant  # type: ignore[attr-defined]
-    qdrant.delete.reset_mock()
+    qdrant = indexer._qdrant
+    qdrant.delete.reset_mock()  # type: ignore[attr-defined]
     (vault / "note_a.md").write_text("# Note A\n\nEdited via the editor page.")
     await indexer.index_path("note_a.md")
-    qdrant.delete.assert_awaited()  # stale chunks purged before the re-upsert
+    # stale chunks purged before the re-upsert
+    qdrant.delete.assert_awaited()  # type: ignore[attr-defined]
 
 
 async def test_move_path_reindexes_single_file(note_index: NoteIndex, vault: Path) -> None:
@@ -313,8 +315,9 @@ async def test_move_path_reindexes_single_file(note_index: NoteIndex, vault: Pat
     assert await note_index.get(tenant=TENANT, note_path="note_a.md") is None
     rec = await note_index.get(tenant=TENANT, note_path="renamed.md")
     assert rec is not None
-    qdrant = indexer._qdrant  # type: ignore[attr-defined]
-    qdrant.delete.assert_awaited()  # the old identity's points were purged
+    qdrant = indexer._qdrant
+    # the old identity's points were purged
+    qdrant.delete.assert_awaited()  # type: ignore[attr-defined]
 
 
 async def test_move_path_returns_false_when_reindex_fails(
@@ -324,7 +327,9 @@ async def test_move_path_returns_false_when_reindex_fails(
     indexer = _make_indexer(note_index, vault)
     await indexer.run()
     (vault / "note_a.md").rename(vault / "renamed.md")
-    indexer._platform.embed = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[attr-defined]
+    indexer._platform.embed = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("boom")
+    )
 
     assert await indexer.move_path("note_a.md", "renamed.md") is False
     # The old identity is still gone even though the re-embed failed — no orphaned ledger row.
@@ -429,7 +434,7 @@ async def test_search_uses_selected_embedding_model(note_index: NoteIndex, vault
 
 def _make_docs_indexer(tmp_path: Path) -> KnowledgeIndexer:
     """A KnowledgeIndexer configured as the platform-docs source."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")  # type: ignore[attr-defined]
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     # We can't await here — callers share the note_index fixture instead.
     doc_index = DocIndex(engine)
     docs_dir = tmp_path / "docs"
@@ -448,13 +453,13 @@ def _make_docs_indexer(tmp_path: Path) -> KnowledgeIndexer:
 async def test_mcp_tool_reindex(note_index: NoteIndex, vault: Path, tmp_path: Path) -> None:
     vault_indexer = _make_indexer(note_index, vault)
     docs_indexer = _make_docs_indexer(tmp_path)
-    await docs_indexer._notes.init()  # type: ignore[attr-defined]
+    await docs_indexer._notes.init()
     module_docs_stub = MagicMock()
     module_docs_stub.run = AsyncMock(return_value={"indexed": 0, "deleted": 0, "unchanged": 0})
     module = _module_for(vault_indexer, docs_indexer, module_docs_stub, vault)
     _content, structured = await module.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
-    payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
+    payload: dict[str, object] = structured.get("result") or structured
     assert "indexed" in payload
 
 
@@ -463,7 +468,7 @@ async def test_manifest_declares_tool_and_event(
 ) -> None:
     vault_indexer = _make_indexer(note_index, vault)
     docs_indexer = _make_docs_indexer(tmp_path)
-    await docs_indexer._notes.init()  # type: ignore[attr-defined]
+    await docs_indexer._notes.init()
     module = _module_for(vault_indexer, docs_indexer, MagicMock(), vault)
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
@@ -558,7 +563,7 @@ async def test_mcp_tool_search(note_index: NoteIndex, vault: Path, tmp_path: Pat
         tenant=TENANT,
     )
     docs_indexer = _make_docs_indexer(tmp_path)
-    await docs_indexer._notes.init()  # type: ignore[attr-defined]
+    await docs_indexer._notes.init()
     module = _module_for(vault_indexer, docs_indexer, MagicMock(), vault)
     _content, structured = await module.call_tool("knowledge_search", {"query": "B", "k": 1})
     assert structured is not None
@@ -635,7 +640,7 @@ async def test_merged_search_returns_hits_from_both_sources(
     from epicurus_core.contracts import ToolEnvelope
 
     content, _ = await module.call_tool("knowledge_search", {"query": "platform", "k": 5})
-    env = ToolEnvelope.model_validate_json(content[0].text)  # type: ignore[attr-defined]
+    env = ToolEnvelope.model_validate_json(content[0].text)
     # Both chunks' text reaches the model.
     assert "Vault content." in env.text
     assert "Platform docs content." in env.text
@@ -674,7 +679,7 @@ async def test_reindex_sums_both_sources(
     module = _module_for(vault_indexer, docs_indexer, module_docs_stub, vault)
     _content, structured = await module.call_tool("knowledge_reindex", {})
     assert isinstance(structured, dict)
-    payload: dict[str, object] = structured.get("result") or structured  # type: ignore[assignment]
+    payload: dict[str, object] = structured.get("result") or structured
     # vault has 2 notes, docs has 1 → total indexed >= 3 on first run
     assert isinstance(payload.get("indexed"), int)
     assert payload["indexed"] >= 3  # type: ignore[operator]
@@ -791,8 +796,9 @@ async def test_reconcile_gcs_ledger_row_whose_path_no_longer_exists(
     )
     assert await indexer.reconcile() is True
     assert await note_index.get(tenant=TENANT, note_path="ghost.md") is None
-    qdrant = indexer._qdrant  # type: ignore[attr-defined]
-    qdrant.delete.assert_awaited()  # the ghost's vectors were purged too
+    qdrant = indexer._qdrant
+    # the ghost's vectors were purged too
+    qdrant.delete.assert_awaited()  # type: ignore[attr-defined]
 
 
 async def test_reconcile_gc_leaves_live_paths_untouched(note_index: NoteIndex, vault: Path) -> None:

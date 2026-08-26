@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -9,7 +11,7 @@ from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 
 TENANT = "test"
 
-_REFS = [
+_REFS: list[dict[str, object]] = [
     {
         "ref_id": "sugg-1",
         "module": "knowledge",
@@ -30,7 +32,7 @@ async def store() -> PendingApprovalStore:
 async def _save(
     store: PendingApprovalStore, *, tenant: str = TENANT, refs: list[dict[str, object]] = _REFS
 ) -> str:
-    convo = [
+    convo: list[dict[str, Any]] = [
         {"role": "user", "content": "update my goals note"},
         {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
     ]

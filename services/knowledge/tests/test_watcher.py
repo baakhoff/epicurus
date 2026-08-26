@@ -9,7 +9,7 @@ genuine on-disk write reaches the indexer.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -33,7 +33,7 @@ class _RecordingIndexer:
         return {"indexed": 1, "deleted": 0, "unchanged": 2}
 
 
-def _stream(*batches: set[FileChange]):
+def _stream(*batches: set[FileChange]) -> Callable[[], AsyncIterator[set[FileChange]]]:
     """A change-stream factory yielding the given batches once, then stopping."""
 
     async def _gen() -> AsyncIterator[set[FileChange]]:

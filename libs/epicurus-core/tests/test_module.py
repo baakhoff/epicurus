@@ -5,10 +5,16 @@ from __future__ import annotations
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mcp.types import ContentBlock, TextContent
 from pydantic import ValidationError
 
 from epicurus_core.manifest import CONTRACT_VERSION, ModelSlot, WritesDocument
 from epicurus_core.module import EpicurusModule, ToolError, add_manifest_route
+
+
+def _text_of(item: ContentBlock) -> str:
+    assert isinstance(item, TextContent)
+    return item.text
 
 
 def _greeter() -> EpicurusModule:
@@ -68,7 +74,7 @@ async def test_manifest_reindexable_defaults_false() -> None:
 async def test_tool_is_callable() -> None:
     content, structured = await _greeter().call_tool("greet", {"name": "ada"})
     assert structured == {"result": "hello ada"}
-    assert content[0].text == "hello ada"
+    assert _text_of(content[0]) == "hello ada"
 
 
 async def test_call_tool_raises_tool_error_for_a_failing_tool() -> None:

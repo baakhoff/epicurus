@@ -75,7 +75,9 @@ def test_aware_non_utc_event_datetimes_are_normalized_to_utc() -> None:
     assert event.start.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
     assert event.end.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
     assert event.original_start is not None
-    assert event.original_start.utcoffset().total_seconds() == 0
+    offset = event.original_start.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
     # The instant is preserved, just re-labeled as UTC rather than shifted.
     assert (event.start.hour, event.end.hour, event.original_start.hour) == (13, 14, 13)
 

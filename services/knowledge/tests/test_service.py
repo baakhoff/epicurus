@@ -68,7 +68,7 @@ def _module(vault_hits: list[SearchHit], docs_hits: list[SearchHit]) -> Epicurus
 
 
 def _envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
-    return ToolEnvelope.model_validate_json(content[0].text)  # type: ignore[attr-defined]
+    return ToolEnvelope.model_validate_json(content[0].text)
 
 
 async def test_search_returns_chunks_and_chips() -> None:
@@ -172,7 +172,7 @@ def _nav_module(vault_path: Path) -> EpicurusModule:
 
 def _text(content: list) -> str:  # type: ignore[type-arg]
     # The navigation tools return plain text, not a ToolEnvelope.
-    return content[0].text  # type: ignore[attr-defined,no-any-return]
+    return content[0].text  # type: ignore[no-any-return]
 
 
 async def test_list_projects_lists_top_level_folders(tmp_path: Path) -> None:

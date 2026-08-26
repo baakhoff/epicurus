@@ -88,9 +88,9 @@ def _gateway(
         default_model="llama3.2",
         keep_alive="5m",
         power=power or PowerController(),
-        secrets=secrets or _FakeSecrets(),
+        secrets=secrets or _FakeSecrets(),  # type: ignore[arg-type]
         default_tenant="local",
-        bus=bus or _FakeBus(),
+        bus=bus or _FakeBus(),  # type: ignore[arg-type]
         fallbacks=fallbacks or [],
         num_retries=2,
         timeout=timeout,

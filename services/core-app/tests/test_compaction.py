@@ -7,6 +7,8 @@ the per-message estimate so the intent is clear.
 
 from __future__ import annotations
 
+from typing import Any
+
 from epicurus_core_app.llm.compaction import (
     _IMAGE_TOKEN_ESTIMATE,
     compact_messages,
@@ -25,7 +27,7 @@ def _msg(role: str, tag: str, **kw: object) -> ChatMessage:
     return ChatMessage(role=role, content=f"{tag} {_BODY}", **kw)  # type: ignore[arg-type]
 
 
-def _contents(messages: list[ChatMessage]) -> list[str | None]:
+def _contents(messages: list[ChatMessage]) -> list[str | list[dict[str, Any]] | None]:
     return [m.content for m in messages]
 
 
@@ -101,7 +103,7 @@ def test_compact_keeps_system_prefix_and_drops_oldest_turns() -> None:
     sys = message_tokens(messages[0])
     # Budget room for the system message + exactly the two most-recent turns.
     out = compact_messages(messages, budget=sys + per * 2)
-    tags = [c.split(" ", 1)[0] for c in _contents(out) if c]
+    tags = [c.split(" ", 1)[0] for c in _contents(out) if isinstance(c, str)]
     assert tags[0] == "S"  # system kept
     assert tags[-2:] == ["A2", "U3"]  # the two newest survive
     assert "U1" not in tags and "A1" not in tags and "U2" not in tags  # oldest dropped
@@ -110,7 +112,7 @@ def test_compact_keeps_system_prefix_and_drops_oldest_turns() -> None:
 def test_compact_always_keeps_at_least_the_final_message() -> None:
     messages = [_msg("system", "S"), _msg("user", "U1"), _msg("user", "LAST")]
     out = compact_messages(messages, budget=1)  # absurdly small
-    tags = [c.split(" ", 1)[0] for c in _contents(out) if c]
+    tags = [c.split(" ", 1)[0] for c in _contents(out) if isinstance(c, str)]
     assert "LAST" in tags  # the user's actual question is never dropped
     assert tags[0] == "S"
 

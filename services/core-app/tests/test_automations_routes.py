@@ -63,7 +63,7 @@ async def _fresh() -> tuple[AutomationStore, KillSwitchStore, AutomationRunner, 
     runner = AutomationRunner(
         store,
         queue,
-        agent,  # type: ignore[arg-type]
+        agent,
         _FakePower(),  # type: ignore[arg-type]
         kill,
         SinkDispatcher(),

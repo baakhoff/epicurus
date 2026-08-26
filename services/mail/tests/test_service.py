@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from mcp.types import ContentBlock, TextContent
 
 from epicurus_core.contracts import DraftReview, ToolEnvelope
 from epicurus_mail.cache import CachedMailbox, LandingBundle
@@ -50,7 +51,7 @@ def _make_provider(*messages: MailMessage) -> MailProvider:
     )
     provider.transmit = AsyncMock(return_value="sent_msg_id")
     provider.set_unread = AsyncMock(return_value=None)
-    return provider  # type: ignore[return-value]
+    return provider
 
 
 def _sample() -> MailMessage:
@@ -66,16 +67,19 @@ def _sample() -> MailMessage:
     )
 
 
-def _parse_envelope(content: list) -> ToolEnvelope:  # type: ignore[type-arg]
+def _text_of(item: ContentBlock) -> str:
+    assert isinstance(item, TextContent)
+    return item.text
+
+
+def _parse_envelope(content: list[ContentBlock]) -> ToolEnvelope:
     """Extract the ToolEnvelope from the first TextContent item in a call_tool result."""
-    text = content[0].text  # type: ignore[attr-defined]
-    return ToolEnvelope.model_validate_json(text)
+    return ToolEnvelope.model_validate_json(_text_of(content[0]))
 
 
-def _parse_draft(content: list) -> DraftReview:  # type: ignore[type-arg]
+def _parse_draft(content: list[ContentBlock]) -> DraftReview:
     """Extract the DraftReview envelope from the first TextContent item (ADR-0085)."""
-    text = content[0].text  # type: ignore[attr-defined]
-    return DraftReview.model_validate_json(text)
+    return DraftReview.model_validate_json(_text_of(content[0]))
 
 
 async def test_mail_search_returns_entity_refs() -> None:
@@ -105,7 +109,7 @@ async def test_mail_search_empty_returns_no_refs() -> None:
     provider = AsyncMock(spec=MailProvider)
     provider.search = AsyncMock(return_value=[])
     provider.read = AsyncMock(return_value=_sample())
-    module = build_module(provider)  # type: ignore[arg-type]
+    module = build_module(provider)
     content, _ = await module.call_tool("mail_search", {"query": "nothing"})
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
@@ -143,7 +147,7 @@ async def test_mail_search_ands_a_category_into_the_query(
 ) -> None:
     """ "Summarize today's Promotions" works without the model knowing Gmail syntax (#765)."""
     provider = _make_provider()
-    provider.category_query = MagicMock(  # type: ignore[attr-defined]
+    provider.category_query = MagicMock(  # type: ignore[method-assign]
         side_effect=lambda cid: (
             f"category:{cid}" if cid in {"promotions", "primary", "social"} else None
         )
@@ -155,20 +159,20 @@ async def test_mail_search_ands_a_category_into_the_query(
 
 async def test_mail_search_without_a_category_is_untouched() -> None:
     provider = _make_provider()
-    provider.category_query = MagicMock(return_value=None)  # type: ignore[attr-defined]
+    provider.category_query = MagicMock(return_value=None)  # type: ignore[method-assign]
     module = build_module(provider)
     await module.call_tool("mail_search", {"query": "from:alice"})
     provider.search.assert_called_once_with("from:alice", 10)  # type: ignore[attr-defined]
-    provider.category_query.assert_not_called()  # type: ignore[attr-defined]
+    provider.category_query.assert_not_called()
 
 
 async def test_mail_search_reports_an_unsupported_category_instead_of_widening() -> None:
     """Silently dropping the filter would hand back *all* mail for a narrowed request."""
     provider = _make_provider()
-    provider.category_query = MagicMock(return_value=None)  # type: ignore[attr-defined]
+    provider.category_query = MagicMock(return_value=None)  # type: ignore[method-assign]
     module = build_module(provider)
     content, _ = await module.call_tool("mail_search", {"query": "x", "category": "newsletters"})
-    text = content[0].text  # type: ignore[attr-defined]
+    text = _text_of(content[0])
     assert "newsletters" in text
     assert "promotions" in text  # names the categories that do exist
     provider.search.assert_not_called()  # type: ignore[attr-defined]
@@ -178,7 +182,7 @@ async def test_mail_read_returns_formatted_message() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
     content, _ = await module.call_tool("mail_read", {"message_id": "msg1"})
-    text = content[0].text  # type: ignore[attr-defined]
+    text = _text_of(content[0])
     assert "Subject: Hello" in text
     assert "From: alice@example.com" in text
     assert "Full body text" in text
@@ -210,7 +214,7 @@ async def test_mail_send_rejects_a_blank_recipient() -> None:
     content, _ = await module.call_tool(
         "mail_send", {"to": "   ", "subject": "Hi", "body": "Hello!"}
     )
-    text = content[0].text  # type: ignore[attr-defined]
+    text = _text_of(content[0])
     assert "recipient" in str(text)
     provider.transmit.assert_not_called()  # type: ignore[attr-defined]
 
@@ -254,7 +258,7 @@ async def test_mail_mark_read_clears_unread() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
     content, _ = await module.call_tool("mail_mark_read", {"message_id": "msg1"})
-    text = content[0].text  # type: ignore[attr-defined]
+    text = _text_of(content[0])
     assert "marked-read:msg1" in str(text)
     provider.set_unread.assert_called_once_with("msg1", unread=False)  # type: ignore[attr-defined]
 
@@ -263,7 +267,7 @@ async def test_mail_mark_unread_sets_unread() -> None:
     provider = _make_provider(_sample())
     module = build_module(provider)
     content, _ = await module.call_tool("mail_mark_unread", {"message_id": "msg1"})
-    text = content[0].text  # type: ignore[attr-defined]
+    text = _text_of(content[0])
     assert "marked-unread:msg1" in str(text)
     provider.set_unread.assert_called_once_with("msg1", unread=True)  # type: ignore[attr-defined]
 
@@ -280,7 +284,7 @@ async def test_mail_mark_read_returns_hint_on_missing_scope() -> None:
     )
     module = build_module(provider)
     content, _ = await module.call_tool("mail_mark_read", {"message_id": "msg1"})
-    text = content[0].text  # type: ignore[attr-defined]
+    text = _text_of(content[0])
     assert "Reconnect Google" in str(text)
 
 
@@ -299,7 +303,7 @@ async def test_mail_mark_read_403_rate_limit_reason_is_not_mislabeled_as_scope()
     )
     module = build_module(provider)
     content, _ = await module.call_tool("mail_mark_read", {"message_id": "msg1"})
-    text = content[0].text  # type: ignore[attr-defined]
+    text = _text_of(content[0])
     assert "rate-limiting" in str(text)
     assert "Reconnect Google" not in str(text)
 
@@ -320,7 +324,7 @@ async def test_mail_reply_returns_lookup_hint_on_missing_scope() -> None:
     content, _ = await module.call_tool(
         "mail_reply", {"message_id": "msg1", "body": "Sounds good!"}
     )
-    text = content[0].text  # type: ignore[attr-defined]
+    text = _text_of(content[0])
     assert "look up the original message" in str(text)
     provider.transmit.assert_not_called()  # type: ignore[attr-defined]
 
@@ -364,7 +368,9 @@ def _http_error(
 _LEGACY_RATE = {"error": {"errors": [{"reason": "userRateLimitExceeded"}]}}
 _LEGACY_SCOPE = {"error": {"errors": [{"reason": "insufficientPermissions"}]}}
 _AIP_RATE_STATUS = {"error": {"status": "RESOURCE_EXHAUSTED", "message": "quota exceeded"}}
-_AIP_RATE_DETAIL = {"error": {"code": 403, "details": [{"reason": "RATE_LIMIT_EXCEEDED"}]}}
+_AIP_RATE_DETAIL: dict[str, object] = {
+    "error": {"code": 403, "details": [{"reason": "RATE_LIMIT_EXCEEDED"}]}
+}
 _AIP_SCOPE = {"error": {"status": "PERMISSION_DENIED", "message": "insufficient permission"}}
 
 
@@ -395,7 +401,7 @@ def test_describe_403_non_string_reason_falls_back_to_scope_without_raising() ->
     """A non-string `reason` (a nested object in an otherwise well-formed body) must not reach the
     `in _RATE_LIMIT_REASONS` membership test, where an unhashable value would raise TypeError —
     it falls back to the scope hint (#557)."""
-    body = {"error": {"errors": [{"reason": {"nested": "object"}}]}}
+    body: dict[str, object] = {"error": {"errors": [{"reason": {"nested": "object"}}]}}
     assert _describe_403(_http_error(403, body=body), _SCOPE_HINT) == _SCOPE_HINT
 
 
@@ -437,7 +443,7 @@ async def test_mail_read_paths_429_return_rate_limit_hint_not_raw(tool: str) -> 
     module = build_module(provider)
     args = {"query": "x"} if tool == "mail_search" else {"message_id": "msg1"}
     content, _ = await module.call_tool(tool, args)
-    assert "rate-limiting" in str(content[0].text)  # type: ignore[attr-defined]
+    assert "rate-limiting" in _text_of(content[0])
 
 
 async def test_mail_reply_429_returns_rate_limit_hint() -> None:
@@ -445,7 +451,7 @@ async def test_mail_reply_429_returns_rate_limit_hint() -> None:
     provider.compose_reply = AsyncMock(side_effect=_http_error(429))  # type: ignore[method-assign]
     module = build_module(provider)
     content, _ = await module.call_tool("mail_reply", {"message_id": "msg1", "body": "hi"})
-    assert "rate-limiting" in str(content[0].text)  # type: ignore[attr-defined]
+    assert "rate-limiting" in _text_of(content[0])
     provider.transmit.assert_not_called()  # type: ignore[attr-defined]
 
 
@@ -607,20 +613,20 @@ async def test_manifest_declares_mailbox_page() -> None:
 
 async def test_mail_archive_calls_provider_and_confirms() -> None:
     provider = _make_provider()
-    provider.archive = AsyncMock(return_value=None)  # type: ignore[attr-defined]
+    provider.archive = AsyncMock(return_value=None)  # type: ignore[method-assign]
     module = build_module(provider)
     content, _ = await module.call_tool("mail_archive", {"message_id": "m1"})
-    provider.archive.assert_awaited_once_with("m1")  # type: ignore[attr-defined]
-    assert content[0].text == "archived:m1"  # type: ignore[attr-defined]
+    provider.archive.assert_awaited_once_with("m1")
+    assert _text_of(content[0]) == "archived:m1"
 
 
 async def test_mail_trash_calls_provider_and_confirms() -> None:
     provider = _make_provider()
-    provider.trash = AsyncMock(return_value=None)  # type: ignore[attr-defined]
+    provider.trash = AsyncMock(return_value=None)  # type: ignore[method-assign]
     module = build_module(provider)
     content, _ = await module.call_tool("mail_trash", {"message_id": "m2"})
-    provider.trash.assert_awaited_once_with("m2")  # type: ignore[attr-defined]
-    assert content[0].text == "trashed:m2"  # type: ignore[attr-defined]
+    provider.trash.assert_awaited_once_with("m2")
+    assert _text_of(content[0]) == "trashed:m2"
 
 
 async def test_mail_archive_softens_gmail_scope_error() -> None:
@@ -628,12 +634,12 @@ async def test_mail_archive_softens_gmail_scope_error() -> None:
     provider = _make_provider()
     request = httpx.Request("POST", "https://gmail.googleapis.com")
     response = httpx.Response(403, request=request, json={"error": {"message": "insufficient"}})
-    provider.archive = AsyncMock(  # type: ignore[attr-defined]
+    provider.archive = AsyncMock(  # type: ignore[method-assign]
         side_effect=httpx.HTTPStatusError("403", request=request, response=response)
     )
     module = build_module(provider)
     content, _ = await module.call_tool("mail_archive", {"message_id": "m1"})
-    assert "Reconnect Google" in content[0].text  # type: ignore[attr-defined]
+    assert "Reconnect Google" in _text_of(content[0])
 
 
 # ── mailbox page builders (ADR-0087) ─────────────────────────────────────────
@@ -677,7 +683,7 @@ async def test_build_mailbox_list_shape_and_defaults() -> None:
     provider.list_threads = AsyncMock(
         return_value=ThreadPage(threads=[_summary("t1", unread=True)], next_cursor="NEXT")
     )
-    data = await build_mailbox_list(provider)  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider)
     assert data["title"] == "Mail"
     assert data["active_label"] == "INBOX"  # defaults to Inbox
     assert data["labels"][0]["unread"] == 3
@@ -691,7 +697,7 @@ async def test_build_mailbox_list_browses_active_label() -> None:
     provider = _page_provider()
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
-    await build_mailbox_list(provider, label="SENT", cursor="CUR")  # type: ignore[arg-type]
+    await build_mailbox_list(provider, label="SENT", cursor="CUR")
     # Browsing (no query) scopes to the active label and forwards the cursor.
     provider.list_threads.assert_awaited_once_with(label="SENT", query=None, cursor="CUR", limit=25)
 
@@ -700,7 +706,7 @@ async def test_build_mailbox_list_search_spans_all_mail() -> None:
     provider = _page_provider()
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
-    data = await build_mailbox_list(provider, label="INBOX", query="is:unread")  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, label="INBOX", query="is:unread")
     # A query searches the whole mailbox (label=None) while the rail keeps the active folder.
     provider.list_threads.assert_awaited_once_with(
         label=None, query="is:unread", cursor=None, limit=25
@@ -713,7 +719,7 @@ async def test_build_mailbox_list_clamps_limit_to_cap() -> None:
     provider = _page_provider()
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
-    await build_mailbox_list(provider, limit=9999)  # type: ignore[arg-type]
+    await build_mailbox_list(provider, limit=9999)
     assert provider.list_threads.await_args.kwargs["limit"] == 25  # clamped (#539)
 
 
@@ -736,7 +742,7 @@ async def test_build_mailbox_list_landing_serves_from_cache() -> None:
     provider = _page_provider()
     provider.list_threads = AsyncMock()
     mailbox = _fake_mailbox()
-    data = await build_mailbox_list(provider, mailbox=mailbox)  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, mailbox=mailbox)
     assert data["threads"][0]["id"] == "cached"
     assert data["next_cursor"] == "OLDER"
     mailbox.landing.assert_awaited_once_with("INBOX")
@@ -747,7 +753,7 @@ async def test_build_mailbox_list_landing_serves_from_cache() -> None:
 async def test_build_mailbox_list_reconcile_flag_pulls_delta() -> None:
     provider = _page_provider()
     mailbox = _fake_mailbox()
-    await build_mailbox_list(provider, mailbox=mailbox, label="INBOX", reconcile=True)  # type: ignore[arg-type]
+    await build_mailbox_list(provider, mailbox=mailbox, label="INBOX", reconcile=True)
     mailbox.reconcile.assert_awaited_once_with("INBOX")
     mailbox.landing.assert_not_awaited()
 
@@ -758,7 +764,7 @@ async def test_build_mailbox_list_search_bypasses_cache() -> None:
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
     mailbox = _fake_mailbox()
-    await build_mailbox_list(provider, mailbox=mailbox, query="is:unread")  # type: ignore[arg-type]
+    await build_mailbox_list(provider, mailbox=mailbox, query="is:unread")
     mailbox.landing.assert_not_awaited()
     mailbox.reconcile.assert_not_awaited()
     provider.list_threads.assert_awaited_once()  # live search
@@ -799,7 +805,7 @@ def test_tab_payload_keeps_an_empty_category_previewless() -> None:
 
 
 async def test_inbox_carries_the_tab_strip() -> None:
-    data = await build_mailbox_list(_tabbed_provider())  # type: ignore[arg-type]
+    data = await build_mailbox_list(_tabbed_provider())
     assert [t["id"] for t in data["tabs"]] == ["primary", "promotions", "social"]
     assert [t["unread"] for t in data["tabs"]] == [2, 41, None]
     assert data["tabs"][1]["preview"]["subject"] == "Newest in Promotions"
@@ -812,7 +818,7 @@ async def test_a_provider_without_categories_renders_exactly_todays_page() -> No
     provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox")])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[_summary("t1")]))
 
-    data = await build_mailbox_list(provider)  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider)
 
     assert data["tabs"] == []
     assert data["active_tab"] == ""
@@ -822,7 +828,7 @@ async def test_a_provider_without_categories_renders_exactly_todays_page() -> No
 
 async def test_no_tabs_over_any_folder_but_the_inbox() -> None:
     provider = _tabbed_provider()
-    data = await build_mailbox_list(provider, label="SENT")  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, label="SENT")
     assert data["tabs"] == []
     provider.list_categories.assert_not_awaited()  # not even asked for
 
@@ -830,14 +836,14 @@ async def test_no_tabs_over_any_folder_but_the_inbox() -> None:
 async def test_no_tabs_over_a_search() -> None:
     """A search spans every folder, so an Inbox category filter would be a lie (#765)."""
     provider = _tabbed_provider()
-    data = await build_mailbox_list(provider, label="INBOX", query="is:unread")  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, label="INBOX", query="is:unread")
     assert data["tabs"] == []
     provider.list_categories.assert_not_awaited()
 
 
 async def test_selecting_a_tab_scopes_the_thread_list_within_the_inbox() -> None:
     provider = _tabbed_provider()
-    data = await build_mailbox_list(provider, tab="promotions")  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, tab="promotions")
     # Folder AND category — the label keeps it in the Inbox, the query narrows the tab.
     provider.list_threads.assert_awaited_once_with(
         label="INBOX", query="category:promotions", cursor=None, limit=25
@@ -849,14 +855,14 @@ async def test_selecting_a_tab_scopes_the_thread_list_within_the_inbox() -> None
 async def test_primary_scopes_to_inbox_minus_categorized() -> None:
     """``category:primary`` is the only expression of "the Inbox, minus the other tabs"."""
     provider = _tabbed_provider()
-    await build_mailbox_list(provider, tab="primary")  # type: ignore[arg-type]
+    await build_mailbox_list(provider, tab="primary")
     assert provider.list_threads.await_args.kwargs["query"] == "category:primary"
     assert provider.list_threads.await_args.kwargs["label"] == "INBOX"
 
 
 async def test_a_tab_page_forwards_the_cursor() -> None:
     provider = _tabbed_provider()
-    await build_mailbox_list(provider, tab="social", cursor="C2")  # type: ignore[arg-type]
+    await build_mailbox_list(provider, tab="social", cursor="C2")
     provider.list_threads.assert_awaited_once_with(
         label="INBOX", query="category:social", cursor="C2", limit=25
     )
@@ -866,7 +872,7 @@ async def test_a_tab_page_forwards_the_cursor() -> None:
 async def test_an_unoffered_tab_degrades_to_the_whole_inbox(bogus: str) -> None:
     """A hand-crafted ``?tab=`` never reaches the provider as a query (#765)."""
     provider = _tabbed_provider()
-    data = await build_mailbox_list(provider, tab=bogus)  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, tab=bogus)
     assert data["active_tab"] == ""
     provider.list_threads.assert_awaited_once_with(label="INBOX", query=None, cursor=None, limit=25)
 
@@ -878,7 +884,7 @@ async def test_a_tab_the_provider_cant_express_is_not_echoed_as_active() -> None
     provider.list_labels = AsyncMock(return_value=[])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[]))
 
-    data = await build_mailbox_list(provider, tab="odd")  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, tab="odd")
 
     assert data["active_tab"] == ""
     assert provider.list_threads.await_args.kwargs["query"] is None
@@ -890,7 +896,7 @@ async def test_the_unscoped_landing_still_serves_from_cache_with_tabs_on() -> No
     provider.list_threads = AsyncMock()
     mailbox = _fake_mailbox(categories=[_category("primary", "Primary")])
 
-    data = await build_mailbox_list(provider, mailbox=mailbox)  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, mailbox=mailbox)
 
     mailbox.landing.assert_awaited_once_with("INBOX")
     provider.list_threads.assert_not_awaited()
@@ -905,7 +911,7 @@ async def test_a_tab_selection_bypasses_the_landing_cache() -> None:
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[_summary("live")]))
     mailbox = _fake_mailbox(categories=[_category("promotions", "Promotions")])
 
-    data = await build_mailbox_list(provider, mailbox=mailbox, tab="promotions")  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider, mailbox=mailbox, tab="promotions")
 
     mailbox.landing.assert_not_awaited()
     mailbox.reconcile.assert_not_awaited()
@@ -917,7 +923,7 @@ async def test_tabs_come_through_the_cache_when_there_is_one() -> None:
     provider = _page_provider(categories=[_category("primary", "Primary")])
     mailbox = _fake_mailbox(categories=[_category("primary", "Primary")])
 
-    await build_mailbox_list(provider, mailbox=mailbox)  # type: ignore[arg-type]
+    await build_mailbox_list(provider, mailbox=mailbox)
 
     mailbox.categories.assert_awaited_once_with("INBOX")
     provider.list_categories.assert_not_awaited()
@@ -956,7 +962,7 @@ async def test_build_mailbox_thread_renders_messages_and_reply() -> None:
             to="b@x.com", subject="Re: Hi", body="", reply_to_original="b@x.com — Hi"
         )
     )
-    data = await build_mailbox_thread(provider, "t1")  # type: ignore[arg-type]
+    data = await build_mailbox_thread(provider, "t1")
     thread = data["thread"]
     assert thread["id"] == "t1"
     assert [m["message_id"] for m in thread["messages"]] == ["m1", "m2"]
@@ -969,9 +975,9 @@ async def test_build_mailbox_thread_renders_messages_and_reply() -> None:
 async def test_build_mailbox_thread_empty_has_no_reply() -> None:
     provider = _page_provider()
     provider.get_thread = AsyncMock(return_value=MailThread(id="t0", subject="", messages=[]))
-    data = await build_mailbox_thread(provider, "t0")  # type: ignore[arg-type]
+    data = await build_mailbox_thread(provider, "t0")
     assert data["thread"]["reply"] is None
-    provider.compose_reply.assert_not_awaited()  # type: ignore[attr-defined]
+    provider.compose_reply.assert_not_awaited()
 
 
 def test_message_payload_actions_and_attachments() -> None:
@@ -1041,7 +1047,7 @@ def _disconnected_provider() -> MailProvider:
     for method in ("search", "read", "compose_reply", "set_unread", "archive", "trash", "transmit"):
         setattr(provider, method, AsyncMock(side_effect=MailNotConnected("not connected")))
     provider.is_available = AsyncMock(return_value=False)
-    return provider  # type: ignore[return-value]
+    return provider
 
 
 @pytest.mark.parametrize("tool,args,_method", _TOOLS_REACHING_THE_PROVIDER)
@@ -1050,7 +1056,7 @@ async def test_tool_returns_the_not_connected_hint(
 ) -> None:
     module = build_module(_disconnected_provider())
     content, _ = await module.call_tool(tool, args)
-    assert content[0].text == _NOT_CONNECTED_HINT  # type: ignore[attr-defined]
+    assert _text_of(content[0]) == _NOT_CONNECTED_HINT
 
 
 @pytest.mark.parametrize("tool,args,_method", _TOOLS_REACHING_THE_PROVIDER)
@@ -1081,7 +1087,7 @@ async def test_mail_send_refuses_to_compose_when_google_is_not_connected() -> No
     provider = _disconnected_provider()
     module = build_module(provider)
     content, _ = await module.call_tool("mail_send", {"to": "b@x.com", "subject": "s", "body": "b"})
-    assert content[0].text == _NOT_CONNECTED_HINT  # type: ignore[attr-defined]
+    assert _text_of(content[0]) == _NOT_CONNECTED_HINT
     with pytest.raises(ValueError):
         _parse_draft(content)
 
@@ -1154,5 +1160,5 @@ async def test_a_connected_mailbox_never_claims_to_be_disconnected() -> None:
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[], next_cursor=None))
     provider.list_categories = AsyncMock(return_value=[])
     provider.category_query = MagicMock(return_value=None)
-    data = await build_mailbox_list(provider)  # type: ignore[arg-type]
+    data = await build_mailbox_list(provider)
     assert "disconnected" not in data

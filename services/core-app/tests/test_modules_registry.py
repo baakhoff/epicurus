@@ -228,7 +228,7 @@ def _registry(
     docker_reason: str | None = None,
 ) -> tuple[_StubRegistry, _FakeMcp, _FakeSecrets]:
     mcp, secrets = _FakeMcp(), _FakeSecrets()
-    registry = _StubRegistry(  # type: ignore[arg-type]
+    registry = _StubRegistry(
         healthy=healthy,
         manifest=manifest,
         mcp=mcp,
@@ -1546,7 +1546,11 @@ def _real_probe_registry(base: str = "http://echo:8080") -> ModuleRegistry:
     """A plain registry with the real (unstubbed) ``_probe`` — the HTTP layer is mocked
     per test instead, so transition logging genuinely runs."""
     return ModuleRegistry(
-        [base], mcp=_FakeMcp(), secrets=_FakeSecrets(), tenant="local", prefs=_FakeModulePrefs()
+        [base],
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        secrets=_FakeSecrets(),  # type: ignore[arg-type]
+        tenant="local",
+        prefs=_FakeModulePrefs(),  # type: ignore[arg-type]
     )
 
 
@@ -1691,7 +1695,7 @@ def _registry_with_core(
 ) -> tuple[_StubRegistry, _FakeCore]:
     the_core = core or _FakeCore()
     mcp, secrets = _FakeMcp(), _FakeSecrets()
-    registry = _StubRegistry(  # type: ignore[arg-type]
+    registry = _StubRegistry(
         mcp=mcp,
         secrets=secrets,
         tenant="local",
@@ -1802,7 +1806,7 @@ async def test_all_suggestions_tolerates_a_core_db_error() -> None:
             raise SQLAlchemyError('relation "playbook_proposals" does not exist')
 
     mcp, secrets = _FakeMcp(), _FakeSecrets()
-    registry = _StubRegistry(  # type: ignore[arg-type]
+    registry = _StubRegistry(
         manifest=_review_manifest(),
         mcp=mcp,
         secrets=secrets,
@@ -1876,7 +1880,7 @@ async def test_core_suggestions_enabled_query_is_also_403() -> None:
 async def test_a_real_module_named_core_does_not_shadow_the_pseudo_module() -> None:
     """The name is reserved: dispatch goes in-process, never to a module that claims it."""
     mcp, secrets = _FakeMcp(), _FakeSecrets()
-    registry = _StubRegistry(  # type: ignore[arg-type]
+    registry = _StubRegistry(
         manifest=ModuleManifest(
             name="core",
             version="0.0.1",

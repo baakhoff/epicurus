@@ -8,7 +8,7 @@ completion (and persist its answer) even when the client that started it goes aw
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 import pytest
@@ -140,6 +140,7 @@ async def test_subscriber_disconnect_does_not_lose_the_answer() -> None:
 
     # A client attaches, reads the first token, then disconnects mid-turn.
     sub = run.subscribe(0)
+    assert isinstance(sub, AsyncGenerator)
     _, first = await sub.__anext__()
     assert first.type == "delta"
     await sub.aclose()

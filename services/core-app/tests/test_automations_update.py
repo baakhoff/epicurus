@@ -42,7 +42,7 @@ async def _env(tmp_path: Path) -> tuple[AsyncClient, AutomationStore]:
         )
     )
     client = AsyncClient(
-        transport=ASGITransport(app=app),  # type: ignore[arg-type]
+        transport=ASGITransport(app=app),
         base_url="http://test",
     )
     return client, store

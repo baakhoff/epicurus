@@ -74,7 +74,7 @@ def _client_cm_verbs(
 
 
 def test_maps_recurrence_rrule_line() -> None:
-    item = {
+    item: dict[str, object] = {
         "id": "s1",
         "summary": "Standup",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
@@ -88,7 +88,7 @@ def test_maps_recurrence_rrule_line() -> None:
 def test_maps_recurrence_ignoring_exdate_lines() -> None:
     # Google can mix RRULE/EXDATE/RDATE in one list; only the RRULE line is mapped — the
     # EXDATE exclusion is already applied server-side to what events.list() returns.
-    item = {
+    item: dict[str, object] = {
         "id": "s1",
         "summary": "Standup",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
@@ -100,7 +100,7 @@ def test_maps_recurrence_ignoring_exdate_lines() -> None:
 
 
 def test_no_recurrence_field_means_none() -> None:
-    item = {
+    item: dict[str, object] = {
         "id": "e1",
         "summary": "One-off",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
@@ -111,7 +111,7 @@ def test_no_recurrence_field_means_none() -> None:
 
 
 def test_maps_recurring_event_id_and_original_start() -> None:
-    item = {
+    item: dict[str, object] = {
         "id": "s1_20260713T090000Z",
         "summary": "Standup",
         "start": {"dateTime": "2026-07-13T10:00:00+00:00"},  # moved an hour late
@@ -127,7 +127,7 @@ def test_maps_recurring_event_id_and_original_start() -> None:
 
 
 def test_maps_attendees() -> None:
-    item = {
+    item: dict[str, object] = {
         "id": "e1",
         "summary": "Sync",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},
@@ -145,7 +145,7 @@ def test_maps_attendees() -> None:
 
 
 def test_no_attendees_field_means_empty_list() -> None:
-    item = {
+    item: dict[str, object] = {
         "id": "e1",
         "summary": "Solo",
         "start": {"dateTime": "2026-07-06T09:00:00+00:00"},

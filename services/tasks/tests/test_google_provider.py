@@ -62,7 +62,7 @@ def _tasks_client(tasks_resp: Any) -> AsyncMock:
 def _make_platform(token: str = MOCK_TOKEN) -> PlatformClient:
     platform = MagicMock(spec=PlatformClient)
     platform.get_oauth_token = AsyncMock(return_value=token)
-    return platform  # type: ignore[return-value]
+    return platform
 
 
 @pytest.fixture()
@@ -187,7 +187,7 @@ async def test_not_connected_raises() -> None:
             response=None,  # type: ignore[arg-type]
         )
     )
-    provider = GoogleTasksProvider(platform=platform)  # type: ignore[arg-type]
+    provider = GoogleTasksProvider(platform=platform)
     with pytest.raises(GoogleTasksError, match="not connected"):
         await provider.list_tasks(TENANT)
 
@@ -320,6 +320,6 @@ async def test_create_list_not_connected_raises() -> None:
             response=None,  # type: ignore[arg-type]
         )
     )
-    provider = GoogleTasksProvider(platform=platform)  # type: ignore[arg-type]
+    provider = GoogleTasksProvider(platform=platform)
     with pytest.raises(GoogleTasksError, match="not connected"):
         await provider.create_list(TENANT, "Groceries")

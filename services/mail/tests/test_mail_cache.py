@@ -110,7 +110,7 @@ def _provider(
 async def _mailbox(provider: AsyncMock) -> tuple[CachedMailbox, MailCache]:
     cache = MailCache(_engine())
     await cache.init()
-    return CachedMailbox(provider, cache, tenant_id=TENANT), cache  # type: ignore[arg-type]
+    return CachedMailbox(provider, cache, tenant_id=TENANT), cache
 
 
 async def _mailbox_with_bus(
@@ -680,7 +680,7 @@ async def test_an_expired_tab_set_is_reassembled() -> None:
     provider.list_categories = AsyncMock(return_value=[_category("primary", "Primary")])
     cache = MailCache(_engine())
     await cache.init()
-    mailbox = CachedMailbox(provider, cache, tenant_id=TENANT, category_ttl_s=-1)  # type: ignore[arg-type]
+    mailbox = CachedMailbox(provider, cache, tenant_id=TENANT, category_ttl_s=-1)
 
     await mailbox.categories("INBOX")
     await mailbox.categories("INBOX")

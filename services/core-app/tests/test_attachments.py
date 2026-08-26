@@ -24,7 +24,10 @@ from epicurus_core import Attachment
 from epicurus_core_app.agent.agent import Agent
 from epicurus_core_app.agent.attachment_sink import AttachmentSink
 from epicurus_core_app.agent.attachments import AttachmentExpander, ImagePart
-from epicurus_core_app.agent.routes import _content_type_allowed, create_agent_router
+from epicurus_core_app.agent.routes import (  # type: ignore[attr-defined]
+    _content_type_allowed,
+    create_agent_router,
+)
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.store import AttachmentStore, ConversationStore, MessageRecord
 

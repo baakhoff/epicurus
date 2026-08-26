@@ -31,6 +31,7 @@ def fake_connect(monkeypatch: pytest.MonkeyPatch) -> Iterator[AsyncMock]:
 async def test_connect_forwards_credentials(fake_connect: AsyncMock) -> None:
     async with EventBus("nats://nats:4222", user="core", password="s3cret"):
         pass
+    assert fake_connect.await_args is not None
     kwargs = fake_connect.await_args.kwargs
     assert kwargs["user"] == "core"
     assert kwargs["password"] == "s3cret"
@@ -39,6 +40,7 @@ async def test_connect_forwards_credentials(fake_connect: AsyncMock) -> None:
 async def test_connect_is_anonymous_by_default(fake_connect: AsyncMock) -> None:
     async with EventBus("nats://nats:4222"):
         pass
+    assert fake_connect.await_args is not None
     kwargs = fake_connect.await_args.kwargs
     assert kwargs["user"] is None
     assert kwargs["password"] is None
@@ -48,5 +50,6 @@ async def test_from_settings_uses_configured_credentials(fake_connect: AsyncMock
     settings = CoreSettings(nats_url="nats://nats:4222", nats_user="module", nats_password="pw")
     async with EventBus.from_settings(settings):
         pass
+    assert fake_connect.await_args is not None
     kwargs = fake_connect.await_args.kwargs
     assert (kwargs["user"], kwargs["password"]) == ("module", "pw")

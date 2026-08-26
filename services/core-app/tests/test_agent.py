@@ -144,7 +144,10 @@ def _tool_call(name: str, args_json: str, call_id: str = "c1") -> dict[str, Any]
 
 async def test_agent_answers_without_tools() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="hello")])
-    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert turn.content == "hello"
     assert turn.stopped == "completed"
     assert turn.tools_used == []
@@ -158,7 +161,10 @@ async def test_an_ordinary_turn_applies_no_dial_and_no_attribution() -> None:
     # surface is unfiltered and the usage event carries no automation.
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
     mcp = _FakeMcp()
-    await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert mcp.allow_seen == [None]
     assert gw.automation_ids == [None]
 
@@ -167,7 +173,7 @@ async def test_a_turns_allowance_reaches_the_tool_surface() -> None:
     # The dial is enforced where the tools are assembled, not in the prompt.
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
     mcp = _FakeMcp()
-    await Agent(gateway=gw, mcp=mcp).run(
+    await Agent(gateway=gw, mcp=mcp).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")], allow=frozenset({"read"})
     )
     assert mcp.allow_seen == [frozenset({"read"})]
@@ -177,7 +183,10 @@ async def test_finish_quiet_is_not_offered_to_an_ordinary_turn() -> None:
     # Bound at the tool surface, not by prompt politeness: with no automation_id at all,
     # the tool must never appear — a plain chat turn has nowhere for "quiet" to mean anything.
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
-    await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert gw.tools_seen == [None]
 
 
@@ -185,7 +194,7 @@ async def test_finish_quiet_is_not_offered_when_the_automation_has_not_opted_in(
     # automation_id alone is not enough — quiet_capable defaults to False, mirroring the
     # per-automation toggle's default-off (existing automations keep today's behavior).
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
-    await Agent(gateway=gw, mcp=_FakeMcp()).run(
+    await Agent(gateway=gw, mcp=_FakeMcp()).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")], automation_id="auto-1"
     )
     assert gw.tools_seen == [None]
@@ -193,7 +202,7 @@ async def test_finish_quiet_is_not_offered_when_the_automation_has_not_opted_in(
 
 async def test_finish_quiet_is_offered_once_the_automation_opts_in() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
-    await Agent(gateway=gw, mcp=_FakeMcp()).run(
+    await Agent(gateway=gw, mcp=_FakeMcp()).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")], automation_id="auto-1", quiet_capable=True
     )
     offered = gw.tools_seen[0]
@@ -208,7 +217,10 @@ async def test_ask_approval_is_never_offered_by_run(_ignored: None = None) -> No
     # "bound at the tool surface" discipline FINISH_QUIET_SPEC's gate uses above.
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "http://echo:8080/mcp"})
-    await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     offered = gw.tools_seen[0]
     assert offered is not None
     assert ASK_APPROVAL_TOOL not in [spec["function"]["name"] for spec in offered]
@@ -217,7 +229,7 @@ async def test_ask_approval_is_never_offered_by_run(_ignored: None = None) -> No
 async def test_ask_approval_is_never_offered_to_an_automation_either() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "http://echo:8080/mcp"})
-    await Agent(gateway=gw, mcp=mcp).run(
+    await Agent(gateway=gw, mcp=mcp).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")], automation_id="auto-1", quiet_capable=True
     )
     offered = gw.tools_seen[0]
@@ -237,7 +249,7 @@ async def test_calling_finish_quiet_marks_the_turn_quiet() -> None:
         ]
     )
     mcp = _FakeMcp()
-    turn = await Agent(gateway=gw, mcp=mcp).run(
+    turn = await Agent(gateway=gw, mcp=mcp).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="triage")], automation_id="auto-1", quiet_capable=True
     )
     assert turn.quiet is True
@@ -251,7 +263,7 @@ async def test_calling_finish_quiet_marks_the_turn_quiet() -> None:
 async def test_not_calling_finish_quiet_leaves_the_turn_not_quiet() -> None:
     # Fail-loud beats fail-silent: not calling the tool means deliver as today.
     gw = _FakeGateway([ChatResult(model="m", content="pushed the summary")])
-    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="triage")], automation_id="auto-1", quiet_capable=True
     )
     assert turn.quiet is False
@@ -265,7 +277,7 @@ async def test_finish_quiet_without_a_reason_is_rejected_and_the_turn_continues(
             ChatResult(model="m", content="okay, retrying with a reason next time"),
         ]
     )
-    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="triage")], automation_id="auto-1", quiet_capable=True
     )
     assert turn.quiet is False
@@ -278,7 +290,7 @@ async def test_the_automation_attribution_reaches_the_gateway() -> None:
     # The dual metering point: every gateway call a run makes is attributed to it, so the
     # usage event names the tenant *and* which automation spent it.
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
-    await Agent(gateway=gw, mcp=_FakeMcp()).run(
+    await Agent(gateway=gw, mcp=_FakeMcp()).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")], automation_id="auto-1"
     )
     assert gw.automation_ids == ["auto-1"]
@@ -286,7 +298,10 @@ async def test_the_automation_attribution_reaches_the_gateway() -> None:
 
 async def test_a_turn_reports_what_it_cost() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="hi", prompt_tokens=11, completion_tokens=4)])
-    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert turn.usage.prompt_tokens == 11
     assert turn.usage.completion_tokens == 4
     assert turn.usage.steps == 1
@@ -308,7 +323,10 @@ async def test_usage_is_summed_across_a_multi_step_turn() -> None:
         ]
     )
     mcp = _FakeMcp(specs=[{"type": "function", "function": {"name": "t"}}], route={"t": "u"})
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert turn.usage.prompt_tokens == 30
     assert turn.usage.completion_tokens == 5
     assert turn.usage.steps == 2
@@ -318,7 +336,10 @@ async def test_unreported_usage_stays_none_rather_than_zero() -> None:
     # A provider that reports no usage must read as "unknown", not as "free" — reporting 0
     # would quietly understate every bill that depends on it.
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
-    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert turn.usage.prompt_tokens is None
     assert turn.usage.completion_tokens is None
     assert turn.usage.steps == 1
@@ -343,11 +364,15 @@ async def test_agent_non_streaming_does_not_send_a_composed_draft() -> None:
         route={"mail_send": "http://mail:8080/mcp"},
         outputs={"mail_send": draft},
     )
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="email bob")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="email bob")])
 
     tool_msgs = [m for m in gw.calls[1] if m.role == "tool"]
     assert len(tool_msgs) == 1
-    content = tool_msgs[0].content or ""
+    content = tool_msgs[0].content
+    assert isinstance(content, str)
     assert content.startswith("error:") and "not sent" in content.lower()
     assert '"kind"' not in content  # the model never saw the raw draft envelope
     # The step is recorded as not-ok in the activity timeline.
@@ -364,7 +389,10 @@ async def test_agent_calls_tool_then_answers() -> None:
     mcp = _FakeMcp(
         specs=[_echo_spec()], route={"echo": "http://echo:8080/mcp"}, outputs={"echo": "hi"}
     )
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="echo hi")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="echo hi")])
 
     assert mcp.called == [("echo", {"message": "hi"})]
     assert turn.tools_used == ["echo"]
@@ -379,7 +407,10 @@ async def test_agent_skips_tools_when_the_model_cannot_use_them() -> None:
     # error. The turn falls back to a plain text answer even though MCP has tools available.
     gw = _FakeGateway([ChatResult(model="m", content="just chatting")], supports_tools=False)
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert turn.content == "just chatting"
     assert turn.tools_used == []
     assert gw.tools_seen == [None]  # tools never offered, despite specs existing
@@ -388,7 +419,10 @@ async def test_agent_skips_tools_when_the_model_cannot_use_them() -> None:
 async def test_agent_offers_tools_when_the_model_supports_them() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="hi")], supports_tools=True)
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
-    await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="hi")])
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert gw.tools_seen[0] == [_echo_spec()]  # the tool specs were offered
 
 
@@ -401,9 +435,11 @@ async def test_agent_stops_at_max_steps() -> None:
         ChatResult(model="m", content="final"),
     ]
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
-    turn = await Agent(gateway=_FakeGateway(results), mcp=mcp, max_steps=2).run(
-        [ChatMessage(role="user", content="go")]
-    )
+    turn = await Agent(
+        gateway=_FakeGateway(results),  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+        max_steps=2,
+    ).run([ChatMessage(role="user", content="go")])
     assert turn.stopped == "max_steps"
     assert turn.content == "final"
     assert mcp.called == [("echo", {"a": 1}), ("echo", {"a": 2})]  # both rounds really ran
@@ -418,9 +454,12 @@ async def test_agent_max_steps_resolved_from_prefs_at_runtime() -> None:
         ChatResult(model="m", content="final"),
     ]
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
-    turn = await Agent(gateway=_FakeGateway(results), mcp=mcp, max_steps=4, prefs=store).run(
-        [ChatMessage(role="user", content="go")]
-    )
+    turn = await Agent(
+        gateway=_FakeGateway(results),  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+        max_steps=4,
+        prefs=store,
+    ).run([ChatMessage(role="user", content="go")])
     assert turn.stopped == "max_steps"  # stopped after one round despite the default of 4
     assert turn.tools_used == ["echo"]
 
@@ -434,9 +473,12 @@ async def test_agent_max_steps_falls_back_to_constructor_default() -> None:
         ChatResult(model="m", content="final"),
     ]
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
-    turn = await Agent(gateway=_FakeGateway(results), mcp=mcp, max_steps=4, prefs=store).run(
-        [ChatMessage(role="user", content="go")]
-    )
+    turn = await Agent(
+        gateway=_FakeGateway(results),  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+        max_steps=4,
+        prefs=store,
+    ).run([ChatMessage(role="user", content="go")])
     assert turn.stopped == "completed"
 
 
@@ -460,7 +502,10 @@ async def test_agent_handles_tool_error() -> None:
         ]
     )
     mcp = _FailingMcp(specs=[_echo_spec()], route={"echo": "u"})
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="go")])
 
     assert turn.content == "recovered"
     assert any(m.role == "tool" and "boom" in (m.content or "") for m in gw.calls[1])
@@ -489,7 +534,10 @@ async def test_agent_feeds_tool_reported_failure_text_to_the_model() -> None:
         ]
     )
     mcp = _ErrorMcp(specs=[_echo_spec()], route={"echo": "u"})
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="go")])
 
     assert turn.content == "that event does not exist"
     fed_back = next(m.content for m in gw.calls[1] if m.role == "tool")
@@ -520,7 +568,10 @@ async def test_agent_marks_tool_reported_failure_as_an_error_step() -> None:
         ]
     )
     mcp = _ErrorMcp(specs=[_echo_spec()], route={"echo": "u"})
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="go")])
 
     # The failed call is flagged as an error step (not a green "ok")…
     assert [s.status for s in turn.activity.steps] == ["error"]
@@ -583,7 +634,7 @@ async def test_agent_uses_memory_when_session_given() -> None:
             ChatMessage(role="assistant", content="earlier answer"),
         ],
     )
-    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory)
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory)  # type: ignore[arg-type]
     turn = await agent.run([ChatMessage(role="user", content="what's my name?")], session_id="s1")
 
     assert turn.content == "answer"
@@ -599,7 +650,7 @@ async def test_agent_uses_memory_when_session_given() -> None:
 async def test_agent_without_session_skips_memory() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="hi")])
     memory = _FakeMemory(recalled=["should not appear"])
-    turn = await Agent(gateway=gw, mcp=_FakeMcp(), memory=memory).run(
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), memory=memory).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")]
     )
     assert turn.content == "hi"
@@ -610,7 +661,7 @@ async def test_agent_without_session_skips_memory() -> None:
 async def test_agent_memory_failure_degrades_to_plain_turn() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="still works")])
     memory = _FakeMemory(fail=True)
-    turn = await Agent(gateway=gw, mcp=_FakeMcp(), memory=memory).run(
+    turn = await Agent(gateway=gw, mcp=_FakeMcp(), memory=memory).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")], session_id="s1"
     )
     # memory blew up on read and write, but the chat still answered
@@ -639,13 +690,16 @@ async def test_agent_lifts_entity_refs_from_a_tool_envelope() -> None:
         route={"make_event": "u"},
         outputs={"make_event": tool_envelope("Created the event.", [_ref()])},
     )
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="schedule it")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="schedule it")])
 
     assert [r.ref_id for r in turn.entity_refs] == ["e1"]
     # the envelope's *text* — not its JSON — is fed back to the model, now with the refs' ids
     # appended so the model can act on the entities (#449)
     tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
-    assert tool_msg.content is not None
+    assert isinstance(tool_msg.content, str)
     assert tool_msg.content.startswith("Created the event.")
     assert "e1" in tool_msg.content  # the ref id now reaches the model
 
@@ -675,10 +729,13 @@ async def test_agent_feeds_entity_ref_ids_to_the_model() -> None:
         route={"calendar_list_events": "u"},
         outputs={"calendar_list_events": listing},
     )
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="my events?")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="my events?")])
 
     tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
-    assert tool_msg.content is not None
+    assert isinstance(tool_msg.content, str)
     # the original listing text is preserved…
     assert tool_msg.content.startswith("Found 2 event(s):")
     # …and each event's id is now available to the model, paired with its title
@@ -713,7 +770,7 @@ async def test_agent_caps_the_entity_ref_id_block_but_not_the_ui_chips() -> None
         outputs={"calendar_list_events": listing},
     )
     with capture_logs() as logs:
-        turn = await Agent(gateway=gw, mcp=mcp).run(
+        turn = await Agent(gateway=gw, mcp=mcp).run(  # type: ignore[arg-type]
             [ChatMessage(role="user", content="my events?")], tenant_id="tenant-a"
         )
 
@@ -747,7 +804,10 @@ async def test_agent_dedupes_entity_refs_across_tool_calls() -> None:
         ]
     )
     mcp = _FakeMcp(specs=[_echo_spec()], route={"a": "u", "b": "u"}, outputs={"a": env, "b": env})
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="go")])
     assert [r.ref_id for r in turn.entity_refs] == ["e1"]
 
 
@@ -759,7 +819,10 @@ async def test_agent_plain_tool_output_yields_no_refs() -> None:
         ]
     )
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "just text"})
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="go")])
     assert turn.entity_refs == []
 
 
@@ -779,7 +842,10 @@ async def test_agent_empty_entity_refs_envelope_yields_no_refs_or_appended_block
         route={"echo": "u"},
         outputs={"echo": tool_envelope("just an envelope, no refs")},
     )
-    turn = await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="go")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="go")])
 
     assert turn.entity_refs == []
     tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
@@ -799,7 +865,7 @@ async def test_agent_persists_entity_refs_with_the_answer() -> None:
         outputs={"make_event": tool_envelope("Created.", [_ref()])},
     )
     memory = _FakeMemory()
-    await Agent(gateway=gw, mcp=mcp, memory=memory).run(
+    await Agent(gateway=gw, mcp=mcp, memory=memory).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="go")], session_id="s1"
     )
     assert memory.remembered_refs == [_ref().model_dump()]
@@ -890,7 +956,10 @@ async def test_agent_feeds_the_model_a_clickable_link_for_a_mentioned_entity() -
         route={"make_event": "u"},
         outputs={"make_event": tool_envelope("Created the event.", [_ref()])},
     )
-    await Agent(gateway=gw, mcp=mcp).run([ChatMessage(role="user", content="schedule it")])
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="schedule it")])
 
     tool_msg = next(m for m in gw.calls[1] if m.role == "tool")
     assert tool_msg.content is not None
@@ -921,7 +990,11 @@ async def test_agent_injects_attachment_context() -> None:
         content="summarize",
         attachments=[Attachment(att_id="a1", source="file", title="notes.txt")],
     )
-    turn = await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run([msg])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        attachments=expander,
+    ).run([msg])
 
     assert turn.content == "answer"
     assert expander.calls and expander.calls[0][0].att_id == "a1"
@@ -934,7 +1007,7 @@ async def test_agent_injects_attachment_context() -> None:
 async def test_agent_without_attachments_skips_expansion() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="ok")])
     expander = _FakeExpander()
-    await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run(
+    await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")]
     )
     assert expander.calls == []
@@ -953,7 +1026,11 @@ async def test_agent_attachment_failure_degrades_to_plain_turn() -> None:
         content="summarize",
         attachments=[Attachment(att_id="a1", source="file", title="notes.txt")],
     )
-    turn = await Agent(gateway=gw, mcp=_FakeMcp(), attachments=_BoomExpander()).run([msg])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        attachments=_BoomExpander(),
+    ).run([msg])
     assert turn.content == "still works"
     # no system context was injected — the model just saw the user message
     assert [m.content for m in gw.calls[0]] == ["summarize"]
@@ -974,7 +1051,11 @@ async def test_agent_attaches_image_content_when_model_supports_vision() -> None
         content="what is this?",
         attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
     )
-    turn = await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run([msg])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        attachments=expander,
+    ).run([msg])
 
     assert turn.content == "I see a cat"
     assert turn.stopped == "completed"
@@ -996,7 +1077,11 @@ async def test_agent_blocks_image_before_any_provider_call_when_model_lacks_visi
         content="what is this?",
         attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
     )
-    turn = await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander).run([msg])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        attachments=expander,
+    ).run([msg])
 
     assert turn.content == _VISION_UNSUPPORTED_MESSAGE
     assert turn.stopped == _STOPPED_UNSUPPORTED_MEDIA
@@ -1013,9 +1098,12 @@ async def test_agent_image_turn_is_persisted_with_plain_text_not_the_image_paylo
         content="what is this?",
         attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
     )
-    await Agent(gateway=gw, mcp=_FakeMcp(), attachments=expander, memory=memory).run(
-        [msg], session_id="s1"
-    )
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        attachments=expander,
+        memory=memory,  # type: ignore[arg-type]
+    ).run([msg], session_id="s1")
     assert memory.remembered == [
         ("user", "what is this?"),
         ("assistant", "I see a cat"),
@@ -1048,7 +1136,11 @@ async def test_agent_blocked_vision_turn_is_persisted_but_skips_fact_extraction(
         attachments=[Attachment(att_id="a1", source="file", title="photo.png")],
     )
     await Agent(
-        gateway=gw, mcp=_FakeMcp(), attachments=expander, memory=memory, queue=cast(Any, queue)
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        attachments=expander,
+        memory=memory,  # type: ignore[arg-type]
+        queue=cast(Any, queue),
     ).run([msg], session_id="s1")
     assert memory.remembered == [
         ("user", "what is this?"),
@@ -1066,7 +1158,10 @@ async def test_agent_without_images_never_calls_supports_vision() -> None:
             raise AssertionError("supports_vision should not be called without an image")
 
     gw = _NoVisionCheckGateway([ChatResult(model="m", content="ok")])
-    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert turn.content == "ok"
 
 
@@ -1093,7 +1188,7 @@ async def _drain(extractor: _FakeExtractor) -> None:
 async def test_agent_schedules_fact_extraction_after_a_turn() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="Nice to meet you, Sam.")])
     extractor = _FakeExtractor()
-    agent = Agent(gateway=gw, mcp=_FakeMcp(), extractor=extractor)
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), extractor=extractor)  # type: ignore[arg-type]
     await agent.run([ChatMessage(role="user", content="My name is Sam.")])
     await _drain(extractor)
     assert extractor.calls == [("local", "My name is Sam.", "Nice to meet you, Sam.")]
@@ -1104,9 +1199,11 @@ async def test_agent_skips_extraction_without_an_answer() -> None:
     # canned message, and extraction is skipped: there's nothing to learn from a non-answer.
     gw = _FakeGateway([ChatResult(model="m", content=""), ChatResult(model="m", content="")])
     extractor = _FakeExtractor()
-    turn = await Agent(gateway=gw, mcp=_FakeMcp(), extractor=extractor).run(
-        [ChatMessage(role="user", content="hi")]
-    )
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        extractor=extractor,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     await _drain(extractor)
     assert turn.content == _EMPTY_ANSWER_FALLBACK
     assert extractor.calls == []
@@ -1182,9 +1279,9 @@ async def test_agent_never_enqueues_an_invisible_sessions_exchange() -> None:
     memory = _FakeMemory()
     ephemeral = _FakeEphemeral({"ghost"})
     agent = Agent(
-        gateway=gw,
-        mcp=_FakeMcp(),
-        memory=memory,
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=memory,  # type: ignore[arg-type]
         queue=queue,  # type: ignore[arg-type]
         ephemeral=ephemeral,  # type: ignore[arg-type]
     )
@@ -1202,10 +1299,10 @@ async def test_agent_immediate_mode_never_extracts_an_invisible_session() -> Non
     extractor = _FakeExtractor()
     memory = _FakeMemory()
     agent = Agent(
-        gateway=gw,
-        mcp=_FakeMcp(),
-        memory=memory,
-        extractor=extractor,
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=memory,  # type: ignore[arg-type]
+        extractor=extractor,  # type: ignore[arg-type]
         defer_extraction=False,
         ephemeral=_FakeEphemeral({"ghost"}),  # type: ignore[arg-type]
     )
@@ -1221,9 +1318,9 @@ async def test_agent_skips_learning_when_the_ephemeral_check_fails() -> None:
     queue = _FakeQueue()
     memory = _FakeMemory()
     agent = Agent(
-        gateway=gw,
-        mcp=_FakeMcp(),
-        memory=memory,
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=memory,  # type: ignore[arg-type]
         queue=queue,  # type: ignore[arg-type]
         ephemeral=_FakeEphemeral(broken=True),  # type: ignore[arg-type]
     )
@@ -1237,9 +1334,9 @@ async def test_agent_immediate_mode_extracts_even_with_a_queue() -> None:
     queue = _FakeQueue()
     extractor = _FakeExtractor()
     agent = Agent(
-        gateway=gw,
-        mcp=_FakeMcp(),
-        extractor=extractor,
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        extractor=extractor,  # type: ignore[arg-type]
         queue=queue,  # type: ignore[arg-type]
         defer_extraction=False,
     )
@@ -1260,7 +1357,12 @@ class _SlowMemory(_FakeMemory):
 async def test_agent_recall_timeout_degrades_to_no_recall() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="answer")])
     memory = _SlowMemory(recalled=["should not appear"])
-    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory, recall_timeout_s=0.01)
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=memory,  # type: ignore[arg-type]
+        recall_timeout_s=0.01,
+    )
     turn = await agent.run([ChatMessage(role="user", content="hi")], session_id="s1")
     assert turn.content == "answer"
     # recall timed out → no recalled-context system message reached the model …
@@ -1281,7 +1383,10 @@ async def test_agent_recall_timeout_logs_a_named_timeout() -> None:
     # the budget) rather than the old blank `error=` that `str(TimeoutError())` produced.
     gw = _FakeGateway([ChatResult(model="m", content="answer")])
     agent = Agent(
-        gateway=gw, mcp=_FakeMcp(), memory=_SlowMemory(recalled=["x"]), recall_timeout_s=0.01
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=_SlowMemory(recalled=["x"]),  # type: ignore[arg-type]
+        recall_timeout_s=0.01,
     )
     with capture_logs() as logs:
         await agent.run([ChatMessage(role="user", content="hi")], session_id="s1")
@@ -1293,7 +1398,12 @@ async def test_agent_recall_backend_error_is_logged_distinctly() -> None:
     # A backend failure (not a timeout) degrades the same way but logs the exception type, so the
     # operator can tell a broken embedder/Qdrant from a too-tight budget.
     gw = _FakeGateway([ChatResult(model="m", content="answer")])
-    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=_RecallErrorMemory(), recall_timeout_s=5)
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=_RecallErrorMemory(),  # type: ignore[arg-type]
+        recall_timeout_s=5,
+    )
     with capture_logs() as logs:
         turn = await agent.run([ChatMessage(role="user", content="hi")], session_id="s1")
     assert turn.content == "answer"  # still degrades to no recall, never blocks
@@ -1310,7 +1420,7 @@ async def test_agent_blank_step_is_nudged_into_an_answer() -> None:
             ChatResult(model="m", content="here is the roadmap"),
         ]
     )
-    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(
+    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="make a roadmap")]
     )
     assert turn.content == "here is the roadmap"
@@ -1327,7 +1437,10 @@ async def test_agent_never_returns_an_empty_turn() -> None:
             ChatResult(model="m", content="   "),
         ]
     )
-    turn = await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert turn.content == _EMPTY_ANSWER_FALLBACK
     assert turn.stopped == "completed"
 
@@ -1342,7 +1455,7 @@ async def test_agent_blank_final_answer_at_max_steps_falls_back() -> None:
         ]
     )
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
-    turn = await Agent(gateway=gw, mcp=mcp, max_steps=1).run(
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=1).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="go")]
     )
     assert turn.stopped == "max_steps"
@@ -1357,9 +1470,11 @@ async def test_base_prompt_leads_the_turn() -> None:
     (the headless path), which takes the early return in ``_assemble``."""
     gw = _FakeGateway([ChatResult(model="m", content="ok")])
     store = await _fresh_instructions(default="You are epsilon.")
-    turn = await Agent(gateway=gw, mcp=_FakeMcp(), instructions=store).run(
-        [ChatMessage(role="user", content="hi")]
-    )
+    turn = await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        instructions=store,
+    ).run([ChatMessage(role="user", content="hi")])
     assert turn.content == "ok"
     first = gw.calls[0][0]
     assert first.role == "system"
@@ -1370,7 +1485,10 @@ async def test_no_base_prompt_when_instructions_unset() -> None:
     """Backward-compat: with no instructions store the agent runs with no base prompt, exactly
     as it did before #497 — the first message is the user's, not a system prompt."""
     gw = _FakeGateway([ChatResult(model="m", content="ok")])
-    await Agent(gateway=gw, mcp=_FakeMcp()).run([ChatMessage(role="user", content="hi")])
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
     assert gw.calls[0][0].role == "user"
 
 
@@ -1379,7 +1497,7 @@ async def test_custom_prompt_overrides_default_and_leads() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="ok")])
     store = await _fresh_instructions(default="DEFAULT")
     await store.set_instructions("local", "CUSTOM PROMPT")  # "local" is the agent's default tenant
-    await Agent(gateway=gw, mcp=_FakeMcp(), instructions=store).run(
+    await Agent(gateway=gw, mcp=_FakeMcp(), instructions=store).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="hi")]
     )
     first = gw.calls[0][0]
@@ -1403,7 +1521,12 @@ async def test_base_prompt_leads_the_memory_path_too() -> None:
             ChatMessage(role="assistant", content="earlier answer"),
         ],
     )
-    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=memory, instructions=store)
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=memory,  # type: ignore[arg-type]
+        instructions=store,
+    )
     await agent.run([ChatMessage(role="user", content="what's my name?")], session_id="s1")
 
     sent = gw.calls[0]
@@ -1467,7 +1590,7 @@ async def test_repeated_identical_call_nudges_then_stops() -> None:
         ]
     )
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
-    turn = await Agent(gateway=gw, mcp=mcp, max_steps=6).run(
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=6).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="go")]
     )
     assert turn.stopped == _STOPPED_REPEAT_CALL
@@ -1488,7 +1611,7 @@ async def test_distinct_args_repeats_are_not_flagged() -> None:
         ]
     )
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
-    turn = await Agent(gateway=gw, mcp=mcp, max_steps=6).run(
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=6).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="read all")]
     )
     assert turn.stopped == "completed"
@@ -1525,7 +1648,7 @@ async def test_error_streak_stops_early_with_what_failed() -> None:
         ]
     )
     mcp = _AlwaysFailMcp(specs=[_echo_spec()], route={"echo": "u"})
-    turn = await Agent(gateway=gw, mcp=mcp, max_steps=10).run(
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=10).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="go")]
     )
     assert turn.stopped == _STOPPED_TOOL_ERRORS
@@ -1564,7 +1687,7 @@ async def test_error_streak_resets_on_a_successful_call() -> None:
         ]
     )
     mcp = _PickyMcp(specs=[_echo_spec()], route={"echo": "u"})
-    turn = await Agent(gateway=gw, mcp=mcp, max_steps=10).run(
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=10).run(  # type: ignore[arg-type]
         [ChatMessage(role="user", content="go")]
     )
     assert turn.stopped == "completed"

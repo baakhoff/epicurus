@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from epicurus_core_app.agent.activity import (
+    ActivityItem,
     MessageActivity,
     ThinkingItem,
     activity_from_timeline,
@@ -12,7 +13,7 @@ from epicurus_core_app.agent.activity import (
 
 
 def test_append_thinking_coalesces_consecutive_runs() -> None:
-    timeline: list = []
+    timeline: list[ActivityItem] = []
     append_thinking(timeline, "let me ")
     append_thinking(timeline, "think")
     assert len(timeline) == 1
@@ -21,7 +22,7 @@ def test_append_thinking_coalesces_consecutive_runs() -> None:
 
 
 def test_a_tool_splits_thinking_into_two_blocks() -> None:
-    timeline: list = []
+    timeline: list[ActivityItem] = []
     append_thinking(timeline, "plan")
     append_tool(timeline, "echo", "ok", None)
     append_thinking(timeline, "now answer")
@@ -32,7 +33,7 @@ def test_a_tool_splits_thinking_into_two_blocks() -> None:
 
 
 def test_activity_from_timeline_derives_flat_fields() -> None:
-    timeline: list = []
+    timeline: list[ActivityItem] = []
     append_thinking(timeline, "x")
     append_tool(timeline, "echo", "ok", '{"q": 1}')
     append_thinking(timeline, "y")
@@ -45,7 +46,7 @@ def test_activity_from_timeline_derives_flat_fields() -> None:
 
 
 def test_thinking_cap_truncates_derived_field() -> None:
-    timeline: list = []
+    timeline: list[ActivityItem] = []
     append_thinking(timeline, "z" * 50)
     act = activity_from_timeline(timeline, thinking_cap=10)
     assert act.thinking == "z" * 10

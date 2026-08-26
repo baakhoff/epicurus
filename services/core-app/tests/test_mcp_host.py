@@ -23,6 +23,7 @@ import pytest
 import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.types import TextContent
+from starlette.applications import Starlette
 
 import epicurus_core_app.agent.mcp_host as mcp_host
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
@@ -322,7 +323,7 @@ def _free_port() -> int:
         sock.close()
 
 
-def _live_module_app() -> object:
+def _live_module_app() -> Starlette:
     """An MCPServer streamable-HTTP app with a ``echo`` tool and a raising ``boom`` tool."""
     mcp = MCPServer("test-module")
 

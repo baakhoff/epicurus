@@ -66,22 +66,32 @@ Redelivery is safe by construction, because ``dedup_key`` is unique in the log.
 publish: :func:`emit_event` returns once the local NATS client has accepted the message for
 transmission, *not* once the server has stored it. Nothing about the emitter changed, which
 is the point — persistence here is a property of the subject, not of the publisher's API.
-What that leaves open, stated plainly:
+"Accepted for transmission" is weaker than it sounds, so state it exactly: nats-py appends
+the message to a pending buffer and merely *queues* a flush — the socket write happens
+afterwards, in its flusher task. What that leaves open:
 
-* **NATS unreachable at publish.** nats-py buffers into its pending queue and flushes on
-  reconnect; an emitter that dies before the flush loses those events. A client that is
-  closed — never connected, or already shut down — raises instead, so *that* one the caller
-  does see.
+* **The emitter dies after publish, before the flush.** The message is still sitting in the
+  client's pending buffer and never reaches the server. This needs **no outage at all** — an
+  ordinary restart, redeploy, or OOM kill landing in that gap is enough, and it is the widest
+  window here precisely because it is open on a *healthy* connection.
 * **Stream at its limit.** The stream discards *old* messages to accept new ones, so a
-  runaway emitter costs the oldest unconsumed events, silently, rather than the newest.
+  runaway emitter costs the oldest unconsumed events, silently, rather than the newest;
+  anything past ``max_age`` expires regardless of who has read it.
 * **Unclean server crash.** A message the server accepted but had not yet written to the
   stream file can be lost.
 
-All three need NATS itself to be down or dying, which takes every other module↔core path
-with it; the failure this design exists to remove — *the core restarted and the world's
-changes vanished* — is closed. Publisher-side acks (``js.publish``) would close the rest, at
-the cost of a round-trip on every module hot path and an emit that fails outright until the
-core has provisioned the stream. See the ADR for why that trade was not taken at 1.0.
+Only one publish-side failure is loud: :attr:`~epicurus_core.events.EventBus.client` refuses
+to hand out a client that is not connected, so a publish attempted while the bus is down (or
+reconnecting) raises rather than buffering across the reconnect — the caller sees that one.
+
+So **the guarantee starts at publish, not at the source of truth.** The failure this design
+exists to remove — *the core restarted and the world's changes vanished* — is closed, but a
+module that must not lose an event needs an **outbox**: record it in the module's own
+database in the same transaction as the change it describes, and emit from there. That is an
+emitter-side change, not a transport one. Publisher-side acks (``js.publish``) would narrow
+the flush window but are not available here at all — see
+:meth:`~epicurus_core.events.EventBus.ensure_stream` on why ``no_ack`` is forced by the
+tenant-first subject scheme. See the ADR for the full trade.
 
 The durable log stays the copy of record regardless: "what happened" is a question you ask
 Postgres, not the bus. The stream is a delivery buffer in front of it, not a second archive.

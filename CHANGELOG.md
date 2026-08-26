@@ -38,10 +38,15 @@ images to GHCR.
   whose subjects overlap its reserved `$JS.>` namespace unless publisher acks are disabled
   (`no_ack`). Publisher-side acks would mean changing the *subject scheme*, which is a
   contract change, not a transport one. So the guarantee is: **at-least-once from the NATS
-  server to the durable log; best-effort from the emitter to the NATS server**, with three
-  windows documented rather than glossed (a client that buffers and then dies, a stream at
-  its limit discarding oldest-first, an unclean server crash) — all of which require NATS
-  itself to be down or dying. The `module_events` table stays the copy of record; the stream
+  server to the durable log; best-effort from the emitter to the NATS server**, with the
+  windows documented rather than glossed — and the widest is open on a *healthy* connection:
+  nats-py appends a publish to a pending buffer and only *queues* the flush, so `emit_event`
+  returns before the bytes are on the wire, and an emitter killed in that gap loses the event
+  with NATS entirely up. **The guarantee starts at publish, not at the source of truth**;
+  closing that needs an outbox in the emitter, not a transport change. The rest — a stream at
+  its limit discarding oldest-first, an unclean server crash — are documented beside it, and
+  the one loud case is a publish while the bus is disconnected, which raises rather than
+  buffering across a reconnect. The `module_events` table stays the copy of record; the stream
   is a bounded delivery buffer in front of it (7 days, 512 MiB, discard oldest), not a second
   archive. Also folded in: the LLM diagnostics no longer report "no key configured" when the
   truth is "OpenBao could not be reached" — a bare `except SecretError` had collapsed the two

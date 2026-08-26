@@ -260,14 +260,22 @@ redelivery is unlimited — a database outage costs latency, not history. Redeli
 because `dedup_key` is unique in the log, so a repeat delivery collapses to a no-op.
 
 **The publisher half is not.** `emit_event` is still a plain core-NATS publish: it returns
-once the local NATS client accepts the message, not once the server has stored it. Three
-windows stay open, and all three require NATS itself to be down or dying:
+once the local NATS client *accepts* the message, not once the server has stored it — and
+"accepts" is weaker than it sounds. nats-py appends the message to a pending buffer and
+merely **queues** a flush; the socket write happens afterwards, in its flusher task. So the
+widest window is open on a **healthy** connection, and **the guarantee starts at publish,
+not at the source of truth**:
 
 | Window | What happens | Who notices |
 | --- | --- | --- |
-| NATS unreachable at publish | The client buffers and flushes on reconnect; an emitter that dies first loses those events. A *closed* client raises instead. | Silent, unless the client was closed. |
-| Stream at its size/age limit | The stream discards its **oldest** messages to accept the new one. | Silent to the publisher. |
+| Emitter dies after publish, before the flush | The message is still in the client's pending buffer and never reaches the server. Needs **no outage** — an ordinary restart or OOM kill in that gap is enough. | Silent. |
+| Bus not connected (down, or reconnecting) | `EventBus.client` refuses rather than buffering across the reconnect, so the publish fails outright. | **Loud** — raises. |
+| Stream at its size/age limit | The stream discards its **oldest** messages to accept the new one; anything past `max_age` expires regardless of who has read it. | Silent to the publisher. |
 | Unclean server crash | A message accepted but not yet written to the stream file is lost. | Silent. |
+
+Closing the first row takes an **outbox in the emitter** — record the event in the module's
+own database in the same transaction as the change it describes, then emit from there — not
+a transport change. Nothing below narrows it.
 
 This is deliberate and it is not a trade that was available to make differently: a
 tenant-scoped subject puts the tenant in the leading token, so the stream's subject starts

@@ -34,7 +34,8 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Mypy (strict)
-        # The package list lives in [tool.mypy] in pyproject.toml.
+        # What gets checked lives in [tool.mypy] `files` in pyproject.toml — every
+        # package's `src` *and* its `tests`.
         run: uv run mypy
 
       - name: Tests

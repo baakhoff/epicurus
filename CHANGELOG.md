@@ -24,8 +24,8 @@ images to GHCR.
   `mypy_path` matching every package's `src`, keep same-named test files across services (several
   ship their own `test_service.py`) resolving to distinct module names instead of colliding on a
   bare one, and keep a file reached directly the same module as the one reached by import —
-  otherwise mypy reports the source "found twice under different module names." `scripts/
-  new_module.py` now wires a new module's `mypy_path`/`files` entries too, so `task new-module`
+  otherwise mypy reports the source "found twice under different module names."
+  `scripts/new_module.py` now wires a new module's `mypy_path`/`files` entries too, so `task new-module`
   keeps producing a gate-clean scaffold with no manual follow-up. All 606 errors fixed, test-side
   only: `.text` access on an mcp content union narrowed with a small `isinstance(x, TextContent)`
   helper per file rather than erased to `Any`, ignore comments whose bracketed code had drifted
@@ -52,7 +52,10 @@ images to GHCR.
   `web` 0.137.0→0.137.1 (PATCH). · `tasks` 0.23.0→0.23.1 (PATCH). · `core-app` 0.114.1→0.114.2
   (PATCH). · `mail` 0.19.0→0.19.1 (PATCH). · `knowledge` 0.27.3→0.27.4 (PATCH). · `notes`
   0.12.1→0.12.2 (PATCH). · `echo` 0.5.1→0.5.2 (PATCH). · `messaging` 0.3.0→0.3.1 (PATCH). ·
-  `storage` 0.9.1→0.9.2 (PATCH). · `websearch` 0.3.0→0.3.1 (PATCH).
+  `storage` 0.9.1→0.9.2 (PATCH). · `websearch` 0.3.0→0.3.1 (PATCH). `epicurus-core` and
+  `calendar` also had test files fixed here but carry **no line of their own**: both take a
+  MINOR in this same wave (#832, #831), and a PATCH landing first would only collide with
+  their version-line edits.
 
 - **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
   `writes_document` call *lands*, by which point the model has already written the whole body;

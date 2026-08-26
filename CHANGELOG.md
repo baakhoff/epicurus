@@ -57,6 +57,31 @@ images to GHCR.
   MINOR in this same wave (#832, #831), and a PATCH landing first would only collide with
   their version-line edits.
 
+- **Every public status surface told a retired story — reconciled to the milestone
+  roadmap** (#830) — `README.md` and `docs/index.md` still opened with "Phases 0–3
+  complete… Phase 2/chat bridges next," a model the project moved off of. Both now state
+  the actual gate: working toward **1.0.0 — Foundation complete & stable** (a quality bar,
+  not a feature checklist), with the `messaging` module (loopback, Discord, Telegram)
+  already shipped and Slack/WhatsApp landing at milestone 2.0.0; latest tagged release
+  stays v0.2.0. `docs/index.md`'s at-a-glance module tree was missing `notes` and
+  `websearch`; both added. `docs/user/installation.md`'s port table listed 3 of the
+  platform's 11 module ports; rebuilt against the source-of-truth
+  `docs/reference/ports.md` (module band, data plane, and the opt-in observability
+  profile), plus a new First-run models section documenting what the ADR-0118 bootstrap
+  (#773) actually does — the effective chat/embedding defaults it resolves, its
+  backoff/skip/no-op behavior, and the `LLM_BOOTSTRAP_MODELS` knob. `docs/services/index.md`'s
+  mail row dropped a stale, unrelated-to-current-version "(v0.1)" tag. `docs/services/web.md`'s
+  Chat row was a single ~9,690-character table cell; it's now a one-line summary pointing at
+  a new prose `### Chat` subsection carrying the exact same content (verified word-for-word
+  against the original, nothing dropped). That page's "two board pages from one module"
+  illustrative example (tasks' board + Can) has had no live instance since #820 folded Can
+  into the Tasks page, so the dead example was dropped and the underlying `BoardView` keying
+  behavior kept, described generically. `docs/services/core-app.md` and
+  `scheduled_turns.py`'s module docstring both still called event-driven listeners/alerts
+  "a later milestone"; that shipped inside 1.0 via #662–#672 (the module event spine,
+  automations engine, push notifications, and event alerts) — both corrected to point at the
+  automations engine. `core-app` 0.114.0→0.114.1 (PATCH).
+
 - **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
   `writes_document` call *lands*, by which point the model has already written the whole body;
   v2 shows it arriving. The blocker was never the pane: tool-call fragments were assembled

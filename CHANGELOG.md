@@ -47,7 +47,10 @@ images to GHCR.
   pass is capped, mirroring mail's resume-backlog ceiling. `invitation_received` /
   `attendee_responded` are deliberately still **not** declared: they are Google-only, and a
   declared-but-never-published event would repeat the mistake mail's docs already record as a
-  lesson learned once. `calendar` 0.19.0→0.20.0 (MINOR).
+  lesson learned once. The manifest's hardcoded version had meanwhile drifted two minors behind
+  `pyproject.toml` (0.18.0 vs 0.20.0) — its test pinned the same stale literal, so the gap passed
+  the gate while the Modules page badge read it; the manifest is corrected and the test now reads
+  the declared version, so it cannot drift again. `calendar` 0.19.0→0.20.0 (MINOR).
 
 - **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
   `writes_document` call *lands*, by which point the model has already written the whole body;

@@ -718,10 +718,21 @@ async def test_manifest_has_no_card_actions(local_provider: LocalCalendarProvide
     assert manifest.ui.actions == []
 
 
-async def test_manifest_version_is_current(local_provider: LocalCalendarProvider) -> None:
+async def test_manifest_version_matches_the_packaged_version(
+    local_provider: LocalCalendarProvider,
+) -> None:
+    """Pinning the literal let the manifest drift two minors behind ``pyproject.toml``
+    (0.18.0 vs 0.20.0) while the test still passed — and the Modules page badge reads this
+    version. Compare against the *declared* version rather than the installed metadata,
+    which a stale editable install can lie about (mirrors websearch)."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
     module = build_module(local_provider, tenant_id="t1")
     manifest = await module.manifest()
-    assert manifest.version == "0.18.0"
+    assert manifest.version == declared
 
 
 async def test_manifest_declares_read_tool_side_effects(

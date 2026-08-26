@@ -53,6 +53,7 @@ images to GHCR.
   (PATCH). · `mail` 0.19.0→0.19.1 (PATCH). · `knowledge` 0.27.3→0.27.4 (PATCH). · `notes`
   0.12.1→0.12.2 (PATCH). · `echo` 0.5.1→0.5.2 (PATCH). · `messaging` 0.3.0→0.3.1 (PATCH). ·
   `storage` 0.9.1→0.9.2 (PATCH). · `websearch` 0.3.0→0.3.1 (PATCH).
+
 - **The document pane now types** (#654) — v1 (#541, ADR-0101) opens the pane when an annotated
   `writes_document` call *lands*, by which point the model has already written the whole body;
   v2 shows it arriving. The blocker was never the pane: tool-call fragments were assembled

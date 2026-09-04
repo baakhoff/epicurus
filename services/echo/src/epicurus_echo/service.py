@@ -84,7 +84,7 @@ def build_module(bus: EventBus | None = None, *, tenant: str = "local") -> Epicu
     """
     module = EpicurusModule(
         "echo",
-        version="0.5.0",
+        version="0.5.3",
         description="Echoes messages — proves the MCP tool + NATS event contract.",
         config=["greeting"],
         ui=UiSection(

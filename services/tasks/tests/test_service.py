@@ -56,7 +56,6 @@ async def test_manifest(module_fixture: object) -> None:
     mod = module_fixture
     manifest = await mod.manifest()  # type: ignore[attr-defined]
     assert manifest.name == "tasks"
-    assert manifest.version == "0.23.0"
     assert manifest.contract_version == CONTRACT_VERSION
     # Google Tasks API scope requested at connect (#241); identity scopes are the core default.
     assert manifest.oauth_scopes == {"google": ["https://www.googleapis.com/auth/tasks"]}
@@ -88,6 +87,21 @@ async def test_manifest(module_fixture: object) -> None:
     assert manifest.collections.multi is True
     assert manifest.collections.providers == ["google"]
     assert manifest.ui.config_schema is None
+
+
+async def test_manifest_version_matches_the_packaged_version(module_fixture: object) -> None:
+    """Pinning the literal let the manifest drift behind ``pyproject.toml`` while the test
+    still passed — and the Modules page badge reads this version (#845). Compare against the
+    *declared* version rather than the installed metadata, which a stale editable install can
+    lie about (mirrors calendar/websearch)."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    mod = module_fixture
+    manifest = await mod.manifest()  # type: ignore[attr-defined]
+    assert manifest.version == declared
 
 
 async def test_manifest_declares_read_tool_side_effects(module_fixture: object) -> None:

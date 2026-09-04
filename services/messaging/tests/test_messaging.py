@@ -56,13 +56,27 @@ async def test_module_manifest_declares_events_no_tools_and_bridge_secrets() -> 
     manager = build_bridges(_settings(), _FakeSecrets())  # type: ignore[arg-type]
     manifest = await build_module(manager).manifest()
     assert manifest.name == "messaging"
-    assert manifest.version == "0.2.0"
     # It is a transport bridge, not an agent capability — it exposes no MCP tools.
     assert manifest.tools == []
     emitted = {e.subject for e in manifest.events_emitted}
     consumed = {e.subject for e in manifest.events_consumed}
     assert MESSAGING_INBOUND in emitted
     assert MESSAGING_OUTBOUND in consumed
+
+
+async def test_manifest_version_matches_the_packaged_version() -> None:
+    """Pinning the literal let the manifest drift behind ``pyproject.toml`` while the test
+    still passed — and the Modules page badge reads this version (#845). Compare against the
+    *declared* version rather than the installed metadata, which a stale editable install can
+    lie about (mirrors calendar/websearch)."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    manager = build_bridges(_settings(), _FakeSecrets())  # type: ignore[arg-type]
+    manifest = await build_module(manager).manifest()
+    assert manifest.version == declared
     assert manifest.ui is not None
     assert manifest.ui.status_url == "/status"
     # The real bridges' secret paths flow into the manifest (loopback contributes none).

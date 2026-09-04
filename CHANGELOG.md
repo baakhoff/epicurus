@@ -12,6 +12,24 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Six module manifests were lying on screen** (#845) — the Modules page badge reads
+  `manifest.version`, which every module hardcodes as a literal in `build_module()` rather than
+  reading its own package's declared version. Six of them had drifted behind `pyproject.toml`
+  (echo 0.5.0 vs 0.5.2, knowledge 0.27.0 vs 0.27.4, messaging 0.2.0 vs 0.3.1, notes 0.12.0 vs
+  0.12.2, storage 0.9.0 vs 0.9.2, tasks 0.23.0 vs 0.23.1), and each module's own test pinned the
+  same stale literal the manifest hardcoded — so the drift passed the gate release after release
+  while the badge quietly told the operator the wrong number. Calendar and websearch had already
+  been fixed this way (wave 15); the same pattern now covers all six: the manifest still
+  hardcodes a literal (a package can't read its own `pyproject.toml` from an installed wheel),
+  but the test now compares it against the version *declared* in that `pyproject.toml` via
+  `tomllib` rather than pinning a second copy of the same literal — a stale editable install can
+  lie about installed metadata, so declared beats installed. Two modules (echo, storage) had no
+  version assertion at all; one is added. The service template's own test never pinned a version
+  literal, so it needed no change. `echo` 0.5.2→0.5.3 · `knowledge` 0.28.0→0.28.1 · `messaging`
+  0.3.1→0.3.2 · `notes` 0.12.2→0.12.3 · `storage` 0.9.2→0.9.3 · `tasks` 0.23.2→0.23.3 (all PATCH,
+  this lane's own bump landing on top of #847's and #848's — this PR is the wave's merge-train
+  anchor and lands last).
+
 - **Calendar now notices changes you didn't make here** (#831) — the three calendar change
   events had exactly one emitter, the provider-write seam, which sees every write made *through*
   this module and, structurally, nothing else: an event created, moved or deleted in Google

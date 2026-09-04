@@ -59,7 +59,7 @@ def build_module(manager: BridgeManager) -> EpicurusModule:
     """Build the messaging module — declares its events and the bridges' secrets, no tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.2.0",
+        version="0.3.2",
         description=(
             "Chat bridges: connect external messaging channels (Telegram, Discord, …) to the "
             "assistant — inbound messages drive an agent turn and replies route back out."

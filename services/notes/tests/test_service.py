@@ -40,7 +40,20 @@ def _module() -> EpicurusModule:
 async def test_manifest_identity() -> None:
     manifest = await _module().manifest()
     assert manifest.name == "notes"
-    assert manifest.version == "0.12.0"
+
+
+async def test_manifest_version_matches_the_packaged_version() -> None:
+    """Pinning the literal let the manifest drift behind ``pyproject.toml`` while the test
+    still passed — and the Modules page badge reads this version (#845). Compare against the
+    *declared* version rather than the installed metadata, which a stale editable install can
+    lie about (mirrors calendar/websearch)."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    manifest = await _module().manifest()
+    assert manifest.version == declared
 
 
 async def test_manifest_declares_propose_tool_side_effects() -> None:

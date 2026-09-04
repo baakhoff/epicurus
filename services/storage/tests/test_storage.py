@@ -565,3 +565,21 @@ async def test_manifest_status_action_present(
     assert manifest.ui is not None
     action_tools = {a.tool for a in manifest.ui.actions}
     assert action_tools == {"storage_status"}
+
+
+async def test_manifest_version_matches_the_packaged_version(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore
+) -> None:
+    """The manifest hardcodes its version; nothing previously asserted it against
+    ``pyproject.toml``, so it had silently drifted (0.9.0 vs 0.9.2, #845) — and the Modules
+    page badge reads this value. Compare against the *declared* version rather than the
+    installed metadata, which a stale editable install can lie about (mirrors
+    calendar/websearch)."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), tenant=TENANT)
+    manifest = await module.manifest()
+    assert manifest.version == declared

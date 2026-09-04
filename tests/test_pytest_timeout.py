@@ -74,9 +74,11 @@ def test_integration_marker_lifts_timeout() -> None:
     unit = _FakeItem()
     own_timeout = _FakeItem("integration", "timeout")  # already carries its own @timeout
 
+    # conftest is loaded dynamically via importlib (a bare ModuleType), so mypy sees this
+    # call as untyped rather than through the hook's real signature — nothing to ignore.
     conftest.pytest_collection_modifyitems(
-        config=None,  # type: ignore[arg-type]  # the hook ignores config
-        items=[integration, unit, own_timeout],  # type: ignore[list-item]
+        config=None,  # the hook ignores config
+        items=[integration, unit, own_timeout],
     )
 
     # An integration test with no explicit timeout gets the lifted ceiling …

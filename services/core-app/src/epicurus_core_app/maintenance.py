@@ -445,9 +445,16 @@ def extraction_drain_job(drain: Callable[[], Awaitable[int]]) -> MaintenanceJob:
 def module_reindex_job(reembed: Callable[[], Awaitable[list[dict[str, str]]]]) -> MaintenanceJob:
     """Re-embed every reindexable module (#332) — heavy, so manual-only (``nightly=False``).
 
-    *reembed* is :meth:`ModuleRegistry.reembed`; it returns ``[{module, status}]`` best-effort per
-    module. A full re-embed is costly and only needed after the embedding model changes, so it is
-    excluded from the scheduled batch and included only in the manual "run everything" trigger.
+    *reembed* is :meth:`ModuleRegistry.reembed`; it returns ``[{module, status, reason?}]``
+    best-effort per module. A full re-embed is costly and only needed after the embedding model
+    changes, so it is excluded from the scheduled batch and included only in the manual "run
+    everything" trigger.
+
+    A **refusal** is not a failure (#848): a module that answers ``refused`` because rebuilding
+    would de-index a source that has gone wholesale empty did exactly what it should, and
+    reporting the job as ``error`` for it would train the operator to ignore a working safety
+    valve. Refusals are named in the detail with their reason and leave the status ``ok``; only
+    a genuine error still fails the job.
     """
 
     async def _run() -> tuple[JobStatus, str]:
@@ -455,8 +462,15 @@ def module_reindex_job(reembed: Callable[[], Awaitable[list[dict[str, str]]]]) -
         if not results:
             return "skipped", "no reindexable modules"
         started = sum(1 for r in results if r.get("status") == "started")
-        failed = [r["module"] for r in results if r.get("status") != "started"]
+        refused = [
+            f"{r['module']} ({r['reason']})" if r.get("reason") else r["module"]
+            for r in results
+            if r.get("status") == "refused"
+        ]
+        failed = [r["module"] for r in results if r.get("status") not in ("started", "refused")]
         detail = f"re-index started on {started}/{len(results)} module(s)"
+        if refused:
+            detail += f"; refused by the de-index fuse: {', '.join(refused)}"
         if failed:
             detail += f"; failed: {', '.join(failed)}"
         status: JobStatus = "error" if failed and not started else "ok"

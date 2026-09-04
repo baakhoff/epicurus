@@ -572,3 +572,98 @@ it("distinguishes an empty folder from a missing connection", async () => {
   expect(await screen.findByText("This folder is empty.")).toBeInTheDocument();
   expect(screen.queryByText("Google is not connected.")).not.toBeInTheDocument();
 });
+
+/* ── the core couldn't be reached (#835) ────────────────────────────────────── */
+// The third state, and the one the shell used to get wrong: with `is_available()` collapsing
+// every token-fetch failure to False, a core that was merely restarting produced the
+// disconnected panel above — telling an operator to go reconnect an account that was fine.
+// The module now sends `unreachable` with the reason instead, and this is what it must draw.
+
+const UNREACHABLE = {
+  title: "Mail",
+  labels: [],
+  active_label: "INBOX",
+  query: "",
+  tabs: [],
+  active_tab: "",
+  threads: [],
+  next_cursor: null,
+  unreachable: "couldn't reach the core to fetch the Google token: connection refused",
+};
+
+function unreachablePage() {
+  mockModulePage.mockImplementation(() => Promise.resolve(UNREACHABLE));
+}
+
+it("says it couldn't check the connection, and never that Google is disconnected (#835)", async () => {
+  unreachablePage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("Couldn't check your mail connection.")).toBeInTheDocument();
+  // The misdiagnosis this issue exists to remove — in either of its wordings.
+  expect(screen.queryByText("Google is not connected.")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Connect it in Settings/)).not.toBeInTheDocument();
+  // Nor the generic empty folder, which would read as "you have no mail".
+  expect(screen.queryByText("This folder is empty.")).not.toBeInTheDocument();
+});
+
+it("shows the operator the actual reason", async () => {
+  unreachablePage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText(/connection refused/)).toBeInTheDocument();
+  expect(screen.getByText(/nothing to reconnect/)).toBeInTheDocument();
+});
+
+it("offers a retry rather than the two disconnect exits", async () => {
+  unreachablePage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByRole("button", { name: "Try again" })).toBeInTheDocument();
+  // Routing to Settings here is worse than useless: the account is probably fine, and the
+  // only thing to do there is disconnect it.
+  expect(screen.queryByRole("button", { name: /Open Settings/ })).not.toBeInTheDocument();
+});
+
+it("refetches the list when the retry is pressed", async () => {
+  unreachablePage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  const before = mockModulePage.mock.calls.length;
+  fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+  await waitFor(() => expect(mockModulePage.mock.calls.length).toBeGreaterThan(before));
+});
+
+it("actually recovers the page when the retry finds a healthy core", async () => {
+  // The property the copy above promises ("It should come back on its own"). On the landing
+  // view the reconcile read wins over the list read, so a retry that refreshed only the list
+  // would leave the *stale* unreachable payload on screen forever, however healthy the core.
+  unreachablePage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  await screen.findByText("Couldn't check your mail connection.");
+
+  mockModulePage.mockImplementation(pageImpl); // the core is back
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+  expect(screen.queryByText("Couldn't check your mail connection.")).not.toBeInTheDocument();
+});
+
+it("hides the folder rail, search, and compose while unreachable too", async () => {
+  unreachablePage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  await screen.findByText("Couldn't check your mail connection.");
+  expect(screen.queryByRole("navigation", { name: "Mailbox folders" })).not.toBeInTheDocument();
+  expect(screen.queryByPlaceholderText("Search mail…")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /New message/ })).not.toBeInTheDocument();
+});
+
+it("keeps the unreachable page out of the error state", async () => {
+  unreachablePage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  await screen.findByText("Couldn't check your mail connection.");
+  // A 200 with an honest payload, not a failed query: plain navigation to Mail must not break.
+  expect(screen.queryByText(/Couldn't reach your mail\./)).not.toBeInTheDocument();
+});
+
+it("renders the ordinary page when the payload omits the flag (pre-#835 modules)", async () => {
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+  expect(screen.queryByText("Couldn't check your mail connection.")).not.toBeInTheDocument();
+});

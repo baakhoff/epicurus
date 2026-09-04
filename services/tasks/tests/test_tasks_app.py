@@ -287,9 +287,16 @@ def test_page_board_backlog_splits_completed_into_a_muted_column(
     assert cols["Backlog"] == ["open1"]
     assert cols["Completed"] == ["done1"]
     # Fetched at scope "all" — not the default "open" — so the provider mock actually saw
-    # every status; this is *how* the completed one is reachable at all.
-    assert list_tasks.await_args is not None
-    assert list_tasks.await_args.kwargs["scope"] == "all"
+    # every status; this is *how* the completed one is reachable at all. Search
+    # `await_args_list` for the page's own call rather than asserting on `await_args` (the
+    # *last* await): the booted lifespan's lead-time scheduler independently ticks
+    # `list_tasks(tenant, scope="open")` in the background (#664), and a tick landing between
+    # the request and this assertion would make `await_args` read the scheduler's call
+    # instead of the page's — #847.
+    scope_all_calls = [
+        call for call in list_tasks.await_args_list if call.kwargs.get("scope") == "all"
+    ]
+    assert len(scope_all_calls) == 1, list_tasks.await_args_list
 
 
 def test_page_board_calendar_view_clamps_backlog_show_to_open(

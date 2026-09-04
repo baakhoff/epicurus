@@ -466,6 +466,17 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
   // needs a mailbox, so the whole page reduces to the empty state and its two exits rather
   // than a row of controls that can only fail.
   const disconnected = list?.disconnected ?? false;
+  // The module couldn't *find out* whether an account is connected (#835) — the reason, or
+  // null. A separate state from `disconnected` on purpose: the two want opposite copy, and
+  // the expensive mistake is showing "Google is not connected — connect it in Settings" to
+  // someone whose account is fine and whose core was merely restarting. The toolbar is hidden
+  // here too (the same controls are equally unusable), but the exits are not offered.
+  // Empty-string-safe: a reason that arrived blank must not hide the rail and toolbar while
+  // the panel below (which tests the same value for truthiness) falls through to "this folder
+  // is empty" — one predicate, so the two can't disagree.
+  const unreachable = list?.unreachable || null;
+  // Whichever absence it is, there is no mailbox behind the chrome.
+  const noMailbox = disconnected || unreachable !== null;
 
   const threadQuery = useQuery({
     queryKey: ["module-page", module, pageId, "thread", openThreadId],
@@ -539,13 +550,14 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
 
   return (
     <div className="flex h-full min-h-0">
-      {!disconnected && (
+      {!noMailbox && (
         <LabelRail labels={list?.labels ?? []} active={activeLabel} onSelect={selectLabel} />
       )}
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* toolbar: mobile label picker + search + compose — hidden entirely while
-            disconnected (#764): a search box over no mailbox is furniture, not an affordance. */}
-        {!disconnected && (
+        {/* toolbar: mobile label picker + search + compose — hidden entirely while there is no
+            mailbox behind it (#764, #835): a search box over no mailbox is furniture, not an
+            affordance, whether the account is gone or merely unverifiable. */}
+        {!noMailbox && (
         <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
           <Select
             size="sm"
@@ -637,6 +649,41 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
             <div className="flex h-full items-center justify-center p-6">
               <EmptyState quote="Couldn't reach your mail.">
                 <p className="text-sm text-ink-dim">{(listQuery.error as Error).message}</p>
+              </EmptyState>
+            </div>
+          ) : unreachable ? (
+            // The third state (#835): the module couldn't reach the core to check the
+            // connection, so it does *not* know whether Google is connected. Everything here
+            // is deliberately the opposite of the disconnected panel below — no "connect it in
+            // Settings", no exits — because the likeliest truth is that the account is fine and
+            // the platform is briefly down. Naming the reason is the whole point: an operator
+            // who is told to reconnect a working account will do it, and pay for it.
+            <div className="flex h-full items-center justify-center p-6">
+              <EmptyState quote="Couldn't check your mail connection.">
+                <p className="text-sm text-ink-dim">
+                  <WifiOff size={14} className="mr-1 inline text-ink-faint" />
+                  {unreachable}
+                </p>
+                <p className="mt-2 text-sm text-ink-dim">
+                  This is a problem reaching the core, not a sign your Google account was
+                  disconnected — there is nothing to reconnect. It should come back on its own.
+                </p>
+                <div className="mt-3 flex items-center justify-center gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      // Both reads, not just the list one: on the landing view `listData`
+                      // prefers `reconcileQuery.data` once that has landed (see above), so a
+                      // retry refreshing only the list would keep painting the *stale*
+                      // unreachable payload — the button would do nothing visible however
+                      // healthy the core had become, and the copy above promises otherwise.
+                      void listQuery.refetch();
+                      if (isLanding) void reconcileQuery.refetch();
+                    }}
+                  >
+                    Try again
+                  </Button>
+                </div>
               </EmptyState>
             </div>
           ) : disconnected ? (

@@ -98,6 +98,7 @@ from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.event_log import EventIntake, EventLogStore, EventRetention
 from epicurus_core_app.event_log_routes import create_event_log_router
 from epicurus_core_app.file_index import FileIndex
+from epicurus_core_app.file_scan import ScanFuse
 from epicurus_core_app.file_scan import scan as scan_file_space
 from epicurus_core_app.file_watch import FileWatcher
 from epicurus_core_app.files_routes import create_files_router
@@ -726,12 +727,30 @@ def create_app() -> FastAPI:
     file_index = FileIndex(engine)
     file_objects = StorageObjectBackend(registry)
     file_scan_lock = asyncio.Lock()
+    # The mass de-index fuse (#848), shared by the tenant tree and every mount's scan: a walk
+    # that would purge a wholesale share of a namespace's rows — or any walk of a store that
+    # reads empty while rows exist — refuses the purge instead of reconciling a stale mount
+    # into an emptied index. Its state is keyed by (tenant, namespace) inside.
+    file_scan_fuse = ScanFuse(
+        enabled=settings.files_scan_fuse_enabled,
+        max_delete_ratio=settings.files_scan_fuse_max_delete_ratio,
+        min_deletions=settings.files_scan_fuse_min_deletions,
+    )
 
-    async def _rescan_files() -> int:
+    async def _rescan_files(force: bool = False, tenant: str | None = None) -> int:
         # Serialise the startup walk and every watch-triggered rescan against each other (the
         # scan holds no internal lock), so a change mid-startup waits rather than double-walks.
+        # *tenant* is carried rather than assumed (constraint #1): the watcher and the startup
+        # walk pass nothing and get the default, the operator door passes the tenant it was
+        # asked about, and neither has to know which of those the other is.
         async with file_scan_lock:
-            return await scan_file_space(file_store, file_index, tenant=settings.default_tenant_id)
+            return await scan_file_space(
+                file_store,
+                file_index,
+                tenant=tenant or settings.default_tenant_id,
+                fuse=file_scan_fuse,
+                force=force,
+            )
 
     file_watcher = (
         FileWatcher(
@@ -764,33 +783,62 @@ def create_app() -> FastAPI:
         )
     )
 
-    def _make_mount_rescan(mount: Mount) -> Callable[[], Awaitable[int]]:
-        """A rescan closure for one indexed mount — its own lock, own tree, own index prefix."""
+    def _make_mount_rescan(mount: Mount) -> Callable[..., Awaitable[int]]:
+        """A rescan closure for one indexed mount — its own lock, own tree, own index prefix.
+
+        Takes an optional ``force`` (#848) so the operator door can override a tripped fuse
+        for exactly one mount without disturbing the tenant tree or a sibling mount, and an
+        optional ``tenant`` so the door scopes to the tenant it was asked about rather than
+        assuming the default one (constraint #1).
+        """
         lock = asyncio.Lock()
 
-        async def _rescan() -> int:
+        async def _rescan(force: bool = False, tenant: str | None = None) -> int:
             async with lock:
                 return await scan_file_space(
                     mount.store,
                     file_index,
-                    tenant=settings.default_tenant_id,
+                    tenant=tenant or settings.default_tenant_id,
                     path_prefix=f"{MOUNT_PREFIX}{mount.name}/",
                     exclude=mount.exclude,
+                    fuse=file_scan_fuse,
+                    force=force,
                 )
 
         return _rescan
 
+    # One rescan closure per indexed mount, shared by its watcher and the operator door — the
+    # same lock must serialise both, so they cannot be built independently.
+    mount_rescans: dict[str, Callable[..., Awaitable[int]]] = {
+        mount.name: _make_mount_rescan(mount) for mount in mounts.values() if mount.indexed
+    }
     # Watch is independent per mount (different trees on disk); only mounts that opted into
     # indexing get one (`FILES_EXTERNAL_MOUNTS_INDEXED`) — a whole-drive mount never auto-scans.
     mount_watchers = [
         FileWatcher(
             mount.spec.path,
-            _make_mount_rescan(mount),
+            mount_rescans[mount.name],
             debounce_ms=settings.files_watch_debounce_ms,
         )
         for mount in mounts.values()
         if mount.indexed
     ]
+
+    async def _rescan_namespace(
+        namespace: str = "", force: bool = False, tenant: str | None = None
+    ) -> int:
+        """Rescan one file-space namespace on demand (#848): ``""`` = the tenant tree.
+
+        The operator-facing counterpart to the startup walk and the watcher: after a mount
+        is repaired, this re-runs the scan that the fuse refused — with ``force`` when the
+        emptiness is real and the index should follow it down, and for ``tenant`` when the
+        caller named one. Raises ``KeyError`` for an unknown (or un-indexed) mount name so
+        the route can 404 it.
+        """
+        if not namespace:
+            return await _rescan_files(force, tenant)
+        return await mount_rescans[namespace](force, tenant)
+
     # Maintenance orchestrator (ADR-0060): one coordinated batch over the background jobs — the
     # deferred fact-extraction drain (light, nightly-eligible) and the module re-index fan-out
     # (heavy, manual-only). The manual "run everything" trigger is always available; the nightly
@@ -1159,6 +1207,10 @@ def create_app() -> FastAPI:
             locked_prefixes=frozenset(settings.module_hostnames),
             events=core_events,
             mounts=mounts,
+            # The mass de-index fuse's operator surface (#848): read its state, and re-run a
+            # scan the fuse refused (optionally forcing the purge).
+            scan_fuse=file_scan_fuse,
+            rescan=_rescan_namespace,
         )
     )
     app.include_router(

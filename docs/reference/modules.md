@@ -97,7 +97,7 @@ app = module.http_app()
 | `collections` | `CollectionsSpec \| None` | `None` | account/collection model (ADR-0030): the module serves `GET /accounts` and reads its selection via `PlatformClient.get_collections`; the shell renders a connected-accounts section. `CollectionsSpec` = `{noun: str, multi: bool, providers: list[str]}` |
 | `oauth_scopes` | `dict[str, list[str]]` | `{}` | OAuth API scopes the module needs per provider (#241), e.g. `{"google": ["https://www.googleapis.com/auth/calendar"]}`. The shell unions these across modules and requests them at connect (`?scope=`); the core always adds the default identity scopes. Empty = only identity scopes needed |
 | `docs_url` | `str \| None` | `None` | relative path on the module (e.g. `/module-docs`) returning usage docs the knowledge service auto-indexes (#215); see *Per-module docs* below |
-| `reindexable` | `bool` | `False` | the module holds embeddings and serves `POST /reindex` (drop + rebuild its Qdrant collection with the current model); the core's re-embed fan-out calls it when the embedding model changes (#332, ADR-0054) |
+| `reindexable` | `bool` | `False` | the module holds embeddings and serves `POST /reindex` (drop + rebuild its Qdrant collection with the current model); the core's re-embed fan-out calls it when the embedding model changes (#332, ADR-0054). A module whose source has gone wholesale empty may **refuse** the rebuild rather than destroy its index — knowledge answers `{status: "refused", …}` and takes `?force=true` (#848) |
 | `automation_templates` | `list[AutomationTemplate]` | `[]` | preset automations the module suggests, offered on the shell's Templates tab — **never auto-instantiated** (ADR-0105); see *Automation templates* below |
 
 ### `ToolSpec`
@@ -902,7 +902,15 @@ the knowledge service fetches from there, never from the module directly.
 discover active modules, fetches each module's docs, diffs by SHA-256 content hash, and upserts
 only new or changed documents into `<tenant>__docs` with a `module/<name>/` path prefix so they
 don't collide with platform docs. Modules that are **disabled or removed** have their docs purged
-from the collection automatically. The `knowledge_reindex` tool repeats this process on demand.
+from the collection automatically. The `knowledge_reindex` tool repeats this process on demand. A
+purge that would take a wholesale share of the module-doc corpus — a registry that momentarily
+lists no doc-serving module, say — is **refused** by the mass de-index fuse (#848) and logged
+instead; `knowledge_reindex(force=true)` purges anyway. Disabling one module of several is well
+under the threshold and prunes as before. Note the absolute floor applies here (this source does
+*not* escalate its empty case past it): while the whole module-doc corpus is smaller than
+`KNOWLEDGE_INDEX_FUSE_MIN_DELETIONS` — as it is today, two doc-serving modules and three pages —
+even a total purge stays under the floor and proceeds. Module docs are cheap, re-derivable state;
+lower the floor if that is not the trade you want.
 
 **The module docs are automatically searched.** Because they land in `<tenant>__docs`, the
 existing `knowledge_search` tool finds them alongside platform docs — no change to the tool

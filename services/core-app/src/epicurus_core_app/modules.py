@@ -478,11 +478,22 @@ class ModuleRegistry:
             for template in snap.manifest.automation_templates
         ]
 
-    async def _post_reindex(self, base: str) -> None:
-        """POST ``{base}/reindex`` to one module (overridable in tests, like ``_probe``)."""
+    async def _post_reindex(self, base: str) -> dict[str, str]:
+        """POST ``{base}/reindex`` to one module (overridable in tests, like ``_probe``).
+
+        Returns the module's response body so the fan-out can report what actually happened:
+        a module may accept the rebuild (``{"status": "started"}``) or **refuse** it — knowledge
+        answers ``{"status": "refused", "reason": …}`` when rebuilding would de-index a source
+        that has gone wholesale empty (#848). A non-JSON or non-object body reads as ``{}``.
+        """
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{base}/reindex")
             resp.raise_for_status()
+            try:
+                body = resp.json()
+            except ValueError:
+                return {}
+        return {str(k): str(v) for k, v in body.items()} if isinstance(body, dict) else {}
 
     async def reembed(self) -> list[dict[str, str]]:
         """Re-embed every reindexable, enabled module (#332).
@@ -492,6 +503,13 @@ class ModuleRegistry:
         everything" after the embedding model changes (vectors are model-specific). Best-effort
         per module: one module's failure is logged and reported, never aborts the rest. Each
         module re-embeds its own tenant's corpus (single-tenant in v1, so it matches ours).
+
+        A module's own answer is passed through rather than assumed (#848): a rebuild it
+        **refuses** — because the source it would rebuild from reads empty — reports
+        ``{"status": "refused", "reason": …}`` rather than the ``started`` this used to
+        assume, so nothing downstream claims a rebuild that never began. The web shell still
+        renders any non-``started`` status as "failed to start"; teaching it to name a refusal
+        and show the reason is a follow-up, and the API carries what it needs already.
         """
         snaps = await self.snapshot()
         results: list[dict[str, str]] = []
@@ -502,8 +520,18 @@ class ModuleRegistry:
                 continue
             name = snap.manifest.name
             try:
-                await self._post_reindex(base)
-                results.append({"module": name, "status": "started"})
+                body = await self._post_reindex(base)
+                status = body.get("status", "started")
+                entry = {"module": name, "status": status}
+                reason = body.get("reason")
+                if reason:
+                    entry["reason"] = reason
+                # Warn on the *status*, not on the mere presence of a reason: a module is free
+                # to explain a rebuild it did start, and logging that as a refusal would be a
+                # second small lie in the surface this change exists to make honest.
+                if status == "refused":
+                    log.warning("re-embed refused by the module", module=name, reason=reason)
+                results.append(entry)
             except httpx.HTTPError as exc:
                 log.warning("re-embed fan-out failed", module=name, error=str(exc))
                 results.append({"module": name, "status": "error"})

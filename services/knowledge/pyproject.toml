@@ -14,6 +14,9 @@ dependencies = [
     # Vault file-watcher for live re-index on external change (#232). Already present
     # transitively via uvicorn[standard]; declared directly because we import it.
     "watchfiles>=0.21",
+    # Mass de-index fuse metrics (#848). Already present transitively via epicurus-core
+    # (which owns the /metrics route); declared directly because we import it.
+    "prometheus-client>=0.20",
 ]
 
 [build-system]

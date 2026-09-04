@@ -30,15 +30,19 @@ class _FakeIndexer:
         self._name = name
         self.calls = 0
         self.reconciled = 0
+        # Every `force` value seen, reconcile and run alike (#848).
+        self.forced: list[bool] = []
 
-    async def reconcile(self) -> bool:
+    async def reconcile(self, *, force: bool = False) -> bool:
         self.reconciled += 1
+        self.forced.append(force)
         if self._order_log is not None:
             self._order_log.append(f"reconcile:{self._name}")
         return self._reconcile_returns
 
-    async def run(self) -> dict[str, int]:
+    async def run(self, *, force: bool = False) -> dict[str, int]:
         self.calls += 1
+        self.forced.append(force)
         if self._order_log is not None:
             self._order_log.append(f"run:{self._name}")
         if self.calls <= self._fail_times:
@@ -54,7 +58,7 @@ async def test_run_once_sums_counts_across_indexers() -> None:
         ]
     )
     total = await runner.run_once()
-    assert total == {"indexed": 7, "deleted": 1, "unchanged": 4}
+    assert total == {"indexed": 7, "deleted": 1, "unchanged": 4, "fuse_tripped": 0}
 
 
 async def test_run_with_retry_succeeds_first_try() -> None:
@@ -64,7 +68,12 @@ async def test_run_with_retry_succeeds_first_try() -> None:
     assert runner.state.phase == "ready"
     assert runner.state.attempts == 1
     assert runner.state.error is None
-    assert runner.state.last_result == {"indexed": 4, "deleted": 0, "unchanged": 0}
+    assert runner.state.last_result == {
+        "indexed": 4,
+        "deleted": 0,
+        "unchanged": 0,
+        "fuse_tripped": 0,
+    }
     assert indexer.calls == 1
 
 
@@ -75,7 +84,12 @@ async def test_run_with_retry_recovers_after_failures() -> None:
     await runner.run_with_retry()
     assert runner.state.phase == "ready"
     assert runner.state.attempts == 3
-    assert runner.state.last_result == {"indexed": 1, "deleted": 0, "unchanged": 0}
+    assert runner.state.last_result == {
+        "indexed": 1,
+        "deleted": 0,
+        "unchanged": 0,
+        "fuse_tripped": 0,
+    }
 
 
 async def test_run_with_retry_gives_up_after_max_attempts() -> None:
@@ -98,7 +112,7 @@ async def test_on_complete_called_with_totals() -> None:
         [_FakeIndexer({"indexed": 2, "deleted": 0, "unchanged": 0})], on_complete=_capture
     )
     await runner.run_with_retry()
-    assert seen == [{"indexed": 2, "deleted": 0, "unchanged": 0}]
+    assert seen == [{"indexed": 2, "deleted": 0, "unchanged": 0, "fuse_tripped": 0}]
 
 
 async def test_on_complete_failure_does_not_fail_run() -> None:
@@ -173,17 +187,17 @@ async def test_snapshot_reports_state() -> None:
     snap = runner.state.snapshot()
     assert snap["phase"] == "ready"
     assert snap["attempts"] == 1
-    assert snap["last_result"] == {"indexed": 1, "deleted": 0, "unchanged": 0}
+    assert snap["last_result"] == {"indexed": 1, "deleted": 0, "unchanged": 0, "fuse_tripped": 0}
 
 
 async def test_cancellation_propagates() -> None:
     started = asyncio.Event()
 
     class _Hang:
-        async def reconcile(self) -> bool:
+        async def reconcile(self, *, force: bool = False) -> bool:
             return False
 
-        async def run(self) -> dict[str, int]:
+        async def run(self, *, force: bool = False) -> dict[str, int]:
             started.set()
             await asyncio.sleep(3600)
             return {"indexed": 0, "deleted": 0, "unchanged": 0}

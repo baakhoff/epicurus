@@ -24,6 +24,7 @@ from epicurus_core import (
 from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
 from epicurus_knowledge.db import DocIndex, NoteIndex, VersionStore
 from epicurus_knowledge.events import KnowledgeEventEmitter
+from epicurus_knowledge.fuse import FusePolicy, rebuild_refusals
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
@@ -89,6 +90,15 @@ def create_app() -> FastAPI:
     )
     docs_reader = DiskVaultReader(settings.docs_path)
 
+    # One policy, shared by every source (#848): the fuse that refuses to reconcile a
+    # wholesale-vanished source into a wholesale de-index. Per-source state lives on each
+    # indexer's own `fuse`; only the thresholds are shared.
+    fuse_policy = FusePolicy(
+        enabled=settings.knowledge_index_fuse_enabled,
+        max_delete_ratio=settings.knowledge_index_fuse_max_delete_ratio,
+        min_deletions=settings.knowledge_index_fuse_min_deletions,
+    )
+
     vault_indexer = KnowledgeIndexer(
         note_index,
         qdrant,
@@ -98,6 +108,7 @@ def create_app() -> FastAPI:
         collection_base="knowledge",
         chunk_max_chars=settings.chunk_max_chars,
         embed_batch_size=settings.embed_batch_size,
+        fuse_policy=fuse_policy,
     )
     docs_indexer = KnowledgeIndexer(
         doc_index,
@@ -108,6 +119,7 @@ def create_app() -> FastAPI:
         collection_base="docs",
         chunk_max_chars=settings.chunk_max_chars,
         embed_batch_size=settings.embed_batch_size,
+        fuse_policy=fuse_policy,
     )
     # Per-module docs (#215): indexed alongside the bundled platform docs into
     # <tenant>__docs; synced at startup and on every knowledge_reindex call.
@@ -117,6 +129,7 @@ def create_app() -> FastAPI:
         platform,
         tenant=settings.default_tenant_id,
         chunk_max_chars=settings.chunk_max_chars,
+        fuse_policy=fuse_policy,
     )
 
     bus = EventBus.from_settings(settings)
@@ -286,26 +299,41 @@ def create_app() -> FastAPI:
         """
         return module_docs()
 
-    async def _force_reindex() -> None:
+    indexers = (vault_indexer, docs_indexer, module_docs_indexer)
+
+    async def _force_reindex(force: bool) -> None:
         """Re-embed every source from scratch (#332): reset each indexer (drop its vectors +
         ledger) so nothing is skipped as "unchanged", then re-run the resilient index runner so
         ``GET /status`` reports progress as it rebuilds with the current embedding model."""
-        for indexer in (vault_indexer, docs_indexer, module_docs_indexer):
+        for indexer in indexers:
             await indexer.reset()
-        await index_runner.run_with_retry()
+        await index_runner.run_with_retry(force=force)
 
     # Holds the detached re-embed task so it isn't garbage-collected mid-run (RUF006).
     reindex_tasks: set[asyncio.Task[None]] = set()
 
     @app.post("/reindex")
-    async def reindex_all() -> dict[str, str]:
+    async def reindex_all(force: bool = False) -> dict[str, str]:
         """Re-embed every source with the current embedding model (#332).
 
         The core's re-embed fan-out calls this when the operator changes the embedding model —
         vectors built with the old model are incompatible, so the whole corpus is rebuilt. Runs
         in the background (a full re-embed takes minutes); ``GET /status`` reports progress.
+
+        Refused synchronously (``{"status": "refused"}``, HTTP 200) when a source would be
+        rebuilt from nothing — the mass de-index fuse (#848). ``?force=true`` says the
+        emptiness is real and rebuilds anyway.
         """
-        task = asyncio.create_task(_force_reindex())
+        if not force:
+            # Ask before dropping anything: a reset empties the ledgers the fuse protects.
+            trips = await rebuild_refusals(indexers)
+            if trips:
+                return {
+                    "status": "refused",
+                    "reason": "; ".join(t.summary() for t in trips),
+                    "detail": "re-run with ?force=true if the source really is empty",
+                }
+        task = asyncio.create_task(_force_reindex(force))
         reindex_tasks.add(task)
         task.add_done_callback(reindex_tasks.discard)
         return {"status": "started"}
@@ -321,6 +349,9 @@ def create_app() -> FastAPI:
         last_indexed_at = await note_index.last_indexed_at(tenant=settings.default_tenant_id)
         doc_count = await doc_index.count(tenant=settings.default_tenant_id)
         module_doc_count = await module_doc_ledger.count(tenant=settings.default_tenant_id)
+        # The fuse (#848) reports flat scalars, not a nested object: the module status panel
+        # renders every value with String(v), so a dict would show as "[object Object]".
+        trips = [i.fuse.last_trip for i in indexers if i.fuse.last_trip is not None]
         return {
             "note_count": note_count,
             "last_indexed_at": last_indexed_at,
@@ -328,6 +359,8 @@ def create_app() -> FastAPI:
             "module_doc_count": module_doc_count,
             "index_phase": index_runner.state.phase,
             "index_attempts": index_runner.state.attempts,
+            "index_fuse_tripped": bool(trips),
+            "index_fuse_detail": " · ".join(t.summary() for t in trips) or None,
         }
 
     app.mount("/mcp", mcp_app)

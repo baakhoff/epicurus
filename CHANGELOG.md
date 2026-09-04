@@ -12,6 +12,18 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Fixed a pre-existing race in the tasks board-backlog test** (#847) — the booted-lifespan
+  fixture runs the real app, whose lead-time scheduler ticks once at boot and independently
+  calls `list_tasks(tenant, scope="open")` in the background (#664); the backlog test asserted
+  on the mock's `await_args` — the *last* await — so a scheduler tick landing between the
+  request and the assertion made it read the scheduler's call instead of the page's own
+  `scope="all"` fetch, failing (or passing on the wrong evidence) nondeterministically. It now
+  searches `await_args_list` for the specific call carrying `scope="all"`, which the page makes
+  and the scheduler never does — independent of any interleaving. The rest of the file and the
+  other tasks test files were audited for the same `await_args`/`assert_awaited*` pattern
+  against a mock the scheduler also touches; this was the only instance. `tasks` 0.23.1→0.23.2
+  (PATCH).
+
 - **Calendar now notices changes you didn't make here** (#831) — the three calendar change
   events had exactly one emitter, the provider-write seam, which sees every write made *through*
   this module and, structurally, nothing else: an event created, moved or deleted in Google
@@ -860,18 +872,6 @@ images to GHCR.
   not a named few) and that the hardening flags (`cap_drop: [ALL]`, `read_only`,
   `no-new-privileges`) stay put. Infra, docs, and a repo-root test only — no service or library
   version bump.
-
-- **Fixed a pre-existing race in the tasks board-backlog test** (#847) — the booted-lifespan
-  fixture runs the real app, whose lead-time scheduler ticks once at boot and independently
-  calls `list_tasks(tenant, scope="open")` in the background (#664); the backlog test asserted
-  on the mock's `await_args` — the *last* await — so a scheduler tick landing between the
-  request and the assertion made it read the scheduler's call instead of the page's own
-  `scope="all"` fetch, failing (or passing on the wrong evidence) nondeterministically. It now
-  searches `await_args_list` for the specific call carrying `scope="all"`, which the page makes
-  and the scheduler never does — independent of any interleaving. The rest of the file and the
-  other tasks test files were audited for the same `await_args`/`assert_awaited*` pattern
-  against a mock the scheduler also touches; this was the only instance. `tasks` 0.23.1→0.23.2
-  (PATCH).
 
 ### Added
 

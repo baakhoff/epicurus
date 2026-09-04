@@ -27,6 +27,7 @@ from epicurus_mail.provider import (
     AttachmentContent,
     ComposedMessage,
     MailAttachment,
+    MailAvailability,
     MailCategory,
     MailCategoryPreview,
     MailCursor,
@@ -41,6 +42,11 @@ from epicurus_mail.provider import (
 )
 
 _GMAIL_API = "https://gmail.googleapis.com/gmail/v1"
+
+# The ``not_connected`` diagnosis (#835). A statement of fact, not the operator hint: the
+# surfaces (the tools' ``_NOT_CONNECTED_HINT``, the page's empty state) own the wording that
+# names the ways out, and quote this only where a detail line is wanted.
+_NO_ACCOUNT_REASON = "no Google account is connected for this tenant"
 
 # System labels shown in the mailbox rail, in this order (ADR-0087). Gmail exposes many more
 # system labels (CATEGORY_*, CHAT, ...) that aren't useful folders; this curated set is the
@@ -559,21 +565,46 @@ class GmailProvider(MailProvider):
         except Exception:
             return False
 
-    async def is_available(self) -> bool:
-        """True when a Google token is available for this tenant (#209).
+    async def availability(self) -> MailAvailability:
+        """Which of the three availability states this tenant's Gmail is in (#835).
 
         A token-presence check — a fast core round-trip via the OAuth vault, not a live
-        Gmail API call — so the polled status panel can't stall the core's status proxy
-        into a Bad Gateway. Any HTTP failure reads as not available: the deliberate
-        :class:`MailNotConnected` (nobody has connected Google, #764) and an unreachable
-        core alike — from a caller's point of view there is no mailbox to reach either way,
-        and the caller that needs the *reason* catches ``MailNotConnected`` instead.
+        Gmail API call — so the polled status panel can't stall the core's status proxy into
+        a Bad Gateway (#209). What it does *not* do any more is read every failure as "no
+        account": the token fetch's failure modes say different things and are reported as
+        different states.
+
+        - :class:`MailNotConnected` — the core answered, and it holds no Google tokens for
+          this tenant (a 404/400 from the token endpoint, translated at the seam in
+          :meth:`_get_token`). The one case that is genuinely ``not_connected``.
+        - Any **other** ``HTTPStatusError`` — a 401/403 on the module→core call, a 5xx out of
+          the core or its vault — is about the *platform*, not the account. We could not ask,
+          so the answer is ``unreachable``: an expired core token must not be reported as an
+          operator who never connected Google.
+        - A transport failure (connect/read/timeout) — the core is down, restarting, or the
+          network is gone. ``unreachable`` likewise.
+
+        Never raises: every branch is a state.
         """
         try:
             await self._get_token()
-            return True
-        except httpx.HTTPError:
-            return False
+        except MailNotConnected:
+            return MailAvailability(state="not_connected", reason=_NO_ACCOUNT_REASON)
+        except httpx.HTTPStatusError as exc:
+            return MailAvailability(
+                state="unreachable",
+                reason=(
+                    f"the core answered {exc.response.status_code} for the Google token"
+                    " request, so the account's state is unknown"
+                ),
+            )
+        except httpx.HTTPError as exc:
+            detail = str(exc).strip() or type(exc).__name__
+            return MailAvailability(
+                state="unreachable",
+                reason=f"couldn't reach the core to fetch the Google token: {detail}",
+            )
+        return MailAvailability(state="connected")
 
 
 def _parse_message(data: dict[str, Any], *, full: bool) -> MailMessage:

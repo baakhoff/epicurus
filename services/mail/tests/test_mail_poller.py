@@ -33,10 +33,13 @@ from epicurus_mail.db import MailCache
 from epicurus_mail.poller import (
     DEFAULT_POLL_INTERVAL_S,
     DEFAULT_POLL_LABEL,
+    MAX_UNREACHABLE_BACKOFF,
     run_periodic,
     tick,
 )
 from epicurus_mail.provider import (
+    MailAvailability,
+    MailAvailabilityState,
     MailCursor,
     MailLabel,
     MailMessage,
@@ -132,10 +135,20 @@ def _message(mid: str) -> MailMessage:
     )
 
 
-def _provider(*, available: bool = True) -> AsyncMock:
-    """A provider stub with the whole reconcile surface stubbed to a quiet, valid default."""
+def _provider(*, available: bool = True, state: MailAvailabilityState | None = None) -> AsyncMock:
+    """A provider stub with the whole reconcile surface stubbed to a quiet, valid default.
+
+    *state* names the availability outright (#835); *available* is the older two-state
+    shorthand, kept because most tests only care whether a tick reconciles.
+    """
     provider = AsyncMock(spec=MailProvider)
-    provider.is_available = AsyncMock(return_value=available)
+    resolved: MailAvailabilityState = state or ("connected" if available else "not_connected")
+    provider.availability = AsyncMock(
+        return_value=MailAvailability(
+            state=resolved,
+            reason=None if resolved == "connected" else f"stubbed {resolved}",
+        )
+    )
     provider.current_cursor = AsyncMock(return_value=MailCursor(history_id=1000))
     provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox", unread=1)])
     provider.list_threads = AsyncMock(
@@ -336,8 +349,9 @@ async def test_tick_does_nothing_when_no_account_is_connected() -> None:
     provider = _provider(available=False)
     mailbox = AsyncMock(spec=CachedMailbox)
 
-    assert await tick(mailbox=mailbox, provider=provider, label="INBOX") is False
+    availability = await tick(mailbox=mailbox, provider=provider, label="INBOX")
 
+    assert availability.state == "not_connected"
     mailbox.reconcile.assert_not_awaited()
     provider.current_cursor.assert_not_awaited()
     provider.changed_threads_since.assert_not_awaited()
@@ -357,10 +371,10 @@ async def test_the_loop_logs_nothing_per_tick_while_idle(monkeypatch: pytest.Mon
             "tenant": TENANT,
             "poll_interval_s": 0.01,
         },
-        until=lambda: provider.is_available.await_count >= 3,
+        until=lambda: provider.availability.await_count >= 3,
     )
 
-    assert provider.is_available.await_count >= 3  # it really did tick repeatedly
+    assert provider.availability.await_count >= 3  # it really did tick repeatedly
     assert recorder.events("info") == ["mail background reconcile started"]  # once, at startup
     assert recorder.events("warning") == []
 
@@ -379,7 +393,7 @@ async def test_a_zero_interval_disables_the_loop_entirely(
         timeout=1,
     )
 
-    provider.is_available.assert_not_awaited()
+    provider.availability.assert_not_awaited()
     mailbox.reconcile.assert_not_awaited()
     assert recorder.events("info") == ["mail background reconcile disabled"]
 
@@ -529,3 +543,197 @@ def test_the_defaults_are_the_documented_ones() -> None:
     # On by default: the whole point is that the event fires unattended. Read off the field
     # rather than an instance, so an operator's own MAIL_POLL_INTERVAL_S can't mask a change.
     assert MailSettings.model_fields["mail_poll_interval_s"].default == DEFAULT_POLL_INTERVAL_S
+
+
+# ── an unreachable provider is not an idle one (#835) ────────────────────────
+# Before the three-state signal the loop could not tell "nobody connected Google" from "the
+# core didn't answer", so it took the idle path for both: no reconcile, no log, no change of
+# pace. A mailbox could stop syncing for as long as the core was down and leave nothing behind
+# saying why. These tests pin the distinction at every level of the loop.
+
+
+async def test_tick_reports_unreachable_and_does_not_reconcile() -> None:
+    provider = _provider(state="unreachable")
+    mailbox = AsyncMock(spec=CachedMailbox)
+
+    availability = await tick(mailbox=mailbox, provider=provider, label="INBOX")
+
+    assert availability.state == "unreachable"
+    # It must not reconcile — but the caller is told *why* it didn't, which is the whole
+    # difference from the not-connected tick above.
+    mailbox.reconcile.assert_not_awaited()
+
+
+async def test_tick_reconciles_only_on_connected() -> None:
+    mailbox = AsyncMock(spec=CachedMailbox)
+    cases: tuple[tuple[MailAvailabilityState, bool], ...] = (
+        ("connected", True),
+        ("not_connected", False),
+        ("unreachable", False),
+    )
+    for state, reconciles in cases:
+        mailbox.reconcile.reset_mock()
+        availability = await tick(mailbox=mailbox, provider=_provider(state=state), label="INBOX")
+        assert availability.state == state
+        assert (mailbox.reconcile.await_count == 1) is reconciles
+
+
+async def test_an_unreachable_provider_warns_once_and_names_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The log line an operator greps for when mail quietly stopped syncing (#835)."""
+    provider = _provider(state="unreachable")
+    mailbox = AsyncMock(spec=CachedMailbox)
+    recorder = _RecordingLog()
+    monkeypatch.setattr("epicurus_mail.poller.log", recorder)
+
+    await _run_ticks(
+        {
+            "mailbox": mailbox,
+            "provider": provider,
+            "tenant": TENANT,
+            "poll_interval_s": 0.01,
+        },
+        until=lambda: provider.availability.await_count >= 3,
+    )
+
+    # Once, not per interval — and never the silence the not-connected state gets.
+    assert recorder.events("warning") == ["mail provider unreachable; background reconcile paused"]
+    assert recorder.events("debug").count("mail provider still unreachable") >= 1
+    mailbox.reconcile.assert_not_awaited()
+
+
+async def test_a_not_connected_provider_still_says_nothing_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counterpart guarantee: the honest absence must stay silent (#796's first property)."""
+    provider = _provider(state="not_connected")
+    mailbox = AsyncMock(spec=CachedMailbox)
+    recorder = _RecordingLog()
+    monkeypatch.setattr("epicurus_mail.poller.log", recorder)
+
+    await _run_ticks(
+        {
+            "mailbox": mailbox,
+            "provider": provider,
+            "tenant": TENANT,
+            "poll_interval_s": 0.01,
+        },
+        until=lambda: provider.availability.await_count >= 3,
+    )
+
+    assert recorder.events("warning") == []
+    assert recorder.events("info") == ["mail background reconcile started"]
+
+
+async def test_the_loop_logs_a_recovery_when_the_core_comes_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider()
+    states = [
+        MailAvailability(state="unreachable", reason="core down"),
+        MailAvailability(state="unreachable", reason="core down"),
+        MailAvailability(state="connected"),
+    ]
+
+    async def _availability() -> MailAvailability:
+        return states.pop(0) if states else MailAvailability(state="connected")
+
+    provider.availability = AsyncMock(side_effect=_availability)
+    mailbox = AsyncMock(spec=CachedMailbox)
+    recorder = _RecordingLog()
+    monkeypatch.setattr("epicurus_mail.poller.log", recorder)
+
+    await _run_ticks(
+        {
+            "mailbox": mailbox,
+            "provider": provider,
+            "tenant": TENANT,
+            "poll_interval_s": 0.01,
+        },
+        until=lambda: "mail background reconcile recovered" in recorder.events("info"),
+    )
+
+    assert recorder.events("warning") == ["mail provider unreachable; background reconcile paused"]
+    assert recorder.events("info") == [
+        "mail background reconcile started",
+        "mail background reconcile recovered",
+    ]
+    mailbox.reconcile.assert_awaited()  # and it resumed reconciling
+
+
+async def test_consecutive_unreachable_ticks_back_off_and_reset_on_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A downed core is probed on a widening schedule, not at full rate forever (#835).
+
+    Asserted on the *sleeps the loop asks for*, since the pacing is the behaviour — a wall-clock
+    assertion would be a flake generator. The reset matters as much as the widening: without it
+    a mailbox would stay stale long after the core returned.
+    """
+    provider = _provider()
+    states = [
+        MailAvailability(state="unreachable", reason="core down"),
+        MailAvailability(state="unreachable", reason="core down"),
+        MailAvailability(state="unreachable", reason="core down"),
+        MailAvailability(state="unreachable", reason="core down"),
+        MailAvailability(state="connected"),
+    ]
+    slept: list[float] = []
+
+    async def _availability() -> MailAvailability:
+        return states.pop(0) if states else MailAvailability(state="connected")
+
+    real_sleep = asyncio.sleep
+
+    async def _sleep(delay: float) -> None:
+        # `epicurus_mail.poller.asyncio` *is* the global module, so this patch is process-wide
+        # and also catches the test harness's own poll sleeps; only the loop's own delays are
+        # >= 1s, which is why the interval below is 10s and the assertion filters.
+        slept.append(delay)
+        await real_sleep(0)  # yield without actually waiting
+
+    provider.availability = AsyncMock(side_effect=_availability)
+    monkeypatch.setattr("epicurus_mail.poller.asyncio.sleep", _sleep)
+    mailbox = AsyncMock(spec=CachedMailbox)
+    monkeypatch.setattr("epicurus_mail.poller.log", _RecordingLog())
+
+    await _run_ticks(
+        {
+            "mailbox": mailbox,
+            "provider": provider,
+            "tenant": TENANT,
+            "poll_interval_s": 10.0,
+        },
+        until=lambda: len([d for d in slept if d >= 1.0]) >= 5,
+    )
+
+    # Doubling per consecutive unreachable tick, capped, then straight back to the interval.
+    assert [d for d in slept if d >= 1.0][:5] == [10.0, 20.0, 40.0, 40.0, 10.0]
+    assert MAX_UNREACHABLE_BACKOFF == 4.0
+
+
+async def test_a_raised_tick_and_an_unreachable_tick_log_differently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two failures, two messages: the reconcile itself blew up vs. it never got to run."""
+    provider = _provider()
+    mailbox = AsyncMock(spec=CachedMailbox)
+    mailbox.reconcile = AsyncMock(side_effect=RuntimeError("gmail 500"))
+    recorder = _RecordingLog()
+    monkeypatch.setattr("epicurus_mail.poller.log", recorder)
+
+    await _run_ticks(
+        {
+            "mailbox": mailbox,
+            "provider": provider,
+            "tenant": TENANT,
+            "poll_interval_s": 0.01,
+        },
+        until=lambda: bool(recorder.events("warning")),
+    )
+
+    assert recorder.events("warning") == ["mail background reconcile failed"]
+    assert "mail provider unreachable; background reconcile paused" not in recorder.events(
+        "warning"
+    )

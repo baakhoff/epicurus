@@ -180,11 +180,24 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         """Gmail connection status for the manifest-driven UI status panel.
 
         Reports whether a Google token is available — a fast credential check via the core
-        (``is_available``), not a live Gmail API call. The old live ``/users/me/profile``
+        (``availability``), not a live Gmail API call. The old live ``/users/me/profile``
         probe could exceed the core's status-proxy timeout and surface as a Bad Gateway when
         the panel polled it (#209).
+
+        Three fields, because there are three answers (#835): ``connection`` is the state
+        itself (``connected`` / ``not_connected`` / ``unreachable``) and ``detail`` its
+        one-clause reason (``null`` when connected). ``gmail_connected`` is kept, with exactly
+        its old meaning (true only for ``connected``), so nothing reading the boolean has to
+        change — but it is the field that cannot tell an operator whose core is down from one
+        who never connected Google, which is why it is no longer the whole payload. The panel
+        renders whatever keys it is given (ADR-0018), so this needs no shell change.
         """
-        return {"gmail_connected": await provider.is_available()}
+        availability = await provider.availability()
+        return {
+            "gmail_connected": availability.connected,
+            "connection": availability.state,
+            "detail": availability.reason,
+        }
 
     @app.get("/resolve/message/{ref_id}")
     async def resolve_message(ref_id: str) -> dict[str, Any]:

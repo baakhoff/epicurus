@@ -255,8 +255,8 @@ proxies them to the web shell (the shell never calls the module directly).
 | `GET` | `/resolve/message/{ref_id}` | `HoverCard` | Hover-card resolver (ADR-0019). Returns subject, snippet, sender, recipients, date, and unread status (a `Status: Unread` row, only when unread). No `href` — the chip's click opens the reader. |
 | `GET` | `/messages/{ref_id}` | `EmailMessage` | Full email for the panel's `email-reader` view. Returns subject, from, date, body, `module`/`message_id`, the `unread` state, and a one-element `actions` toggle (mark read/unread, ADR-0024). |
 | `POST` | `/send` | body: `ComposedMessage` → `{"id": str}` | **The module's only send path (ADR-0085, #563).** Transmits an operator-confirmed draft verbatim and publishes `mail.sent`. Not an MCP tool, so the agent cannot reach it — the core calls it after the operator Confirms a draft in the split-pane. A 403 maps to the same reconnect / rate-limit hint the tools use (#513/#538), as an HTTP 403. |
-| `GET` | `/status` | `{"gmail_connected": bool}` | Whether a Google token is available — a fast token-presence check (`is_available`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. Proxied by the core. |
-| `GET` | `/pages/mailbox` | `MailboxList` or `{thread: MailThread}` | **The `mailbox` archetype's data (ADR-0087).** With `?thread_id=` returns one full conversation; otherwise the rail + a cursor page of threads (`?label=`, `?q=`, `?tab=`, `?cursor=`). On the Inbox the payload also carries the category `tabs` (#765), and `?tab=<id>` scopes the list to one of them. The plain landing view (no `q`/`tab`/`cursor`) serves from the **local cache** instantly (ADR-0096, #623); `?reconcile=1` first pulls the provider delta into the cache. Reached through the generic page proxy (query params forwarded, ADR-0023). A Gmail scope/rate-limit error relays its hint under Gmail's status. With **no account connected** the list returns 200 + `"disconnected": true` and the thread read returns 503 ([#764](#no-connected-account-764)). |
+| `GET` | `/status` | `{"gmail_connected": bool, "connection": "connected"\|"not_connected"\|"unreachable", "detail": str\|null}` | Whether a Google token is available — a fast token-presence check (`availability`), **not** a live Gmail API call (#209), so the polled status panel can't stall the core's status proxy into a Bad Gateway. `connection` names which of the three availability states ([#835](#availability-three-states-not-two-835)) and `detail` gives its one-clause reason (`null` when connected); `gmail_connected` is kept with exactly its old meaning (true only for `connected`). Proxied by the core; the status panel renders whatever keys it is given (ADR-0018). |
+| `GET` | `/pages/mailbox` | `MailboxList` or `{thread: MailThread}` | **The `mailbox` archetype's data (ADR-0087).** With `?thread_id=` returns one full conversation; otherwise the rail + a cursor page of threads (`?label=`, `?q=`, `?tab=`, `?cursor=`). On the Inbox the payload also carries the category `tabs` (#765), and `?tab=<id>` scopes the list to one of them. The plain landing view (no `q`/`tab`/`cursor`) serves from the **local cache** instantly (ADR-0096, #623); `?reconcile=1` first pulls the provider delta into the cache. Reached through the generic page proxy (query params forwarded, ADR-0023). A Gmail scope/rate-limit error relays its hint under Gmail's status. With **no account connected** the list returns 200 + `"disconnected": true` and the thread read returns 503 ([#764](#no-connected-account-764)); when the module cannot reach the core to *check*, the list returns 200 + `"unreachable": "<reason>"` instead ([#835](#availability-three-states-not-two-835)). |
 | `POST` | `/pages/mailbox/send` | body: `MailboxSend` → `{"id": str}` | **Human-initiated compose/reply from the page (ADR-0087).** With `reply_to_message_id` re-derives threading via `compose_reply`, else composes from `to`/`subject`/`body`/`cc`; then transmits and publishes `mail.sent`. Operator-only via the gated core proxy — never an MCP tool, so the agent still cannot send (ADR-0085). |
 | `POST` | `/pages/mailbox/mark-read` | body: `{thread_id, message_ids}` → `{"thread_id": str, "marked": int}` | **Mark a thread's messages read on open (#625).** Clears the unread flag on each `message_ids` at the provider (`set_unread`, #277) then writes the thread's read state through to the local cache (ADR-0096) so the list row converges at once. Operator-only via the gated proxy; a Gmail scope/rate-limit error relays its hint; empty `message_ids` is a no-op. |
 | `GET` | `/pages/mailbox/attachment` | `?message_id=&attachment_id=` → bytes | Streams one attachment's bytes (with content-type + download disposition) for the core proxy to relay; nothing is stored (ADR-0087). |
@@ -513,15 +513,15 @@ from Gmail's own 404, which means "no such message".
 
 | Surface | Behaviour |
 | --- | --- |
-| **Every MCP tool** | Returns the one model-actionable sentence — *"Google is not connected, so there is no mailbox to read or send from. Connect it in Settings → Connected accounts, or disable the mail module if you don't use Gmail."* — never a raised exception. `mail_send` touches no provider, so it is gated on the cheap `is_available()` probe instead: it refuses rather than hand back a draft that can never be delivered. |
+| **Every MCP tool** | Returns the one model-actionable sentence — *"Google is not connected, so there is no mailbox to read or send from. Connect it in Settings → Connected accounts, or disable the mail module if you don't use Gmail."* — never a raised exception. `mail_send` touches no provider, so it is gated on the cheap availability probe instead: it refuses rather than hand back a draft that can never be delivered. |
 | **`GET /pages/mailbox`** (list) | **200** with an ordinary empty list carrying `"disconnected": true`. Plain navigation to Mail must never error, so this is the one path that does not raise. |
 | **`GET /pages/mailbox?thread_id=`** | **503** + the same sentence — there is no honest empty conversation to return. |
 | **`/messages/{id}`, `/resolve/message/{id}`** | **503**, *not* 404: a chip left over from a connected session must not claim the message was deleted. |
 | **`POST /send`, `…/pages/mailbox/send`, `…/mark-read`, `…/attachment`** | **503** + the sentence. |
-| **`GET /status`** | `{"gmail_connected": false}` — unchanged; this always answered honestly. |
+| **`GET /status`** | `gmail_connected: false`, `connection: "not_connected"`. |
 | **`mail.sync_failed`** | **Not emitted.** A disconnected account is an absence, not a sync failure; firing the event would raise an alert (and any automation bound to it) for a state the operator chose. `CachedMailbox.reconcile` re-raises `MailNotConnected` untouched. |
 
-**The cache is kept, not served.** The list read gates on `is_available()` *before* either
+**The cache is kept, not served.** The list read gates on the availability probe *before* either
 read path, so a warm cache cannot keep rendering mail the module can no longer refresh — but
 the rows stay on disk, so **reconnecting restores the mailbox instantly**, with no resync and
 no restart.
@@ -530,6 +530,55 @@ The shell renders the flag as its honest empty state — "Google is not connecte
 out, and a tap to each — hiding the folder rail, search, and compose meanwhile (they all need a
 mailbox). The operator-facing walkthrough is
 [Running without Google](../user/running-without-google.md).
+
+---
+
+## Availability: three states, not two (#835)
+
+The #764 work above answers honestly *once it knows the answer*. Until v0.20.0 it often didn't.
+`is_available()` returned a bool and read **any** `httpx.HTTPError` from the token fetch as
+`False`, so an unreachable core, an expired module→core token, and "nobody has connected Google"
+were one indistinguishable answer — and every surface then rendered that answer as the
+not-connected one. A core that was merely restarting produced a Mail page reading *"Google is
+not connected. Connect it in Settings"*, and an operator who followed that advice would
+disconnect and reconnect an account that was fine.
+
+That is a failure-attribution bug, the same class as the #728 misdiagnosis, and the core already
+carries the same fix for model keys: `key_state` distinguishes `missing` ("OpenBao says there is
+no key") from `unavailable` ("OpenBao did not answer"). Mail now carries it too.
+
+**The signal.** `MailProvider.availability()` returns a `MailAvailability {state, reason}`:
+
+| `state` | Means | `reason` |
+| --- | --- | --- |
+| `connected` | A token was obtained; the mailbox is usable. | `null` |
+| `not_connected` | The core answered, and it holds no Google tokens for this tenant — a 404/400 from the token endpoint, translated at the seam into `MailNotConnected`. An absence the operator chose. | `"no Google account is connected for this tenant"` |
+| `unreachable` | We could not find out. Any other status from the core (401/403/5xx) or a transport failure. | `"the core answered 503 for the Google token request…"` / `"couldn't reach the core to fetch the Google token: …"` |
+
+`availability()` is the **only** method a provider implements and it **never raises** — every
+failure it can observe is one of its states, because the callers (a background poller, a page
+gate, a polled status endpoint) all run unattended. `is_available()` survives as a thin,
+non-abstract compatibility wrapper (`state == "connected"`) for the places where a bare "is
+there a mailbox" really is all that is needed. Tokens still come only from
+`PlatformClient.get_oauth_token("google")` (ADR-0020) — no new token path.
+
+**What each surface does with it:**
+
+| Surface | `not_connected` | `unreachable` |
+| --- | --- | --- |
+| **`GET /status`** | `connection: "not_connected"` | `connection: "unreachable"` + `detail` |
+| **`GET /pages/mailbox`** (list) | 200 + `"disconnected": true` | 200 + `"unreachable": "<reason>"`, and **never** `disconnected` |
+| **The shell's empty state** | "Google is not connected" + a tap to Settings and to Modules | "Couldn't check your mail connection" + the reason + a **Try again**; deliberately no Settings route |
+| **`mail_send`** | The reconnect hint | *"Couldn't tell whether Google is connected — &lt;reason&gt;. That's a problem reaching the core, not a missing account, so nothing needs reconnecting…"* |
+| **The background poller** | Silent, unchanged pace | One warning naming the reason, then debug; a widening back-off |
+
+The two page flags are **mutually exclusive on purpose**. The shell keys its "connect Google in
+Settings" panel off `disconnected`, so an unreachable payload must not set it; a shell that
+knows only about `disconnected` degrades to the ordinary "this folder is empty" view — wrong,
+but wrong in the harmless direction, and it never puts the reconnect words on screen.
+
+Neither state is an HTTP error on the list read. An unreachable core is transient, and plain
+navigation to Mail should recover on the next poll rather than look broken.
 
 ---
 
@@ -588,7 +637,7 @@ the operator had already read the message. Mail now runs the loop itself (`epicu
 started and cancelled by the service lifespan), the same pattern calendar and tasks have carried
 since #664.
 
-**What a tick does.** `provider.is_available()` → `mailbox.reconcile("INBOX")`. Nothing else: it
+**What a tick does.** `provider.availability()` → `mailbox.reconcile("INBOX")` when connected. Nothing else: it
 is deliberately only a *caller* of the existing path, so the events, payloads, dedup keys, and
 every consumer downstream are literally the same ones the page produces, and the two can never
 drift. The delta is mailbox-wide (a change cursor is not folder-scoped), so the Inbox label only
@@ -610,6 +659,15 @@ return: no reconcile, no provider traffic, and **no log line**. Only the one-lin
 recovers, so a broken account produces a warning and a recovery line rather than a warning every
 interval; the failure is separately announced on the spine as `mail.sync_failed`, itself
 rate-limited by `MAIL_SYNC_FAILED_COOLDOWN_S`.
+
+**A blocked deployment says so, once.** An `unreachable` tick ([#835](#availability-three-states-not-two-835))
+is *not* the idle path: silently idling through a downed core is how a mailbox stops syncing for
+hours with nothing in the log to say why. It logs `mail provider unreachable; background
+reconcile paused` once (with the reason), repeats at debug, and **backs off** — the sleep doubles
+per consecutive unreachable tick up to `MAX_UNREACHABLE_BACKOFF` (4×, so 5 → 10 → 20 → 20 minutes
+at the default interval), resetting the moment any tick gets an answer. Recovery logs
+`mail background reconcile recovered`. A `not_connected` tick keeps the silence above — that one
+really is a state the operator chose.
 
 **A restart does not swallow the backlog.** The no-firehose rule (#663) suppressed
 `mail.received` on *any* full sync. With a poller that is wrong half the time, so the two cases

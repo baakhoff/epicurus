@@ -357,7 +357,8 @@ async def test_is_available_true_when_token_present() -> None:
 
 
 async def test_is_available_false_on_http_error() -> None:
-    # Not connected (4xx) or the core unreachable both read as "not available".
+    # The compatibility wrapper still collapses both non-connected states to one False (#835);
+    # what changed is that callers who need to tell them apart no longer have to use it.
     platform = MagicMock(spec=PlatformClient)
     platform.get_oauth_token = AsyncMock(side_effect=httpx.ConnectError("core down"))
     provider = GmailProvider(platform=platform, tenant_id="local")
@@ -929,3 +930,87 @@ async def test_is_available_is_false_when_google_is_not_connected() -> None:
 async def test_is_available_is_true_with_a_token() -> None:
     provider = GmailProvider(platform=_make_platform(), tenant_id="local")
     assert await provider.is_available() is True
+
+
+# ── the three-state availability signal (#835) ───────────────────────────────
+# The bug this closes: every failure of the token fetch used to read as "nobody connected
+# Google". Below, each underlying failure is pinned to the state it actually means.
+
+
+async def test_availability_is_connected_with_a_token() -> None:
+    availability = await GmailProvider(platform=_make_platform(), tenant_id="local").availability()
+    assert availability.state == "connected"
+    assert availability.reason is None
+    assert availability.connected is True
+
+
+@pytest.mark.parametrize("status", [404, 400])
+async def test_availability_is_not_connected_for_the_core_no_token_statuses(status: int) -> None:
+    # The one case that is genuinely an absent account: the core answered, and it holds no
+    # Google tokens for this tenant.
+    availability = await GmailProvider(
+        platform=_platform_raising(status), tenant_id="local"
+    ).availability()
+    assert availability.state == "not_connected"
+    assert availability.reason is not None
+    assert "no Google account is connected" in availability.reason
+
+
+@pytest.mark.parametrize("status", [401, 403, 500, 502, 503])
+async def test_availability_is_unreachable_for_every_other_core_status(status: int) -> None:
+    # The regression #835 is about. An expired module→core token (401/403) or a core 5xx says
+    # nothing whatsoever about whether the operator connected Google — reporting it as
+    # "not connected" sends them to reconnect a working account.
+    availability = await GmailProvider(
+        platform=_platform_raising(status), tenant_id="local"
+    ).availability()
+    assert availability.state == "unreachable"
+    assert availability.reason is not None
+    assert str(status) in availability.reason
+
+
+async def test_availability_is_unreachable_when_the_core_cannot_be_reached() -> None:
+    platform = MagicMock(spec=PlatformClient)
+    platform.get_oauth_token = AsyncMock(side_effect=httpx.ConnectError("core down"))
+    availability = await GmailProvider(platform=platform, tenant_id="local").availability()
+    assert availability.state == "unreachable"
+    assert availability.reason is not None
+    assert "core down" in availability.reason
+
+
+async def test_availability_names_the_exception_type_when_it_carries_no_message() -> None:
+    # `str(exc)` on a bare transport error can be empty; a reason of "" would render as a
+    # dangling clause in every hint that quotes it.
+    platform = MagicMock(spec=PlatformClient)
+    platform.get_oauth_token = AsyncMock(side_effect=httpx.ReadTimeout(""))
+    availability = await GmailProvider(platform=platform, tenant_id="local").availability()
+    assert availability.state == "unreachable"
+    assert availability.reason is not None
+    assert "ReadTimeout" in availability.reason
+
+
+@pytest.mark.parametrize(
+    "side_effect",
+    [
+        httpx.ConnectError("core down"),
+        httpx.ReadTimeout("slow"),
+    ],
+)
+async def test_availability_never_raises(side_effect: Exception) -> None:
+    # The contract every caller depends on: the poller, the page gate and /status all treat
+    # this as total. A raise here would be an unhandled 500 on plain navigation to Mail.
+    platform = MagicMock(spec=PlatformClient)
+    platform.get_oauth_token = AsyncMock(side_effect=side_effect)
+    await GmailProvider(platform=platform, tenant_id="local").availability()
+
+
+async def test_is_available_is_the_boolean_view_of_availability() -> None:
+    # The compatibility wrapper (#835) is derived, not a second implementation — so it can
+    # never drift from the state, and `unreachable` keeps reading False for old callers.
+    for platform, expected in (
+        (_make_platform(), True),
+        (_platform_raising(404), False),
+        (_platform_raising(500), False),
+    ):
+        provider = GmailProvider(platform=platform, tenant_id="local")
+        assert await provider.is_available() is expected

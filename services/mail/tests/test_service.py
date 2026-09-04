@@ -14,6 +14,7 @@ from epicurus_mail.cache import CachedMailbox, LandingBundle
 from epicurus_mail.provider import (
     ComposedMessage,
     MailAttachment,
+    MailAvailability,
     MailCategory,
     MailCategoryPreview,
     MailLabel,
@@ -33,8 +34,10 @@ from epicurus_mail.service import (
     build_mailbox_thread,
     build_module,
     mailbox_disconnected,
+    mailbox_unreachable,
     message_payload,
     tab_payload,
+    unreachable_hint,
 )
 
 
@@ -1046,7 +1049,9 @@ def _disconnected_provider() -> MailProvider:
     provider = AsyncMock(spec=MailProvider)
     for method in ("search", "read", "compose_reply", "set_unread", "archive", "trash", "transmit"):
         setattr(provider, method, AsyncMock(side_effect=MailNotConnected("not connected")))
-    provider.is_available = AsyncMock(return_value=False)
+    provider.availability = AsyncMock(
+        return_value=MailAvailability(state="not_connected", reason="no Google account")
+    )
     return provider
 
 
@@ -1095,7 +1100,9 @@ async def test_mail_send_refuses_to_compose_when_google_is_not_connected() -> No
 async def test_mail_send_still_composes_when_google_is_connected() -> None:
     # The gate must not cost the happy path its draft (ADR-0085).
     provider = _make_provider()
-    provider.is_available = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    provider.availability = AsyncMock(  # type: ignore[method-assign]
+        return_value=MailAvailability(state="connected")
+    )
     module = build_module(provider)
     content, _ = await module.call_tool("mail_send", {"to": "b@x.com", "subject": "s", "body": "b"})
     assert _parse_draft(content).kind == "mail"
@@ -1155,10 +1162,96 @@ async def test_build_mailbox_list_reports_disconnected_on_the_live_path_too() ->
 
 async def test_a_connected_mailbox_never_claims_to_be_disconnected() -> None:
     provider = AsyncMock(spec=MailProvider)
-    provider.is_available = AsyncMock(return_value=True)
+    provider.availability = AsyncMock(return_value=MailAvailability(state="connected"))
     provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox")])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[], next_cursor=None))
     provider.list_categories = AsyncMock(return_value=[])
     provider.category_query = MagicMock(return_value=None)
     data = await build_mailbox_list(provider)
     assert "disconnected" not in data
+    assert "unreachable" not in data
+
+
+# ── "we couldn't ask" is not "nobody connected" (#835) ───────────────────────
+# The whole issue in one sentence: `is_available()` read every token-fetch failure as False,
+# so a core that was down produced the *not connected* page — which tells the operator to go
+# reconnect an account that is fine. These pin the third state at the tool and page surfaces.
+
+_UNREACHABLE_REASON = "couldn't reach the core to fetch the Google token: core down"
+
+
+def _unreachable_provider() -> MailProvider:
+    provider = AsyncMock(spec=MailProvider)
+    provider.availability = AsyncMock(
+        return_value=MailAvailability(state="unreachable", reason=_UNREACHABLE_REASON)
+    )
+    return provider
+
+
+def test_the_unreachable_hint_contradicts_the_not_connected_one() -> None:
+    # The wording *is* the fix. If this hint ever starts telling an operator to reconnect or
+    # to disable the module, the bug is back in prose form even if the state is right.
+    hint = unreachable_hint(_UNREACHABLE_REASON)
+    assert _UNREACHABLE_REASON in hint  # the operator gets the actual diagnosis
+    assert "nothing needs reconnecting" in hint
+    assert "disable the mail module" not in hint
+    assert hint != _NOT_CONNECTED_HINT
+
+
+def test_the_unreachable_hint_reads_as_a_sentence_without_a_reason() -> None:
+    # A provider that reports no reason must not produce a dangling clause on screen.
+    assert "—  ." not in unreachable_hint(None)
+    assert "the reason wasn't reported" in unreachable_hint(None)
+
+
+def test_mailbox_unreachable_never_carries_the_disconnected_flag() -> None:
+    # The single most important assertion in this file: the shell keys its "connect Google in
+    # Settings" empty state off `disconnected`, so this payload must not set it.
+    payload = mailbox_unreachable("STARRED", _UNREACHABLE_REASON)
+    assert "disconnected" not in payload
+    assert payload["unreachable"] == _UNREACHABLE_REASON
+    assert payload["threads"] == [] and payload["labels"] == [] and payload["tabs"] == []
+    assert payload["next_cursor"] is None
+    assert payload["active_label"] == "STARRED"
+
+
+def test_mailbox_unreachable_always_carries_a_reason() -> None:
+    assert mailbox_unreachable()["unreachable"]
+    assert mailbox_unreachable("INBOX", None)["unreachable"]
+
+
+def test_the_two_no_mailbox_payloads_are_structurally_identical_apart_from_the_flag() -> None:
+    # Same empty list, different diagnosis — so a shell that renders one renders the other.
+    disconnected = mailbox_disconnected("INBOX")
+    unreachable = mailbox_unreachable("INBOX", "why")
+    assert disconnected.keys() - {"disconnected"} == unreachable.keys() - {"unreachable"}
+
+
+async def test_build_mailbox_list_reports_unreachable_not_disconnected() -> None:
+    provider = _unreachable_provider()
+    mailbox = AsyncMock(spec=CachedMailbox)
+    data = await build_mailbox_list(provider, mailbox=mailbox)
+    assert data["unreachable"] == _UNREACHABLE_REASON
+    assert "disconnected" not in data
+    # Still no cached rows served: we can't refresh them and can't vouch for them either.
+    mailbox.landing.assert_not_awaited()
+    mailbox.reconcile.assert_not_awaited()
+
+
+async def test_build_mailbox_list_reports_unreachable_on_the_live_path_too() -> None:
+    provider = _unreachable_provider()
+    data = await build_mailbox_list(provider)
+    assert data["unreachable"] == _UNREACHABLE_REASON
+    provider.list_threads.assert_not_awaited()  # type: ignore[attr-defined]
+    provider.list_labels.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_mail_send_refuses_with_the_unreachable_hint_not_the_reconnect_one() -> None:
+    # Same refusal (an undeliverable draft is undeliverable either way), different advice.
+    module = build_module(_unreachable_provider())
+    content, _ = await module.call_tool("mail_send", {"to": "b@x.com", "subject": "s", "body": "b"})
+    text = _text_of(content[0])
+    assert text == unreachable_hint(_UNREACHABLE_REASON)
+    assert text != _NOT_CONNECTED_HINT
+    with pytest.raises(ValueError):
+        _parse_draft(content)

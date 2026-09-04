@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from typing import Literal
 
 import httpx
 from pydantic import BaseModel, Field
@@ -32,11 +33,47 @@ class MailNotConnected(httpx.HTTPError):
     bare 404 off some later Gmail call — is what keeps "Google is not connected" from being
     confused with Gmail's own "that message does not exist".
 
-    Subclasses ``httpx.HTTPError`` so the existing provider-error guards (``is_available``,
-    the cache's reconcile/categories paths) keep treating it as the transport failure it
-    structurally is; the surfaces that want the honest wording catch it explicitly, ahead of
-    ``httpx.HTTPStatusError``.
+    Subclasses ``httpx.HTTPError`` so the blanket provider-error guards (the cache's
+    reconcile/categories paths) keep treating it as the transport failure it structurally is;
+    the surfaces that want the honest wording catch it explicitly, ahead of
+    ``httpx.HTTPStatusError``. :meth:`MailProvider.availability` is one of those (#835): it
+    catches this **first**, and everything that reaches its later ``HTTPError`` arms is
+    reported as ``unreachable``, not as a missing account.
     """
+
+
+MailAvailabilityState = Literal["connected", "not_connected", "unreachable"]
+"""The three answers to "can this module reach a mailbox right now?" (#835).
+
+- ``connected`` — a token was obtained; the mailbox is usable.
+- ``not_connected`` — the core answered, definitively, that it holds no tokens for this
+  tenant's Google account. An **absence the operator chose**, not a fault.
+- ``unreachable`` — we could not find out. The core did not answer, or answered with a status
+  that is about the platform (auth, 5xx) rather than about the account.
+
+Two states would be one too few, and the missing one is the expensive one: reporting
+"nobody connected Google" when the truth is "we could not ask" sends the operator to reconnect
+an account that was never disconnected. That is the #728 misdiagnosis exactly, and the model
+keys' ``key_state`` split (``missing`` vs ``unavailable``) is the same fix in the core.
+"""
+
+
+class MailAvailability(BaseModel):
+    """Whether a mailbox is reachable, and — when it isn't — why (#835).
+
+    ``reason`` is one operator-readable clause, filled for both non-connected states and
+    ``None`` when connected. It is a *diagnosis*, not UI copy: the surfaces own their own
+    wording (the tools' reconnect hint, the page's empty state) and quote this for the
+    detail. Keep it short enough to sit inside a sentence and free of provider tracebacks.
+    """
+
+    state: MailAvailabilityState
+    reason: str | None = None
+
+    @property
+    def connected(self) -> bool:
+        """True only for ``connected`` — the exact meaning ``is_available()`` always had."""
+        return self.state == "connected"
 
 
 class MailAttachment(BaseModel):
@@ -468,15 +505,40 @@ class MailProvider(ABC):
     async def health_check(self) -> bool:
         """Return True when the provider is reachable and the account is connected.
 
-        A deep check — it may make a live provider API call. Prefer :meth:`is_available`
-        for the polled status panel.
+        A deep check — it may make a live provider API call. Prefer :meth:`availability`
+        for the polled status panel, and for anything that has to explain itself.
         """
 
     @abstractmethod
-    async def is_available(self) -> bool:
-        """Return True when an account is connected — a cheap credential check (#209).
+    async def availability(self) -> MailAvailability:
+        """Whether a mailbox is reachable right now, and why not when it isn't (#835).
+
+        The provider's authoritative availability answer, and the **only** one an
+        implementation writes: :meth:`is_available` is derived from it.
 
         Unlike :meth:`health_check`, this must NOT make a live provider API call: it backs
-        the status panel, which is polled, so a slow upstream can't stall the core's status
-        proxy into a Bad Gateway. For Google providers it is a token-presence check.
+        the status panel, the background poller and the page's connection gate, all of which
+        run unattended, so a slow upstream can't stall the core's status proxy into a Bad
+        Gateway. For Google providers it is a token-presence check.
+
+        It must **never raise**. Every failure it can observe is one of its own states — that
+        is the point of returning a :class:`MailAvailability` instead of a bool: a caller
+        deciding whether to reconcile, to gate a draft, or to paint an empty state needs to
+        know *which* failure it is, and a raised exception forces every one of those callers
+        to re-derive the distinction from an exception type. Distinguish, at minimum,
+        "the core says no account is connected" (``not_connected``) from "the core did not
+        answer" (``unreachable``); a provider that genuinely cannot tell them apart reports
+        ``unreachable`` with a reason saying so, never ``not_connected`` — guessing the
+        cheerful answer is what made this a bug.
         """
+
+    async def is_available(self) -> bool:
+        """True when an account is connected — the boolean view of :meth:`availability`.
+
+        A thin compatibility wrapper (#835), deliberately **not** abstract: providers
+        implement :meth:`availability` and inherit this. It collapses ``not_connected`` and
+        ``unreachable`` back into one ``False``, which is precisely the conflation #835 is
+        about — so use it only where a bare "is there a mailbox" is genuinely all that is
+        needed, and never to decide what to *tell* an operator.
+        """
+        return (await self.availability()).connected

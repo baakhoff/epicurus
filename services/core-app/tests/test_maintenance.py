@@ -378,6 +378,30 @@ async def test_module_reindex_job_summarizes_partial() -> None:
     assert status == "ok" and "1/2" in detail and "notes" in detail
 
 
+async def test_module_reindex_job_reports_a_refusal_as_a_refusal_not_a_failure() -> None:
+    """A de-index fuse refusal (#848) is the safety valve working, not a job error.
+
+    Reported as ``error``, an operator learns to ignore the one signal that says their data is
+    intact but their mount is not — so a refusal is named, with its reason, and the job stays
+    ``ok`` even when every module refuses.
+    """
+
+    async def reembed() -> list[dict[str, str]]:
+        return [
+            {
+                "module": "knowledge",
+                "status": "refused",
+                "reason": "source read empty while 412 entries are indexed",
+            }
+        ]
+
+    status, detail = await module_reindex_job(reembed).run()
+    assert status == "ok"
+    assert "refused by the de-index fuse" in detail
+    assert "412 entries are indexed" in detail
+    assert "failed" not in detail
+
+
 async def test_module_reindex_job_skips_when_empty() -> None:
     async def reembed() -> list[dict[str, str]]:
         return []

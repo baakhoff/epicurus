@@ -829,7 +829,7 @@ def create_files_router(
     if scan_fuse is not None:
 
         @router.get("/scan-status", response_model=ScanStatusResponse)
-        async def scan_status() -> ScanStatusResponse:
+        async def scan_status(tenant_id: str | None = Query(default=None)) -> ScanStatusResponse:
             """Report the mass de-index fuse (#848): thresholds, and any refusing namespace.
 
             The operator-readable half of the fuse — the other half is the ``ERROR`` log line
@@ -837,12 +837,19 @@ def create_files_router(
             the file space read empty (or nearly so) while its index rows are intact: the
             rows were **kept**, so the Files view still lists what is really there; check the
             mount before deciding the files are gone.
+
+            Scoped to *tenant_id* like every other route here (constraint #1). ``ScanFuse``
+            keys its state by ``(tenant, namespace)``, so an unscoped read would hand one
+            tenant another's namespace names and row counts — inert while v1 is single-tenant,
+            and exactly the leak that is invisible until it isn't.
             """
+            tenant = _tenant(tenant_id)
+            trips = [t for t in scan_fuse.trips() if t.tenant == tenant]
             return ScanStatusResponse(
                 fuse_enabled=scan_fuse.enabled,
                 max_delete_ratio=scan_fuse.max_delete_ratio,
                 min_deletions=scan_fuse.min_deletions,
-                tripped=scan_fuse.tripped,
+                tripped=bool(trips),
                 namespaces=[
                     ScanFuseState(
                         tenant=t.tenant,
@@ -853,7 +860,7 @@ def create_files_router(
                         reason=t.reason,
                         at=t.at,
                     )
-                    for t in scan_fuse.trips()
+                    for t in trips
                 ],
             )
 
@@ -869,23 +876,31 @@ def create_files_router(
                 default=False,
                 description="Purge stale index rows even if the mass de-index fuse refuses",
             ),
+            tenant_id: str | None = Query(default=None),
         ) -> RescanResponse:
             """Re-run the file-space scan for one namespace (#848).
 
             The recovery door after a suspect mount: repair the mount, call this, and the
             index converges again. ``force=true`` says the emptiness is real and purges the
             stale rows the fuse is withholding — the only way to make the index follow a file
-            space that genuinely lost most of its contents. Runs the core's default tenant,
-            like the startup walk and the watcher it shares a lock with.
+            space that genuinely lost most of its contents.
+
+            *tenant_id* is threaded through to the scan and to the fuse read, so the answer
+            describes the tenant that was asked about rather than whichever one tripped last
+            (constraint #1). It defaults to the core's default tenant, which is the one the
+            startup walk and the watchers this shares a lock with also run.
             """
+            tenant = _tenant(tenant_id)
             try:
-                entries = await rescan(namespace, force)
+                entries = await rescan(namespace, force, tenant)
             except KeyError:
                 raise HTTPException(
                     status_code=404, detail=f'"{namespace}" is not an indexed mount'
                 ) from None
             label = namespace_for(f"{MOUNT_PREFIX}{namespace}/" if namespace else "")
-            tripped = scan_fuse is not None and any(t.namespace == label for t in scan_fuse.trips())
+            tripped = scan_fuse is not None and any(
+                t.namespace == label and t.tenant == tenant for t in scan_fuse.trips()
+            )
             return RescanResponse(
                 namespace=namespace, entries=entries, forced=force, tripped=tripped
             )

@@ -506,8 +506,10 @@ class ModuleRegistry:
 
         A module's own answer is passed through rather than assumed (#848): a rebuild it
         **refuses** — because the source it would rebuild from reads empty — reports
-        ``{"status": "refused", "reason": …}``, so the Models page shows the refusal instead
-        of a rebuild that never started.
+        ``{"status": "refused", "reason": …}`` rather than the ``started`` this used to
+        assume, so nothing downstream claims a rebuild that never began. The web shell still
+        renders any non-``started`` status as "failed to start"; teaching it to name a refusal
+        and show the reason is a follow-up, and the API carries what it needs already.
         """
         snaps = await self.snapshot()
         results: list[dict[str, str]] = []
@@ -519,10 +521,15 @@ class ModuleRegistry:
             name = snap.manifest.name
             try:
                 body = await self._post_reindex(base)
-                entry = {"module": name, "status": body.get("status", "started")}
+                status = body.get("status", "started")
+                entry = {"module": name, "status": status}
                 reason = body.get("reason")
                 if reason:
                     entry["reason"] = reason
+                # Warn on the *status*, not on the mere presence of a reason: a module is free
+                # to explain a rebuild it did start, and logging that as a refusal would be a
+                # second small lie in the surface this change exists to make honest.
+                if status == "refused":
                     log.warning("re-embed refused by the module", module=name, reason=reason)
                 results.append(entry)
             except httpx.HTTPError as exc:

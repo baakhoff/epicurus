@@ -737,14 +737,17 @@ def create_app() -> FastAPI:
         min_deletions=settings.files_scan_fuse_min_deletions,
     )
 
-    async def _rescan_files(force: bool = False) -> int:
+    async def _rescan_files(force: bool = False, tenant: str | None = None) -> int:
         # Serialise the startup walk and every watch-triggered rescan against each other (the
         # scan holds no internal lock), so a change mid-startup waits rather than double-walks.
+        # *tenant* is carried rather than assumed (constraint #1): the watcher and the startup
+        # walk pass nothing and get the default, the operator door passes the tenant it was
+        # asked about, and neither has to know which of those the other is.
         async with file_scan_lock:
             return await scan_file_space(
                 file_store,
                 file_index,
-                tenant=settings.default_tenant_id,
+                tenant=tenant or settings.default_tenant_id,
                 fuse=file_scan_fuse,
                 force=force,
             )
@@ -784,16 +787,18 @@ def create_app() -> FastAPI:
         """A rescan closure for one indexed mount — its own lock, own tree, own index prefix.
 
         Takes an optional ``force`` (#848) so the operator door can override a tripped fuse
-        for exactly one mount without disturbing the tenant tree or a sibling mount.
+        for exactly one mount without disturbing the tenant tree or a sibling mount, and an
+        optional ``tenant`` so the door scopes to the tenant it was asked about rather than
+        assuming the default one (constraint #1).
         """
         lock = asyncio.Lock()
 
-        async def _rescan(force: bool = False) -> int:
+        async def _rescan(force: bool = False, tenant: str | None = None) -> int:
             async with lock:
                 return await scan_file_space(
                     mount.store,
                     file_index,
-                    tenant=settings.default_tenant_id,
+                    tenant=tenant or settings.default_tenant_id,
                     path_prefix=f"{MOUNT_PREFIX}{mount.name}/",
                     exclude=mount.exclude,
                     fuse=file_scan_fuse,
@@ -819,17 +824,20 @@ def create_app() -> FastAPI:
         if mount.indexed
     ]
 
-    async def _rescan_namespace(namespace: str = "", force: bool = False) -> int:
+    async def _rescan_namespace(
+        namespace: str = "", force: bool = False, tenant: str | None = None
+    ) -> int:
         """Rescan one file-space namespace on demand (#848): ``""`` = the tenant tree.
 
         The operator-facing counterpart to the startup walk and the watcher: after a mount
         is repaired, this re-runs the scan that the fuse refused — with ``force`` when the
-        emptiness is real and the index should follow it down. Raises ``KeyError`` for an
-        unknown (or un-indexed) mount name so the route can 404 it.
+        emptiness is real and the index should follow it down, and for ``tenant`` when the
+        caller named one. Raises ``KeyError`` for an unknown (or un-indexed) mount name so
+        the route can 404 it.
         """
         if not namespace:
-            return await _rescan_files(force)
-        return await mount_rescans[namespace](force)
+            return await _rescan_files(force, tenant)
+        return await mount_rescans[namespace](force, tenant)
 
     # Maintenance orchestrator (ADR-0060): one coordinated batch over the background jobs — the
     # deferred fact-extraction drain (light, nightly-eligible) and the module re-index fan-out

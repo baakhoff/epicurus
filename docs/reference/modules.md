@@ -906,7 +906,11 @@ from the collection automatically. The `knowledge_reindex` tool repeats this pro
 purge that would take a wholesale share of the module-doc corpus — a registry that momentarily
 lists no doc-serving module, say — is **refused** by the mass de-index fuse (#848) and logged
 instead; `knowledge_reindex(force=true)` purges anyway. Disabling one module of several is well
-under the threshold and prunes as before.
+under the threshold and prunes as before. Note the absolute floor applies here (this source does
+*not* escalate its empty case past it): while the whole module-doc corpus is smaller than
+`KNOWLEDGE_INDEX_FUSE_MIN_DELETIONS` — as it is today, two doc-serving modules and three pages —
+even a total purge stays under the floor and proceeds. Module docs are cheap, re-derivable state;
+lower the floor if that is not the trade you want.
 
 **The module docs are automatically searched.** Because they land in `<tenant>__docs`, the
 existing `knowledge_search` tool finds them alongside platform docs — no change to the tool

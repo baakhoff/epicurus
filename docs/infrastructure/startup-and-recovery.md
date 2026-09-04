@@ -206,7 +206,8 @@ Since #848 the derived indexes **refuse** that reconciliation instead of perform
 
 - `epicurus-core-app` logs `mass de-index fuse tripped; index purge refused` at `ERROR`, with
   the row counts, and `GET /platform/v1/files/scan-status` lists the refusing namespace.
-- `epicurus-knowledge` logs the same line per source; the Modules page's **knowledge** status
+- `epicurus-knowledge` logs its equivalent (`mass de-index fuse tripped; index pass refused`)
+  per source; the Modules page's **knowledge** status
   panel shows `index fuse tripped: true` with the detail, and a `POST /reindex` answers
   `{"status": "refused", …}` rather than starting.
 - The metrics `epicurus_core_file_scan_fuse_tripped` and
@@ -219,10 +220,13 @@ the index:
    `EPICURUS_FILES_ROOT` points at, then `docker compose exec core-app ls /data/<tenant>`;
    the container view is the one that lies).
 2. If the container's view is empty, restart the WSL2 backend and recreate the container:
-   `wsl --shutdown`, restart Docker Desktop, then `docker compose up -d --force-recreate core-app`.
+   `wsl.exe --shutdown`, restart Docker Desktop, then
+   `docker compose up -d --force-recreate core-app`.
 3. With `/data` visible again, re-run the scan and the index:
-   `curl -X POST 'http://localhost:8080/platform/v1/files/rescan'` and knowledge's **Re-index**
-   action (or `POST /reindex`). Both re-arm their fuse on the first clean pass.
+   `curl -X POST 'http://localhost:8082/platform/v1/files/rescan'` (core-app's published host
+   port — `CORE_PORT`, see [ports](../reference/ports.md); `8080` is the echo module) and
+   knowledge's **Re-index** action (or `POST /reindex`). Both re-arm their fuse on the first
+   clean pass.
 
 Only if the file space genuinely lost its contents should the indexes follow it down: add
 `?force=true` to the rescan and the re-index. `force` deletes the derived state the fuse is

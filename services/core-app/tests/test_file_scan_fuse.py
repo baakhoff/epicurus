@@ -326,10 +326,10 @@ async def _client(tmp_path: Path, fuse: ScanFuse) -> tuple[AsyncClient, FileInde
     store = LocalFileStore(tmp_path)
     index, engine = await _fresh_index(tmp_path)
 
-    async def _rescan(namespace: str = "", force: bool = False) -> int:
+    async def _rescan(namespace: str = "", force: bool = False, tenant: str | None = None) -> int:
         if namespace:
             raise KeyError(namespace)  # no mounts in this fixture
-        return await scan(store, index, tenant=TENANT, fuse=fuse, force=force)
+        return await scan(store, index, tenant=tenant or TENANT, fuse=fuse, force=force)
 
     await _rescan()
     app = FastAPI()
@@ -419,4 +419,55 @@ async def test_routes_are_absent_without_the_fuse_wiring(tmp_path: Path) -> None
         assert "/platform/v1/files/scan-status" not in paths
         assert "/platform/v1/files/rescan" not in paths
     finally:
+        await engine.dispose()
+
+
+async def test_scan_status_is_scoped_to_the_tenant_asked_about(tmp_path: Path) -> None:
+    """Constraint #1: the fuse keys its state per tenant, and so must the read of it.
+
+    ``ScanFuse`` holds every tenant's trips in one process-wide dict, so an unscoped
+    ``/scan-status`` would hand one tenant another's namespace names and row counts — inert
+    while v1 is single-tenant, and invisible right up until it is not.
+    """
+    fuse = ScanFuse()
+    client, _, engine = await _client(tmp_path, fuse)
+    try:
+        _empty_the_mount(tmp_path)
+        await client.post("/platform/v1/files/rescan")  # trips for TENANT
+
+        ours = (await client.get("/platform/v1/files/scan-status")).json()
+        assert ours["tripped"] is True
+        assert [n["tenant"] for n in ours["namespaces"]] == [TENANT]
+
+        theirs = (
+            await client.get("/platform/v1/files/scan-status", params={"tenant_id": "someone-else"})
+        ).json()
+        assert theirs["tripped"] is False
+        assert theirs["namespaces"] == []
+        # The thresholds are policy, not tenant data — those stay visible either way.
+        assert theirs["max_delete_ratio"] == ours["max_delete_ratio"]
+    finally:
+        await client.aclose()
+        await engine.dispose()
+
+
+async def test_rescan_scopes_its_scan_and_its_verdict_to_the_tenant(tmp_path: Path) -> None:
+    """The door carries the tenant through to the scan and back out of the fuse read."""
+    fuse = ScanFuse()
+    client, index, engine = await _client(tmp_path, fuse)
+    try:
+        _empty_the_mount(tmp_path)
+        mine = (await client.post("/platform/v1/files/rescan")).json()
+        assert mine["tripped"] is True
+        assert await index.count_rows(tenant=TENANT) > 0  # withheld, not purged
+
+        # A different tenant has nothing indexed, so nothing to protect and nothing to trip —
+        # and it must not inherit this tenant's verdict.
+        other = (
+            await client.post("/platform/v1/files/rescan", params={"tenant_id": "someone-else"})
+        ).json()
+        assert other["tripped"] is False
+        assert await index.count_rows(tenant="someone-else") == 0
+    finally:
+        await client.aclose()
         await engine.dispose()

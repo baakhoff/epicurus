@@ -331,8 +331,14 @@ class ModuleDocsIndexer:
         The ratio rule alone guards this source: unlike a file tree, "the registry lists no
         doc-serving module" is a legitimate state — a one-module install disabling that
         module — so an empty source is not escalated past the ``min_deletions`` floor here.
-        A registry that momentarily loses every module still trips, because dropping a whole
-        corpus of docs clears the floor on its own.
+
+        That floor is load-bearing, and today it is above the corpus: only two modules ship a
+        ``docs_url`` and they serve three pages between them, so a registry that momentarily
+        lists none of them purges all three *without* tripping (3 < ``min_deletions``). It is
+        the ratio rule doing the guarding once the corpus clears the floor, not before —
+        module docs being cheap, re-derivable state, that is the trade taken here rather than
+        a smaller floor for one source. Lower ``KNOWLEDGE_INDEX_FUSE_MIN_DELETIONS`` to guard
+        a corpus this small.
         """
         stale_rows = 0
         for name in stale_names:

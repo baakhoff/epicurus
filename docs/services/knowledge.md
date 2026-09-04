@@ -425,7 +425,10 @@ The reconcile-time stale-path GC (#470) is fused the same way. The module-docs s
 fused on its final purge only — there the adds have already landed and are harmless — and
 its "source reads empty" case is *not* escalated past the floor, because a registry that
 lists no doc-serving module is an ordinary state (a one-module install disabling that
-module), not a stale mount.
+module), not a stale mount. Since the whole module-doc corpus is currently smaller than the
+floor (two doc-serving modules, three pages), that source is in practice unguarded until it
+grows past `KNOWLEDGE_INDEX_FUSE_MIN_DELETIONS` — a deliberate trade for state that rebuilds
+itself from the modules on the next pass.
 
 **Deliberate wholesale deletion** is still possible: `force=true` on the `knowledge_reindex`
 tool, or `POST /reindex?force=true`. Without it, `POST /reindex` refuses **synchronously**

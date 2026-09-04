@@ -254,7 +254,7 @@ async def test_indexer_recovers_when_list_modules_fails(ledger: ModuleDocLedger)
     )
     result = await indexer.run()
     # Should return zeros, not raise.
-    assert result == {"indexed": 0, "deleted": 0, "unchanged": 0}
+    assert result == {"indexed": 0, "deleted": 0, "unchanged": 0, "fuse_tripped": 0}
 
 
 async def test_indexer_skips_module_when_fetch_fails(ledger: ModuleDocLedger) -> None:
@@ -322,3 +322,82 @@ async def test_reconcile_noop_when_collection_exists(ledger: ModuleDocLedger) ->
     )
     assert await indexer.reconcile() is False
     assert await ledger.count(tenant=TENANT) == 1
+
+
+# ── Mass de-index fuse (#848) ─────────────────────────────────────────────────
+
+
+async def _seed(ledger: ModuleDocLedger, modules: dict[str, int]) -> None:
+    """Fill the ledger with *modules* mapped to a doc count each."""
+    for name, docs in modules.items():
+        for n in range(docs):
+            await ledger.upsert(
+                tenant=TENANT,
+                module_name=name,
+                doc_path=f"page_{n}.md",
+                content_hash=f"h{n}",
+                chunk_count=1,
+            )
+
+
+async def test_purge_of_a_whole_corpus_is_refused(ledger: ModuleDocLedger) -> None:
+    """A registry that momentarily lists nothing must not take every module's docs with it."""
+    await _seed(ledger, {"echo": 4, "tasks": 4, "mail": 4})
+    indexer = _make_indexer(ledger, snapshots=[], module_docs={})
+
+    result = await indexer.run()
+
+    assert result["fuse_tripped"] == 1
+    assert result["deleted"] == 0
+    assert await ledger.count(tenant=TENANT) == 12
+    assert indexer.fuse.tripped is True
+
+
+async def test_forced_purge_of_a_whole_corpus_goes_through(ledger: ModuleDocLedger) -> None:
+    await _seed(ledger, {"echo": 4, "tasks": 4, "mail": 4})
+    indexer = _make_indexer(ledger, snapshots=[], module_docs={})
+
+    result = await indexer.run(force=True)
+
+    assert result["fuse_tripped"] == 0
+    assert result["deleted"] == 12
+    assert await ledger.count(tenant=TENANT) == 0
+
+
+async def test_disabling_one_module_of_many_still_purges_it(ledger: ModuleDocLedger) -> None:
+    """The everyday case stays untouched: a small share of the corpus prunes as before."""
+    await _seed(ledger, {"echo": 2, "tasks": 4, "mail": 4})
+    indexer = _make_indexer(
+        ledger,
+        snapshots=[_snap("tasks"), _snap("mail")],
+        module_docs={
+            "tasks": [{"path": f"page_{n}.md", "content": f"# {n}"} for n in range(4)],
+            "mail": [{"path": f"page_{n}.md", "content": f"# {n}"} for n in range(4)],
+        },
+    )
+
+    result = await indexer.run()
+
+    assert result["fuse_tripped"] == 0
+    assert result["deleted"] == 2  # echo's docs
+    assert sorted(await ledger.list_modules(tenant=TENANT)) == ["mail", "tasks"]
+
+
+async def test_check_source_fuse_reports_the_rebuild_risk(ledger: ModuleDocLedger) -> None:
+    await _seed(ledger, {"echo": 4, "tasks": 4, "mail": 4})
+    indexer = _make_indexer(ledger, snapshots=[], module_docs={})
+
+    assert await indexer.check_source_fuse() is not None
+    assert await indexer.check_source_fuse(force=True) is None
+
+
+async def test_check_source_fuse_is_silent_when_the_registry_is_unreachable(
+    ledger: ModuleDocLedger,
+) -> None:
+    """An error is not a verdict — the sync already no-ops on it, so don't block a rebuild."""
+    await _seed(ledger, {"echo": 4, "tasks": 4, "mail": 4})
+    indexer = _make_indexer(ledger, snapshots=[], module_docs={})
+    indexer._platform.list_modules = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("unreachable")
+    )
+    assert await indexer.check_source_fuse() is None

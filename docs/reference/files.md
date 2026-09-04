@@ -99,6 +99,8 @@ core's tenant when omitted; tenant scoping is enforced on every call.
 | `DELETE /platform/v1/files?path=&tenant_id=` | `{deleted}` — a file or a whole tree. **400** deleting the root. |
 | `POST /platform/v1/files/dir?path=&tenant_id=` | Create a directory → `FileEntry`. |
 | `POST /platform/v1/files/move?tenant_id=` (body `{src, dst}`) | Move/rename → `FileEntry`. **File-space first**, else falls back to the storage object store (`POST /objects/move`) for object entries. **404** missing src, **409** dst exists, **400** root/traversal/into-itself, a **module-owned `dst`** (its top-level segment is a `module_urls` hostname and differs from `src`'s top — mirrors the upload lock so a foreign file can't land behind a module's back, #479/#554; a module's *own* same-top move is still allowed), or a **pathological name** (a control char / NUL, or a path segment over 255 bytes — clamped to a clean 400 instead of a store-level 500). |
+| `GET /platform/v1/files/scan-status` | **Mass de-index fuse state (#848)** — `{fuse_enabled, max_delete_ratio, min_deletions, tripped, namespaces:[{tenant, namespace, indexed_rows, would_delete, seen_entries, reason, at}]}`. A listed namespace is one whose index purge the scan is **refusing**: the file space read empty (or nearly so) while its rows are intact, so the rows were **kept**. `namespace` is `tenant` for the tenant tree, or `mount:<name>/` for a mount. |
+| `POST /platform/v1/files/rescan?namespace=&force=` | **Re-run the file-space scan (#848)** → `{namespace, entries, forced, tripped}`. The recovery door after a suspect mount: repair the mount, call this, and the index converges again. `namespace` empty = the tenant tree, otherwise an **indexed mount's name** (**404** for an unknown or un-indexed one). `force=true` purges the stale rows the fuse is withholding — the only way to make the index follow a file space that genuinely lost most of its contents. Runs the core's default tenant, under the same lock as the startup walk and the watcher. |
 
 > **`read`, `move`, `download`, and `delete` fall back to the storage object store** for object
 > entries (chat uploads, agent-written files): the core tries the file space first, then proxies
@@ -133,6 +135,9 @@ returns `list[FileEntry]` over the core file index, used by storage's `storage_s
 | `files_s3_access_key` / `files_s3_secret_key` | `FILES_S3_ACCESS_KEY` / `FILES_S3_SECRET_KEY` | `epicurus` / `epicurus-dev` | S3 credentials (dev defaults; OpenBao later). |
 | `files_watch` | `FILES_WATCH` | `true` | Watch the mounted file space and **incrementally rescan on change** (create/modify/delete) so files another module or an external write lands after startup show up in the Files page and search without a restart (ADR-0063). On by default. Set `false` to keep startup-only scanning. |
 | `files_watch_debounce_ms` | `FILES_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of file changes before a watch-triggered rescan fires; a module dropping many files at once is grouped into one incremental pass. |
+| `files_scan_fuse_enabled` | `FILES_SCAN_FUSE_ENABLED` | `true` | The **mass de-index fuse** (#848): refuse a scan's purge when the rows it would delete look wholesale rather than editorial, so a stale or empty mount cannot silently reconcile `core_files` to zero (the 2026-08-30 incident). Set `false` to restore the pre-#848 behaviour. |
+| `files_scan_fuse_max_delete_ratio` | `FILES_SCAN_FUSE_MAX_DELETE_RATIO` | `0.5` | Share of a namespace's indexed rows whose purge in one scan is treated as suspect. |
+| `files_scan_fuse_min_deletions` | `FILES_SCAN_FUSE_MIN_DELETIONS` | `5` | Absolute floor for the ratio rule — fewer stale rows never trip it, so a small tree stays prunable. A store that lists **nothing at all** while rows exist trips at any size. |
 
 The **upload route shares the chat-attachment caps** (#175 → #479): `ATTACHMENT_MAX_BYTES`
 (default 10 MiB → 413) and `ATTACHMENT_ALLOWED_TYPES` (default `text/*,image/*,application/pdf,
@@ -212,6 +217,17 @@ for bytes. On top of it the core owns a **unified file index** (ADR-0063) — a 
 of the file-space tree, populated by the startup scan and kept current by the watcher — that backs
 `GET /platform/v1/files/page` and `…/search` (the storage module's objects are merged in at request
 time, not stored in this index).
+
+The scan's **purge** half is guarded by the mass de-index fuse (#848). Deletions are weighed
+per `(tenant, namespace)` — the tenant tree and each mount separately, on the same scoping the
+purge itself uses — and refused when the store reads empty against a populated index, or when
+the purge would take at least `FILES_SCAN_FUSE_MAX_DELETE_RATIO` of that namespace's rows and at
+least `FILES_SCAN_FUSE_MIN_DELETIONS` of them. A refused scan still **upserts** what it saw (adds
+are not destructive); only the deletions are withheld, so a stale mount leaves a *stale* index
+rather than an emptied one. The refusal is logged at `ERROR`, exported as
+`epicurus_core_file_scan_fuse_tripped` / `epicurus_core_file_scan_fuse_trips_total`
+(labelled `tenant` + `namespace`), and readable at `GET /platform/v1/files/scan-status`; the next
+scan that purges normally re-arms it.
 
 ## Dependencies
 

@@ -370,7 +370,7 @@ async def test_missing_vault_returns_zeros(note_index: NoteIndex, tmp_path: Path
         tenant=TENANT,
     )
     result = await indexer.run()
-    assert result == {"indexed": 0, "deleted": 0, "unchanged": 0}
+    assert result == {"indexed": 0, "deleted": 0, "unchanged": 0, "fuse_tripped": 0}
 
 
 async def test_tenant_isolation(tmp_path: Path) -> None:

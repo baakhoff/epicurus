@@ -55,6 +55,19 @@ class KnowledgeSettings(CoreSettings):
     # triggered. Obsidian Sync writes many files at once; grouping them into one window
     # keeps a burst to a single incremental pass. Passed to the watcher's debounce.
     vault_watch_debounce_ms: int = 1500
+    # Mass de-index fuse (#848). An index pass deletes whatever the source no
+    # longer has — which is indistinguishable from a stale/empty mount, the failure that
+    # silently emptied the ledger and the Qdrant collection on 2026-08-30. The fuse refuses
+    # a pass whose deletions look wholesale rather than editorial. Disable it only if a
+    # source legitimately churns that hard; `force=true` on POST /reindex and on the
+    # `knowledge_reindex` tool is the per-pass override.
+    knowledge_index_fuse_enabled: bool = True
+    # Share of the ledger whose deletion in one pass is treated as suspect (0.5 = half).
+    knowledge_index_fuse_max_delete_ratio: float = 0.5
+    # Absolute floor for the ratio rule: fewer deletions than this never trip it, so a
+    # three-note knowledge base stays prunable. The "source read empty while the ledger is
+    # not" rule ignores this floor and trips at any size.
+    knowledge_index_fuse_min_deletions: int = 5
 
     @property
     def vault_read_only(self) -> bool:

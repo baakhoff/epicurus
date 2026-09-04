@@ -29,6 +29,7 @@ from qdrant_client.models import (
 from epicurus_core import PlatformClient, get_logger, scope_collection
 from epicurus_knowledge.chunker import Chunk, chunk_note
 from epicurus_knowledge.db import DocIndex, NoteIndex
+from epicurus_knowledge.fuse import FusePolicy, FuseTrip, IndexFuse
 from epicurus_knowledge.reader import DiskVaultReader, VaultReader
 
 
@@ -106,6 +107,11 @@ class KnowledgeIndexer:
             ``run`` accumulates chunks across files and flushes a batch once this
             many are pending, so the bundled docs index in a handful of round-trips
             instead of one per file (#230).
+        fuse_policy: Thresholds for the mass de-index fuse (#848) — a pass that would
+            delete an anomalous share of the ledger, or any pass over a source that reads
+            empty while the ledger is not, is refused instead of reconciling a stale mount
+            into a wipe. Defaults to :class:`~epicurus_knowledge.fuse.FusePolicy`'s own
+            defaults; ``force=True`` on a call bypasses it.
     """
 
     def __init__(
@@ -120,6 +126,7 @@ class KnowledgeIndexer:
         collection_base: str = "knowledge",
         chunk_max_chars: int = 2000,
         embed_batch_size: int = 64,
+        fuse_policy: FusePolicy | None = None,
     ) -> None:
         if reader is None:
             if vault_path is None:
@@ -134,6 +141,9 @@ class KnowledgeIndexer:
         self._batch_size = max(1, embed_batch_size)
         self._collection = scope_collection(collection_base, tenant)
         self._ensured = False
+        # The mass de-index fuse for this source (#848). Public: the app reads its state for
+        # GET /status, and POST /reindex asks it for a verdict before resetting anything.
+        self.fuse = IndexFuse(tenant=tenant, source=collection_base, policy=fuse_policy)
         # Serialises full re-index passes on this indexer instance. The vault indexer is
         # shared between the startup runner (#230) and the live watcher (#232), and the
         # Re-index action can fire mid-startup; without this two concurrent walks could
@@ -373,7 +383,7 @@ class KnowledgeIndexer:
             log.warning("folder move applied but re-index failed", path=to_rel, error=str(exc))
             return False
 
-    async def reconcile(self) -> bool:
+    async def reconcile(self, *, force: bool = False) -> bool:
         """Self-heal after a Qdrant reset (#229), or GC ledger rows the vault no longer has.
 
         qdrant vectors are derived data and may be wiped on a server upgrade (see the
@@ -391,6 +401,11 @@ class KnowledgeIndexer:
         path without going through :meth:`move_path` / :meth:`remove_path`, so a stale entry
         is never more than one reconcile pass (every startup and retry) from clearing itself.
 
+        The GC half is a de-index, so it is fused (#848): it drops rows for paths the source
+        no longer reports, which is exactly what a stale mount fakes. ``force`` bypasses the
+        fuse for this pass (the ledger-clearing half is not fused — it only discards rows
+        whose vectors are already gone).
+
         Returns ``True`` when it changed anything (cleared the ledger, or GC'd stale rows).
         """
         if not await self._qdrant.collection_exists(self._collection):
@@ -405,19 +420,38 @@ class KnowledgeIndexer:
             await self._notes.clear(tenant=self._tenant)
             self._ensured = False
             return True
-        return await self._gc_stale()
+        return await self._gc_stale(force=force)
 
-    async def _gc_stale(self) -> bool:
+    async def _gc_stale(self, *, force: bool = False) -> bool:
         """Drop ledger rows (+ their vectors) whose path no longer exists in the live vault.
 
         One ``stat`` per ledger row and no content reads or re-embeds, so this is cheap
         relative to a full :meth:`run` — a reconcile-time complement to it rather than a
         replacement. Returns ``True`` if anything was removed.
+
+        Fused (#848): the whole set of missing paths is collected first and weighed against
+        the ledger, so a source that has gone wholesale missing refuses the GC rather than
+        performing it one cheap ``stat`` at a time. How full the vault *itself* is takes one
+        extra walk, paid only when there is something to GC — the fuse must not read "the
+        ledger's live rows" as "the source", or a lone orphan in a healthy vault would look
+        like a vanished source.
         """
+        known = await self._notes.list_paths(tenant=self._tenant)
+        missing = [rel for rel in known if await self._reader.stat(rel) is None]
+        if not missing:
+            return False
+        entries = await self._reader.md_entries() if await self._reader.exists() else []
+        trip = self.fuse.evaluate(
+            ledger_rows=len(known),
+            would_delete=len(missing),
+            source_entries=len(entries),
+            force=force,
+        )
+        if trip is not None:
+            self.fuse.trip(trip)
+            return False
         removed = 0
-        for rel in await self._notes.list_paths(tenant=self._tenant):
-            if await self._reader.stat(rel) is not None:
-                continue
+        for rel in missing:
             await self._delete_note_vectors(rel)
             await self._notes.delete(tenant=self._tenant, note_path=rel)
             removed += 1
@@ -442,12 +476,37 @@ class KnowledgeIndexer:
             await self._notes.clear(tenant=self._tenant)
             self._ensured = False
 
-    async def run(self) -> dict[str, int]:
+    async def check_source_fuse(self, *, force: bool = False) -> FuseTrip | None:
+        """Would rebuilding from the source right now be a mass de-index? (#848)
+
+        The read-only question behind ``POST /reindex``'s pre-check: :meth:`reset` empties
+        the ledger by design, so by the time the rebuild walks the source there is nothing
+        left for the fuse to protect. Asking first — *before* anything is dropped — is what
+        keeps a re-index against a stale mount from completing the wipe the incident
+        started. Returns the verdict without recording it; the caller decides.
+        """
+        return await self._walk_verdict(force=force)
+
+    async def _walk_verdict(self, *, force: bool = False) -> FuseTrip | None:
+        """The fuse verdict for a full walk: ledger rows the source no longer reports."""
+        if not await self._reader.exists():
+            entries: set[str] = set()
+        else:
+            entries = {entry.path for entry in await self._reader.md_entries()}
+        known = set(await self._notes.list_paths(tenant=self._tenant))
+        return self.fuse.evaluate(
+            ledger_rows=len(known),
+            would_delete=len(known - entries),
+            source_entries=len(entries),
+            force=force,
+        )
+
+    async def run(self, *, force: bool = False) -> dict[str, int]:
         """Walk the vault and incrementally update the Qdrant index.
 
         Returns::
 
-            {"indexed": N, "deleted": M, "unchanged": K}
+            {"indexed": N, "deleted": M, "unchanged": K, "fuse_tripped": 0}
 
         where *N* notes were re-indexed, *M* were removed, and *K* were skipped
         because their content hash was unchanged.
@@ -456,13 +515,19 @@ class KnowledgeIndexer:
         accumulate into ``pending`` and flush once ``embed_batch_size`` chunks are
         queued, so the index completes in a handful of round-trips, not one per file.
 
+        A pass whose deletions trip the mass de-index fuse (#848) is abandoned whole —
+        ``fuse_tripped`` comes back ``1``, every other count is ``0``, and neither the
+        ledger nor the collection is touched. The adds are dropped along with the deletes
+        deliberately: a source that looks like a stale mount is not a source to index
+        *from* either. ``force=True`` skips the fuse for this pass.
+
         Serialised by ``self._run_lock`` so a watch-triggered pass (#232) and the startup
         index never walk the vault concurrently.
         """
         async with self._run_lock:
-            return await self._run_walk()
+            return await self._run_walk(force=force)
 
-    async def _run_walk(self) -> dict[str, int]:
+    async def _run_walk(self, *, force: bool = False) -> dict[str, int]:
         indexed = 0
         unchanged = 0
 
@@ -474,13 +539,35 @@ class KnowledgeIndexer:
         # not-yet-provisioned ``knowledge/`` dir, not an error (a core outage *raises* from
         # ``md_entries`` below and the run retries, so an unreachable core never looks empty
         # and de-indexes everything).
-        if not await self._reader.exists():
+        exists = await self._reader.exists()
+        entries = await self._reader.md_entries() if exists else []
+
+        # The mass de-index fuse (#848), weighed before a single row is touched: an absent or
+        # empty-reading source with a populated ledger is a stale mount until proven otherwise,
+        # and a pass that would delete most of the ledger is one too. Refusing here — rather
+        # than at the delete loop below — is what makes the refusal atomic: nothing has been
+        # embedded, upserted, or dropped yet, so the ledger and collection stay exactly as
+        # they were.
+        known_before = set(await self._notes.list_paths(tenant=self._tenant))
+        seen_now = {entry.path for entry in entries}
+        trip = self.fuse.evaluate(
+            ledger_rows=len(known_before),
+            would_delete=len(known_before - seen_now),
+            source_entries=len(entries),
+            force=force,
+        )
+        if trip is not None:
+            self.fuse.trip(trip)
+            return {"indexed": 0, "deleted": 0, "unchanged": 0, "fuse_tripped": 1}
+
+        if not exists:
             log.warning("vault path does not exist")
-            return {"indexed": 0, "deleted": 0, "unchanged": 0}
+            self.fuse.clear()
+            return {"indexed": 0, "deleted": 0, "unchanged": 0, "fuse_tripped": 0}
 
         model = await self._embedding_model()  # operator's choice, resolved once per run (#128)
 
-        for entry in await self._reader.md_entries():
+        for entry in entries:
             rel = entry.path
             seen_paths.add(rel)
 
@@ -555,4 +642,12 @@ class KnowledgeIndexer:
             deleted=deleted,
             unchanged=unchanged,
         )
-        return {"indexed": indexed, "deleted": deleted, "unchanged": unchanged}
+        # The pass reconciled without tripping — re-arm so a past trip stops showing on
+        # GET /status and the metric returns to 0.
+        self.fuse.clear()
+        return {
+            "indexed": indexed,
+            "deleted": deleted,
+            "unchanged": unchanged,
+            "fuse_tripped": 0,
+        }

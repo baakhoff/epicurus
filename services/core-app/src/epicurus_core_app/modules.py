@@ -478,11 +478,22 @@ class ModuleRegistry:
             for template in snap.manifest.automation_templates
         ]
 
-    async def _post_reindex(self, base: str) -> None:
-        """POST ``{base}/reindex`` to one module (overridable in tests, like ``_probe``)."""
+    async def _post_reindex(self, base: str) -> dict[str, str]:
+        """POST ``{base}/reindex`` to one module (overridable in tests, like ``_probe``).
+
+        Returns the module's response body so the fan-out can report what actually happened:
+        a module may accept the rebuild (``{"status": "started"}``) or **refuse** it — knowledge
+        answers ``{"status": "refused", "reason": …}`` when rebuilding would de-index a source
+        that has gone wholesale empty (#848). A non-JSON or non-object body reads as ``{}``.
+        """
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{base}/reindex")
             resp.raise_for_status()
+            try:
+                body = resp.json()
+            except ValueError:
+                return {}
+        return {str(k): str(v) for k, v in body.items()} if isinstance(body, dict) else {}
 
     async def reembed(self) -> list[dict[str, str]]:
         """Re-embed every reindexable, enabled module (#332).
@@ -492,6 +503,11 @@ class ModuleRegistry:
         everything" after the embedding model changes (vectors are model-specific). Best-effort
         per module: one module's failure is logged and reported, never aborts the rest. Each
         module re-embeds its own tenant's corpus (single-tenant in v1, so it matches ours).
+
+        A module's own answer is passed through rather than assumed (#848): a rebuild it
+        **refuses** — because the source it would rebuild from reads empty — reports
+        ``{"status": "refused", "reason": …}``, so the Models page shows the refusal instead
+        of a rebuild that never started.
         """
         snaps = await self.snapshot()
         results: list[dict[str, str]] = []
@@ -502,8 +518,13 @@ class ModuleRegistry:
                 continue
             name = snap.manifest.name
             try:
-                await self._post_reindex(base)
-                results.append({"module": name, "status": "started"})
+                body = await self._post_reindex(base)
+                entry = {"module": name, "status": body.get("status", "started")}
+                reason = body.get("reason")
+                if reason:
+                    entry["reason"] = reason
+                    log.warning("re-embed refused by the module", module=name, reason=reason)
+                results.append(entry)
             except httpx.HTTPError as exc:
                 log.warning("re-embed fan-out failed", module=name, error=str(exc))
                 results.append({"module": name, "status": "error"})

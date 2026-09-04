@@ -252,6 +252,17 @@ class CoreAppSettings(CoreSettings):
     # Coalescing window (ms) for a burst of changes before a rescan fires — a module dropping
     # many files at once is grouped into one incremental pass. Passed to the watcher's debounce.
     files_watch_debounce_ms: int = 1500
+    # Mass de-index fuse (#848). A scan purges every indexed row the store no longer lists,
+    # which is exactly what a stale/empty mount fakes — on 2026-08-30 that reconciled
+    # `core_files` to zero rows with no error at all. The fuse refuses a purge that looks
+    # wholesale rather than editorial; POST /platform/v1/files/rescan?force=true is the
+    # deliberate override, and GET /platform/v1/files/scan-status reports a tripped fuse.
+    files_scan_fuse_enabled: bool = True
+    # Share of a namespace's indexed rows whose purge in one scan is treated as suspect.
+    files_scan_fuse_max_delete_ratio: float = 0.5
+    # Absolute floor for the ratio rule: fewer stale rows than this never trip it, so a small
+    # tree stays prunable. A store that lists nothing at all trips at any size.
+    files_scan_fuse_min_deletions: int = 5
     # ── External file mounts (#731) ─────────────────────────────────────────────
     # Operator-declared drive-style mounts: additional roots beside the tenant file space,
     # each backed by a host directory bound into the container (never a default — the operator

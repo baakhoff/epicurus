@@ -12,6 +12,31 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A file space that reads empty no longer takes your indexes with it** (#848) — after two
+  weeks of downtime the dogfood stack came up with a stale bind mount: the container saw an
+  empty `/data` while every file sat intact on the host. Nothing failed. The core's file scan
+  reconciled `core_files` to zero rows, a knowledge re-index purged the note ledger and emptied
+  the vault's Qdrant collection, and not one error was logged — because "the source is empty" is
+  a legitimate state everywhere in this codebase, and only a *raising* backend failure ever
+  stopped a reconciler from deleting. The mount was stale, not the data, so nothing was
+  irrecoverable that time; with an S3 backend or a slower embedding pass the same five seconds
+  destroy hours of derived state. This puts a fuse in front of every reconciler that deletes
+  because its source went quiet. Before a pass touches anything it weighs the deletion against
+  what is already indexed, tenant-scoped and namespace-scoped: a source reading empty against a
+  non-empty index is refused at any size, and so is a pass deleting at least half of an index
+  (with an absolute floor, so ordinary editing — two notes of three — never trips a guard meant
+  for wholesale loss). A refused knowledge pass is abandoned whole, ledger and collection
+  untouched; a refused file scan still records what it saw and withholds only the deletions, so
+  a stale mount leaves a *stale* index instead of an emptied one. The refusal is loud where
+  silence did the damage: an `ERROR` log with the counts, a `/metrics` gauge and counter per
+  tenant and source, `index_fuse_tripped` on knowledge's status panel, and
+  `GET /platform/v1/files/scan-status` on the core. Deliberate wholesale deletion stays possible
+  — `force=true` on `knowledge_reindex` and `POST /reindex`, `POST /platform/v1/files/rescan?force=true`
+  — and `POST /reindex` now refuses *synchronously* rather than starting, because it drops each
+  ledger before rebuilding and would otherwise erase the very evidence the fuse weighs. The
+  first-ever index has nothing to protect and never trips; the first clean pass re-arms a tripped
+  fuse. `knowledge` 0.27.4→0.28.0 (MINOR). · `core-app` 0.115.0→0.116.0 (MINOR).
+
 - **Calendar now notices changes you didn't make here** (#831) — the three calendar change
   events had exactly one emitter, the provider-write seam, which sees every write made *through*
   this module and, structurally, nothing else: an event created, moved or deleted in Google

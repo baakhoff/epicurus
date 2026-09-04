@@ -121,6 +121,18 @@ each run. The index is refreshed at service startup and whenever you click
 After adding notes to your vault or changing the vault path, trigger a
 re-index to pick up the changes.
 
+## When indexing refuses to run
+
+If the vault reads empty (or has lost most of its notes) while the index still holds
+them, the re-index is **refused** instead of deleting them — an unmounted or half-mounted
+file space must not cascade into a wiped knowledge base. The Status panel then shows
+``index fuse tripped: true`` with the numbers, and nothing is changed.
+
+Check the file space first: the notes are almost always still there and the container
+simply cannot see them. Once the mount is healthy, re-index normally. If the notes really
+are gone and the index should follow, re-index with ``force`` (``POST /reindex?force=true``,
+or ask the agent to re-index with force).
+
 ## Live sync (watched vault)
 
 If your vault is an Obsidian-synced folder bind-mounted into the container, set
@@ -159,10 +171,15 @@ source document.
 
 Incrementally re-index all sources: vault, platform docs, and module docs.
 
-**Parameters** — none.
+**Parameters**
+- ``force`` (boolean, default false) — bypass the mass de-index fuse for this pass. The
+  fuse refuses a pass that would delete most of an index (or all of it, when the source
+  reads empty), so a stale mount cannot silently wipe the knowledge base; set ``force``
+  only when the source really is empty and the index should follow it down.
 
-**Returns** ``{"indexed": N, "deleted": M, "unchanged": K}`` summed across
-all sources.
+**Returns** ``{"indexed": N, "deleted": M, "unchanged": K, "fuse_tripped": F}`` summed
+across all sources. ``F`` above zero means a source refused to de-index and changed
+nothing — check the file space before re-running with ``force``.
 
 ## knowledge_create_document
 
@@ -518,29 +535,34 @@ def build_module(
         return tool_envelope("\n".join(lines).rstrip(), refs)
 
     @module.tool()
-    async def knowledge_reindex() -> dict[str, int]:
+    async def knowledge_reindex(force: bool = False) -> dict[str, int]:
         """Incrementally re-index all knowledge sources.
 
         Walks the Obsidian vault, the bundled platform docs, and each enabled
         module's declared docs, embedding new or changed files via the core's LLM
         gateway and removing vectors for deleted files.  Unchanged files are skipped.
 
-        Returns ``{"indexed": N, "deleted": M, "unchanged": K}`` summed across
-        all sources.
+        A source that reads empty (or has lost most of its content) while its index is
+        populated is refused rather than de-indexed — a stale mount must not cascade into a
+        wiped knowledge base (#848). That pass reports ``fuse_tripped`` above zero and
+        changes nothing; ``force=True`` indexes anyway.
+
+        Args:
+            force: Bypass the mass de-index safety check and reconcile the index to whatever
+                the sources currently say, deletions included. Use only when the emptiness
+                is known to be real.
+
+        Returns ``{"indexed": N, "deleted": M, "unchanged": K, "fuse_tripped": F}`` summed
+        across all sources.
         """
-        vault_result = await vault_indexer.run()
-        docs_result = await docs_indexer.run()
-        module_result = await module_docs_indexer.run()
+        results = [
+            await vault_indexer.run(force=force),
+            await docs_indexer.run(force=force),
+            await module_docs_indexer.run(force=force),
+        ]
         return {
-            "indexed": (
-                vault_result["indexed"] + docs_result["indexed"] + module_result["indexed"]
-            ),
-            "deleted": (
-                vault_result["deleted"] + docs_result["deleted"] + module_result["deleted"]
-            ),
-            "unchanged": (
-                vault_result["unchanged"] + docs_result["unchanged"] + module_result["unchanged"]
-            ),
+            key: sum(int(r.get(key, 0)) for r in results)
+            for key in ("indexed", "deleted", "unchanged", "fuse_tripped")
         }
 
     async def _stage_doc_write(

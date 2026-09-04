@@ -43,6 +43,23 @@ add_ops_routes(app, service_name="greeter")
 # GET /metrics -> Prometheus text exposition
 ```
 
+## Service metrics on the shared registry
+
+A service that registers its own collectors on the process-wide registry has them served by the
+same `/metrics` route — no extra wiring. Currently exported beyond the client defaults:
+
+| Metric | Type | Labels | Service | Meaning |
+| --- | --- | --- | --- | --- |
+| `epicurus_core_file_scan_fuse_tripped` | gauge | `tenant`, `namespace` | core-app | `1` while a file-space scan is refusing to purge index rows — the mass de-index fuse (#848). `namespace` is `tenant` for the tenant tree or `mount:<name>/` for a mount. Back to `0` after a scan that purges normally. |
+| `epicurus_core_file_scan_fuse_trips_total` | counter | `tenant`, `namespace` | core-app | File-space index purges refused by the fuse, cumulatively. |
+| `epicurus_knowledge_index_fuse_tripped` | gauge | `tenant`, `source` | knowledge | `1` while a knowledge index source is refusing to de-index (#848). `source` ∈ `knowledge` (the vault), `docs` (bundled platform docs), `module_docs`. |
+| `epicurus_knowledge_index_fuse_trips_total` | counter | `tenant`, `source` | knowledge | Knowledge index passes refused by the fuse, cumulatively. |
+
+A tripped fuse is worth alerting on: it means derived state is **intact but stale**, and an
+operator has to decide whether the source really lost its contents (see
+[file space](files.md#configuration-core-app) and
+[knowledge](../services/knowledge.md#the-mass-de-index-fuse-848)).
+
 ---
 
 ## Tracing (#57, ADR-0068)

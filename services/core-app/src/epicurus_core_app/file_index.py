@@ -152,6 +152,36 @@ class FileIndex:
             )
             return None if row is None else _row_to_entry(row)
 
+    async def count_rows(self, *, tenant: str, path_prefix: str = "") -> int:
+        """How many rows *tenant* has indexed under *path_prefix* (empty = the whole tenant).
+
+        The denominator of the mass de-index fuse (#848): "how much of this namespace is
+        indexed right now", scoped exactly like :meth:`purge_stale` so the fuse weighs the
+        rows that purge would actually touch — never a sibling mount's, never another
+        tenant's.
+        """
+        conditions = [_CoreFile.tenant == tenant]
+        if path_prefix:
+            conditions.append(_CoreFile.path.like(_like_prefix(path_prefix) + "%", escape="\\"))
+        async with self._session() as session:
+            return int(await session.scalar(select(func.count()).where(*conditions)) or 0)
+
+    async def count_stale(self, *, tenant: str, seen_paths: set[str], path_prefix: str = "") -> int:
+        """How many rows :meth:`purge_stale` would delete, without deleting them (#848).
+
+        The numerator of the fuse verdict — the same ``WHERE`` clause as the purge, counted
+        instead of executed, so the decision is taken on the real number rather than an
+        estimate. An empty *seen_paths* short-circuits to :meth:`count_rows`: the purge would
+        take the whole namespace, and ``NOT IN ()`` is a needless round-trip to say so.
+        """
+        if not seen_paths:
+            return await self.count_rows(tenant=tenant, path_prefix=path_prefix)
+        conditions = [_CoreFile.tenant == tenant, _CoreFile.path.not_in(seen_paths)]
+        if path_prefix:
+            conditions.append(_CoreFile.path.like(_like_prefix(path_prefix) + "%", escape="\\"))
+        async with self._session() as session:
+            return int(await session.scalar(select(func.count()).where(*conditions)) or 0)
+
     async def purge_stale(self, *, tenant: str, seen_paths: set[str], path_prefix: str = "") -> int:
         """Delete rows not visited in the most recent scan (files removed on disk).
 

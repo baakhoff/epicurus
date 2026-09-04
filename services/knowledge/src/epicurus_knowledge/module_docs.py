@@ -38,6 +38,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from epicurus_core import PlatformClient, get_logger
 from epicurus_core.tenancy import scope_collection
 from epicurus_knowledge.chunker import chunk_note
+from epicurus_knowledge.fuse import FusePolicy, FuseTrip, IndexFuse
 
 _log = get_logger("knowledge.module_docs")
 
@@ -213,6 +214,7 @@ class ModuleDocsIndexer:
         *,
         tenant: str,
         chunk_max_chars: int = 2000,
+        fuse_policy: FusePolicy | None = None,
     ) -> None:
         self._ledger = ledger
         self._qdrant = qdrant
@@ -220,6 +222,9 @@ class ModuleDocsIndexer:
         self._tenant = tenant
         self._max_chars = chunk_max_chars
         self._collection = scope_collection("docs", tenant)
+        # Same fuse as the file-backed sources (#848); here the "source" is the core's module
+        # registry, and its wholesale-empty case is "no enabled module declares docs_url".
+        self.fuse = IndexFuse(tenant=tenant, source="module_docs", policy=fuse_policy)
 
     async def _embedding_model(self) -> str | None:
         """Resolve the knowledge module's chosen embedding model slot (#128)."""
@@ -268,7 +273,7 @@ class ModuleDocsIndexer:
         await self._qdrant.upsert(collection_name=self._collection, points=points)
         return len(chunks)
 
-    async def reconcile(self) -> bool:
+    async def reconcile(self, *, force: bool = False) -> bool:
         """Self-heal after a Qdrant reset (#229): clear the ledger if ``<tenant>__docs`` is gone.
 
         Shares the ``<tenant>__docs`` collection with the platform-docs indexer, so this
@@ -300,13 +305,75 @@ class ModuleDocsIndexer:
             await self._qdrant.delete_collection(self._collection)
         await self._ledger.clear(tenant=self._tenant)
 
-    async def run(self) -> dict[str, int]:
+    async def _doc_module_names(self) -> set[str]:
+        """Names of enabled modules that declare a ``docs_url`` — the live source set.
+
+        Cheap (one registry call, no doc fetches), so the fuse pre-check can ask "does this
+        source still exist?" without paying for a full sync.
+        """
+        names: set[str] = set()
+        for snap in await self._platform.list_modules():
+            if not snap.get("enabled", True) or snap.get("removed", False):
+                continue
+            manifest = snap.get("manifest") or {}
+            if not manifest.get("docs_url"):
+                continue
+            name = manifest.get("name", "")
+            if name:
+                names.add(str(name))
+        return names
+
+    async def _purge_verdict(
+        self, stale_names: set[str], active_count: int, force: bool
+    ) -> FuseTrip | None:
+        """The fuse verdict for purging every doc of *stale_names* (#848).
+
+        The ratio rule alone guards this source: unlike a file tree, "the registry lists no
+        doc-serving module" is a legitimate state — a one-module install disabling that
+        module — so an empty source is not escalated past the ``min_deletions`` floor here.
+        A registry that momentarily loses every module still trips, because dropping a whole
+        corpus of docs clears the floor on its own.
+        """
+        stale_rows = 0
+        for name in stale_names:
+            stale_rows += len(await self._ledger.list_paths(tenant=self._tenant, module_name=name))
+        return self.fuse.evaluate(
+            ledger_rows=await self._ledger.count(tenant=self._tenant),
+            would_delete=stale_rows,
+            source_entries=active_count,
+            force=force,
+            empty_source_trips=False,
+        )
+
+    async def check_source_fuse(self, *, force: bool = False) -> FuseTrip | None:
+        """Would a rebuild purge module docs wholesale? (#848)
+
+        The read-only pre-check behind ``POST /reindex``: a registry that momentarily lists
+        no doc-serving module (every module restarting, a misconfigured core) would otherwise
+        have its whole ``module/*`` corpus dropped and rebuilt from nothing. A registry call
+        that *fails* is not a verdict — the sync already treats an unreachable core as "do
+        nothing" — so an error here returns ``None`` rather than blocking a legitimate rebuild.
+        """
+        try:
+            active = await self._doc_module_names()
+        except Exception as exc:
+            _log.warning("module_docs: fuse pre-check could not list modules", error=str(exc))
+            return None
+        stale = set(await self._ledger.list_modules(tenant=self._tenant)) - active
+        return await self._purge_verdict(stale, len(active), force)
+
+    async def run(self, *, force: bool = False) -> dict[str, int]:
         """Sync module docs: index new/changed, purge disabled/removed modules.
 
-        Returns ``{"indexed": N, "deleted": M, "unchanged": K}``.
+        Returns ``{"indexed": N, "deleted": M, "unchanged": K, "fuse_tripped": 0|1}``.
 
         The run is best-effort per module: a fetch failure for one module is logged
         and skipped; other modules continue.
+
+        The final purge — every doc of every module no longer in the active set — is fused
+        (#848). Unlike the file-backed sources this refuses the *purge* alone: the adds have
+        already landed by then and are not destructive, so keeping them costs nothing while
+        dropping the deletes preserves the corpus. ``force=True`` purges regardless.
         """
         indexed = deleted = unchanged = 0
 
@@ -315,7 +382,7 @@ class ModuleDocsIndexer:
             snapshots = await self._platform.list_modules()
         except Exception as exc:
             _log.warning("module_docs: could not list modules", error=str(exc))
-            return {"indexed": 0, "deleted": 0, "unchanged": 0}
+            return {"indexed": 0, "deleted": 0, "unchanged": 0, "fuse_tripped": 0}
 
         active: dict[str, list[dict[str, Any]]] = {}
         for snap in snapshots:
@@ -377,7 +444,23 @@ class ModuleDocsIndexer:
 
         # Purge docs for modules no longer in the active set (disabled / removed / no docs_url).
         ledger_modules = set(await self._ledger.list_modules(tenant=self._tenant))
-        for stale_name in ledger_modules - set(active):
+        stale_names = ledger_modules - set(active)
+        trip = await self._purge_verdict(stale_names, len(active), force)
+        if trip is not None:
+            self.fuse.trip(trip)
+            _log.info(
+                "module_docs indexed (purge refused by the fuse)",
+                indexed=indexed,
+                deleted=deleted,
+                unchanged=unchanged,
+            )
+            return {
+                "indexed": indexed,
+                "deleted": deleted,
+                "unchanged": unchanged,
+                "fuse_tripped": 1,
+            }
+        for stale_name in stale_names:
             stale_paths = await self._ledger.list_paths(tenant=self._tenant, module_name=stale_name)
             for doc_path in stale_paths:
                 note_path = _module_path(stale_name, doc_path)
@@ -391,7 +474,13 @@ class ModuleDocsIndexer:
             deleted=deleted,
             unchanged=unchanged,
         )
-        return {"indexed": indexed, "deleted": deleted, "unchanged": unchanged}
+        self.fuse.clear()
+        return {
+            "indexed": indexed,
+            "deleted": deleted,
+            "unchanged": unchanged,
+            "fuse_tripped": 0,
+        }
 
     async def doc_count(self) -> int:
         """Number of module doc pages indexed for this tenant."""

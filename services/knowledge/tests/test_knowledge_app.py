@@ -39,7 +39,20 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
-    assert manifest.version == "0.27.0"
+
+
+async def test_manifest_version_matches_the_packaged_version() -> None:
+    """Pinning the literal let the manifest drift behind ``pyproject.toml`` while the test
+    still passed — and the Modules page badge reads this version (#845). Compare against the
+    *declared* version rather than the installed metadata, which a stale editable install can
+    lie about (mirrors calendar/websearch)."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    manifest = await _module().manifest()
+    assert manifest.version == declared
 
 
 async def test_manifest_declares_attachable_and_resolver() -> None:

@@ -52,6 +52,21 @@ async def test_manifest_declares_a_resolver() -> None:
     assert (await build_module().manifest()).resolver is True
 
 
+async def test_manifest_version_matches_the_packaged_version() -> None:
+    """The manifest hardcodes its version; nothing previously asserted it against
+    ``pyproject.toml``, so it had silently drifted (0.5.0 vs 0.5.2, #845) — and the Modules
+    page badge reads this value. Compare against the *declared* version rather than the
+    installed metadata, which a stale editable install can lie about (mirrors
+    calendar/websearch)."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+    manifest = await build_module().manifest()
+    assert manifest.version == declared
+
+
 def test_echo_hover_card_matches_the_envelope_shape() -> None:
     card = echo_hover_card("event", "e1")
     assert card["title"] == "e1"

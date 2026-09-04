@@ -44,6 +44,7 @@ dev = [
     # dependency since the test takes a real, load-bearing dependency on it.
     "pyyaml>=6.0",
     "types-python-dateutil>=2.9.0.20260716",
+    "types-pyyaml>=6.0.12.20260815",
 ]
 
 [tool.ruff]
@@ -112,6 +113,7 @@ files = [
     "services/storage/src", "services/storage/tests",
     "services/tasks/src", "services/tasks/tests",
     "services/websearch/src", "services/websearch/tests",
+    "scripts", "tests",
 ]
 
 # Third-party packages without a py.typed marker; don't fail strict on them.
@@ -126,6 +128,12 @@ ignore_missing_imports = true
 # link_ingest's extraction stack (#739): neither ships a py.typed marker.
 [[tool.mypy.overrides]]
 module = ["trafilatura.*", "yt_dlp.*"]
+ignore_missing_imports = true
+
+# scripts/new_module.py and its test drive the cookiecutter template renderer (#845 — pulled
+# into the strict gate along with root tests/); cookiecutter ships no py.typed marker either.
+[[tool.mypy.overrides]]
+module = ["cookiecutter.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

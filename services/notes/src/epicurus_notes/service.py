@@ -81,7 +81,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.12.0",
+        version="0.12.3",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"

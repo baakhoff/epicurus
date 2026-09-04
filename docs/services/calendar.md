@@ -513,10 +513,26 @@ cannot come back through any sync feed, so a local-only deployment writes no mar
 Both emitters build payloads, dedup keys and suppression keys from one module,
 `epicurus_calendar.spine`, so "the same change" means the same thing on both sides.
 
+**Which of the two applies is decided by provenance, not by comparing ids** (#843). A collapsed
+group has been re-keyed onto the series id, so its id *is* a series id, and it is peeked; every
+other decision is a genuine single-occurrence match and is consumed. Reading the equality
+instead — collapsing makes `event_id == series_id` — sent the *series* marker down the consume
+path and deleted it on the first pass, so a series write whose occurrences straddled two
+reconcile passes (the delta paginates, the poll interval lands mid-write, a restart cuts the
+pass in half, one occurrence is edited a minute after the rest) was announced a second time.
+**A peeked series marker is released by its TTL alone** — `SYNC_SELF_WRITE_TTL_S`, 15 minutes,
+pruned once per pass — never by a read: nothing says how many occurrences one series write will
+come back as, so there is no "fully observed" moment to release it at, and guessing low is the
+re-announcement itself. The bounded cost is the other side of that coin: an *external*
+series-wide edit made within the TTL of our own series write to the same series is suppressed
+along with it.
+
 Accepted races: the marker is written after the provider write returns and before the emit, so
 a millisecond-wide window exists in which a delta fetched in between could still duplicate; an
 *external* edit landing in the same poll window as our own write to the same event is
-suppressed along with it; and `edit_scope="following"` (a series split) is announced by the
+suppressed along with it; a collapsed group whose occurrences were each written here separately
+(distinct exact-id markers, no series marker) is announced, since the collapsed emission can
+only ask about the series; and `edit_scope="following"` (a series split) is announced by the
 write seam as one `event_updated` and additionally by the reconcile as the truncated tail's
 cancellation plus the new series' creation.
 

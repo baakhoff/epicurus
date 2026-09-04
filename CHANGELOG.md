@@ -12,6 +12,22 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A recurring series you changed here is announced once, however the provider chops it up**
+  (#843) — calendar's reconcile suppresses the changes this module made itself by looking them
+  up in a short-lived ledger, and a series-scoped write is meant to leave its marker in place,
+  because one such write legitimately comes back as one change per occurrence. It did not:
+  collapsing a series' occurrences into a single emission re-keys that emission onto the series
+  id, which made the id it looked up indistinguishable from an ordinary event id, so the
+  *series* marker took the consume path and was deleted on the first pass. Occurrences arriving
+  on a later pass — the delta paginates, the poll interval lands mid-write, a restart cuts a
+  pass in half, one occurrence is edited a minute after the rest — then found nothing to match,
+  and the write was announced a second time; a duplicate the spine's `dedup_key` absorbs only
+  when the two payloads happen to coincide. Suppression now decides peek-versus-consume from
+  where the id came from rather than by comparing ids, so a collapsed group peeks and only a
+  genuine single-occurrence match consumes. A peeked series marker is released by its TTL alone
+  (`SYNC_SELF_WRITE_TTL_S`, 15 minutes): nothing says how many occurrences one series write will
+  come back as, so there is no "fully observed" moment to release it at.
+  `calendar` 0.20.0→0.20.1 (PATCH).
 - **Calendar now notices changes you didn't make here** (#831) — the three calendar change
   events had exactly one emitter, the provider-write seam, which sees every write made *through*
   this module and, structurally, nothing else: an event created, moved or deleted in Google

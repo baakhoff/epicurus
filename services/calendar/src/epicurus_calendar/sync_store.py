@@ -364,12 +364,20 @@ class SelfWriteLedger:
 
     Two read shapes, and the difference matters:
 
-    - :meth:`consume` — the exact-id match. It removes the marker, so a *second*, genuinely
-      external change to the same event moments later is announced normally.
+    - :meth:`consume` — the exact-id match, and *only* a genuine single-occurrence one. It
+      removes the marker, so a *second*, genuinely external change to the same event moments
+      later is announced normally.
     - :meth:`peek` — the series match. One series-wide write comes back as one change per
       occurrence, and (with the reconcile collapsing those into a single emission) the marker
       still has to survive an occurrence arriving in a later pass, so this leaves it in place
       to expire on its own.
+
+    A series marker is therefore released by :meth:`prune`/TTL alone, never by a read — there is
+    no point at which a series write is known to be "fully observed" (#843). The caller decides
+    which shape applies from how it derived the id it is asking about, never by comparing the
+    id to the series id: the reconcile's collapse makes those equal, and reading the equality
+    as "an exact match" is what sent a series marker down :meth:`consume` and re-announced a
+    straddling series write.
     """
 
     def __init__(self, engine: AsyncEngine, *, ttl_s: float = 900.0) -> None:

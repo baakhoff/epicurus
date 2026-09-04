@@ -36,6 +36,7 @@ from epicurus_mail.cache import CachedMailbox
 from epicurus_mail.db import MailCache
 from epicurus_mail.poller import run_periodic
 from epicurus_mail.provider import (
+    MailAvailability,
     MailCursor,
     MailLabel,
     MailMessage,
@@ -75,7 +76,7 @@ def _provider_with_new_mail() -> AsyncMock:
         id="t1", subject="s-t1", sender="a@x.com", snippet="snip", date="", label_ids=["INBOX"]
     )
     provider = AsyncMock(spec=MailProvider)
-    provider.is_available = AsyncMock(return_value=True)
+    provider.availability = AsyncMock(return_value=MailAvailability(state="connected"))
     provider.current_cursor = AsyncMock(return_value=MailCursor(history_id=100))
     provider.list_labels = AsyncMock(return_value=[MailLabel(id="INBOX", title="Inbox", unread=1)])
     provider.list_threads = AsyncMock(return_value=ThreadPage(threads=[summary]))

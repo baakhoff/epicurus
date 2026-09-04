@@ -360,5 +360,35 @@ they land.
 ### Provider caveats
 
 Notes on emitters whose truth depends on an external provider — polling granularity,
-missing change feeds, provider-side dedup quirks. Empty until the first provider-backed
-emitter lands; it is a section rather than a footnote because it *will* fill up.
+missing change feeds, provider-side dedup quirks.
+
+**`mail.received`** is polled, not pushed. The [background reconcile](../services/mail.md#background-reconcile-796)
+(`epicurus_mail.poller`) ticks every `MAIL_POLL_INTERVAL_S` (default 300s / 5 min), so
+new-mail latency is bounded by that interval, not real-time — a tick is one Gmail
+history-delta call, so an idle mailbox costs ~288 calls/day, well inside quota. A restart
+does not lose the backlog: a mailbox that was synced before comes back and replays what
+arrived since the last successful sync, newest first, capped at 50 messages — but only
+while Gmail's own history retention (~1 week) still bridges the gap; a longer outage falls
+back to a silent full resync with no replay. A first-ever sync of a mailbox is always
+silent (no-firehose).
+
+**`calendar.event_created` / `event_updated` / `event_cancelled`** — the
+[reconcile loop](../services/calendar.md#reconcile-layer--external-changes-reach-the-spine-831)
+(`epicurus_calendar.sync`) ticks every `SYNC_POLL_INTERVAL_S` (default 300s, ±10% jitter),
+the same cadence and reasoning as mail's poller. It holds a Google `syncToken` per watched
+collection and asks "what changed since?" on each tick. When the token lapses, Google
+answers `410 GONE`; the reconcile reads that as `None` and falls back to a full resync that
+**diffs the fresh listing against its own cache**, so the gap is reported as the actual
+creations/edits/cancellations that happened, not "here is everything again" — replayed
+blindly or swallowed silently are both ruled out. A recurring series arrives from Google as
+one change per occurrence; a pass collapses everything sharing a `(series_id, event_type)`
+into a single emission keyed on the series, so one edit to a whole series is one event, not
+one per occurrence — the cost being that two *different* edits to occurrences of the same
+series inside one pass collapse to one emission (the quiet one is simply not announced). A
+first-ever sync of a collection is always silent (no-firehose).
+
+**`tasks.task_created`** is not fired for a recurring task's auto-materialized successor.
+`TasksRouter._materialize` (the recurrence sweep, reached from both the just-completed-task
+path and the overdue sweep) calls the inner provider's `add_task` directly, bypassing the
+router's own `add_task` — the module's only emission seam for this event. The router's own
+module docstring flags this as a known, deliberate scope limit, not an oversight.

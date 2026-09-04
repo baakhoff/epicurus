@@ -84,6 +84,16 @@ The one thing to know: this is *not* a local replacement for the Google-backed c
 themselves. There is no local mailbox, and the local calendar is deliberately simpler than
 Google's. Going Google-free means keeping the local half — not re-implementing the other one.
 
+## "Couldn't check your mail connection"
+
+If the Mail page says *"Couldn't check your mail connection"* rather than *"Google is not
+connected"*, **don't reconnect anything** — the two are different messages on purpose. This one
+means the mail module could not reach the core to look your account up, so it does not know
+whether Google is connected; it prints the reason underneath. Your account is most likely fine.
+Wait, or press **Try again**; if it persists, the core (or the network between them) is the thing
+to look at, and `Modules → mail → Status` shows the same state and reason. Mail also stops
+syncing in the background while this lasts, and says so once in the logs.
+
 ## Reconnecting
 
 **Settings → Connected accounts → Connect.** One consent flow restores everything at once: the

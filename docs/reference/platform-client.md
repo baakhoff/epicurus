@@ -74,6 +74,16 @@ provider's own API answers 404 for "no such record". The mail module is the refe
 sentence instead of raising, and its page returns an empty state instead of an error. A module
 that *has* a local fallback should degrade to it silently instead.
 
+**And translate only *those two* statuses (#835).** Everything else the token fetch can fail
+with — a 401/403 on the module→core call, a core 5xx, a connect timeout — says nothing about
+whether the operator connected the provider; it says the module could not *ask*. Folding those
+into "not connected" is a failure-attribution bug that ends with an operator disconnecting and
+reconnecting a healthy account on your advice. Carry the distinction in whatever signal the rest
+of the module reads: mail's `MailProvider.availability()` answers `connected` / `not_connected` /
+`unreachable` with a reason (`docs/services/mail.md`), the same split the core already makes for
+model keys (`missing` vs `unavailable`, #728). A three-state signal costs one extra branch; the
+two-state one costs an operator their working connection.
+
 ### `await client.get_module_model(slot) -> str | None`
 
 The operator's chosen model for one of this module's manifest **model slots** (#128,

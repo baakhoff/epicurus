@@ -453,8 +453,9 @@ the model: it persists the run + composed draft to `agent_pending_drafts` (a sib
 `{decision: "send"}`) makes the core transmit the exact draft via the module's `POST /send`
 (`ModuleRegistry.send_draft`) and resume with the outcome; **Decline** resumes with a "not sent"
 result (+ any reason). The MCP surface exposes **no** transmitting tool, so the model can compose
-but can never send — the guarantee is structural. Any future outbound channel (Phase-4 chat
-bridges) opts in by returning the same envelope and serving its own `/send`. Only the interactive
+but can never send — the guarantee is structural. Any future outbound channel (a chat bridge
+implementing its own draft-review send, say) opts in by returning the same envelope and
+serving its own `/send`. Only the interactive
 streaming path can present a draft; the **non-streaming** loop (`POST /chat`, the messaging bridge)
 has no review pane, so it degrades — the model is told the draft can't be sent from that channel
 rather than being fed the raw envelope (nothing is transmitted regardless).
@@ -1101,8 +1102,8 @@ the same row — a named follow-up, not attempted here.
 Emits **`<tenant>.llm.usage`** after every inference call — model, token counts, latency.
 No prompt/response content, no keys. Feeds observability now and SaaS metering later.
 
-**Inbound messaging consumer (ADR-0058)** — the first *inbound* NATS subscriber in core (the
-foundation for Phase 4 chat bridges). It **consumes `<tenant>.messaging.inbound`**
+**Inbound messaging consumer (ADR-0058)** — the first *inbound* NATS subscriber in core (what
+the [messaging](messaging.md) module's chat bridges run on). It **consumes `<tenant>.messaging.inbound`**
 ([`InboundMessage`](../reference/messaging.md#inboundmessage)), maps the channel to a session
 id (`<bridge>:<channel>[:<thread>]`), runs a **headless** agent turn (the same `Agent.run` the
 web uses — no SSE; the answer is collected and persisted like any turn), and **emits

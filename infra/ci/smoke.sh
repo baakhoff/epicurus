@@ -337,7 +337,7 @@ ep="$(http -X POST "http://core-app:8080/platform/v1/modules/echo/tools/echo_pin
   -H 'Content-Type: application/json' -d "$ping_body" || true)"
 printf '%s' "$ep" | grep -q "$PING_KEY" || die "echo_ping did not round-trip through core: $ep"
 
-# Delivery is asynchronous (fire-and-forget pub/sub) — poll, never assume.
+# Delivery is asynchronous (durable pull consumer, at-least-once since #841) — poll, never assume.
 i=0
 ev=""
 while [ "$i" -lt 20 ]; do

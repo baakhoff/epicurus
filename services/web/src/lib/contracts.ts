@@ -1347,6 +1347,13 @@ export const MailboxListData = z.object({
    *  The shell renders the honest empty state naming both ways out. Defaults false, so a
    *  connected mailbox — and any payload predating the flag — renders exactly as before. */
   disconnected: z.boolean().default(false),
+  /** The module couldn't find out whether an account is connected (#835) — its token probe
+   *  never got an answer out of the core. Carries the operator-readable reason, and is
+   *  **mutually exclusive** with `disconnected`: "nobody connected Google" and "we couldn't
+   *  ask" are different facts, and showing the first when the truth is the second sends the
+   *  operator to reconnect an account that was never disconnected. Absent in every other
+   *  state, the ordinary connected one included. */
+  unreachable: z.string().nullish(),
 });
 export type MailboxListData = z.infer<typeof MailboxListData>;
 

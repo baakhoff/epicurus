@@ -518,7 +518,7 @@ from Gmail's own 404, which means "no such message".
 | **`GET /pages/mailbox?thread_id=`** | **503** + the same sentence — there is no honest empty conversation to return. |
 | **`/messages/{id}`, `/resolve/message/{id}`** | **503**, *not* 404: a chip left over from a connected session must not claim the message was deleted. |
 | **`POST /send`, `…/pages/mailbox/send`, `…/mark-read`, `…/attachment`** | **503** + the sentence. |
-| **`GET /status`** | `gmail_connected: false`, `connection: "not_connected"`. |
+| **`GET /status`** | `gmail_connected: false`, `connection: "not_connected"`, `detail: "no Google account is connected for this tenant"`. |
 | **`mail.sync_failed`** | **Not emitted.** A disconnected account is an absence, not a sync failure; firing the event would raise an alert (and any automation bound to it) for a state the operator chose. `CachedMailbox.reconcile` re-raises `MailNotConnected` untouched. |
 
 **The cache is kept, not served.** The list read gates on the availability probe *before* either
@@ -552,10 +552,10 @@ no key") from `unavailable` ("OpenBao did not answer"). Mail now carries it too.
 | `state` | Means | `reason` |
 | --- | --- | --- |
 | `connected` | A token was obtained; the mailbox is usable. | `null` |
-| `not_connected` | The core answered, and it holds no Google tokens for this tenant — a 404/400 from the token endpoint, translated at the seam into `MailNotConnected`. An absence the operator chose. | `"no Google account is connected for this tenant"` |
-| `unreachable` | We could not find out. Any other status from the core (401/403/5xx) or a transport failure. | `"the core answered 503 for the Google token request…"` / `"couldn't reach the core to fetch the Google token: …"` |
+| `not_connected` | The core answered that it holds no usable Google token for this tenant — a 404/400 from the token endpoint, translated at the seam into `MailNotConnected`. Normally an absence the operator chose. **Caveat:** the core's OAuth service maps *every* secret-store failure to that same 400, so a sealed or unreachable OpenBao lands here too; splitting it at the source is a core-side follow-up. | `"no Google account is connected for this tenant"` |
+| `unreachable` | We could not find out. Any other status from the core (401/403/5xx), a transport failure, or a 2xx whose body was not a token document. | `"the core answered 503 for the Google token request…"` / `"couldn't reach the core to fetch the Google token: …"` |
 
-`availability()` is the **only** method a provider implements and it **never raises** — every
+`availability()` is the only *availability* answer a provider writes — `is_available()` is derived from it, never implemented alongside it — and it **never raises** — every
 failure it can observe is one of its states, because the callers (a background poller, a page
 gate, a polled status endpoint) all run unattended. `is_available()` survives as a thin,
 non-abstract compatibility wrapper (`state == "connected"`) for the places where a bare "is

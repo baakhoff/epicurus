@@ -583,6 +583,12 @@ class GmailProvider(MailProvider):
           operator who never connected Google.
         - A transport failure (connect/read/timeout) — the core is down, restarting, or the
           network is gone. ``unreachable`` likewise.
+        - A **2xx whose body is not the token document** — an ingress error page served as
+          HTML, a renamed field — reaches us as ``ValueError``/``KeyError`` out of
+          :meth:`~epicurus_core.PlatformClient.get_oauth_token`'s ``resp.json()["access_token"]``.
+          Neither is an ``httpx`` error, so without this arm the "never raises" contract below
+          would break on exactly the case it exists for: something answered, but not the core
+          we expected. ``unreachable`` — we still could not find out.
 
         Never raises: every branch is a state.
         """
@@ -603,6 +609,14 @@ class GmailProvider(MailProvider):
             return MailAvailability(
                 state="unreachable",
                 reason=f"couldn't reach the core to fetch the Google token: {detail}",
+            )
+        except (ValueError, KeyError, TypeError) as exc:
+            return MailAvailability(
+                state="unreachable",
+                reason=(
+                    "the core's reply to the Google-token request was unreadable"
+                    f" ({type(exc).__name__}), so the account's state is unknown"
+                ),
             )
         return MailAvailability(state="connected")
 

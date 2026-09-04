@@ -351,6 +351,12 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
         carrying ``disconnected: true`` — the shell renders its honest empty state, so opening
         Mail on a self-host that never connected Google is not an error. A ``?thread_id=``
         read has nothing honest to return and fails with 503 + the reconnect sentence.
+
+        When the module could not *find out* whether an account is connected (#835), the list
+        read returns that same empty payload carrying ``unreachable: "<reason>"`` instead, and
+        **never** ``disconnected``: the shell keys its "connect Google in Settings" panel off
+        that flag, and sending an operator to reconnect a working account is the expensive
+        mistake this distinction exists to prevent.
         """
         if page_id != MAILBOX_PAGE_ID:
             raise HTTPException(status_code=404, detail=f"no such page {page_id!r}")

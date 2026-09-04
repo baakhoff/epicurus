@@ -119,10 +119,12 @@ async def run_periodic(
     idle one. Before the three-state signal existed it was indistinguishable from "nobody
     connected Google", so the loop took the idle path: no reconcile, no log, no change of pace —
     a mailbox could stop syncing for as long as the core was down and leave nothing behind
-    saying so. Now it warns once (naming the reason), repeats at debug, and stretches the
-    interval up to :data:`MAX_UNREACHABLE_BACKOFF` so a downed core isn't probed at full rate,
-    logging the recovery when an answer comes back. ``not_connected`` keeps the silent path it
-    has always had — that one really is an operator's choice, not a fault.
+    saying so. Now it warns once per outage (naming the reason), repeats at debug, and stretches
+    the interval up to :data:`MAX_UNREACHABLE_BACKOFF` so a downed core isn't probed at full
+    rate, logging the recovery when an answer comes back. "Once" is tracked per *kind* of fault,
+    so a reconcile that was already failing cannot swallow the unreachable warning (or the other
+    way round). ``not_connected`` keeps the silent path it has always had — that one really is
+    an operator's choice, not a fault.
     """
     if poll_interval_s <= 0:
         log.info("mail background reconcile disabled", tenant=tenant)
@@ -133,7 +135,13 @@ async def run_periodic(
         interval_s=poll_interval_s,
         label=label,
     )
-    failing = False
+    # What the loop is currently unhappy about — ``"raised"`` (the reconcile itself blew up) or
+    # ``"unreachable"`` (it never got to run), and ``None`` while it is healthy. A plain bool
+    # here would let one fault silence the other's warning: a Gmail 500 followed by a core
+    # outage would log the outage at *debug*, and the warning an operator is told to grep for
+    # would never appear for that outage at all. Naming the kind means the "once" is once per
+    # fault, and a fault that changes kind announces itself.
+    failing: str | None = None
     backoff = 1.0
     while True:
         delay = poll_interval_s
@@ -143,14 +151,14 @@ async def run_periodic(
             raise
         except Exception as exc:
             backoff = 1.0
-            if failing:
+            if failing == "raised":
                 log.debug("mail background reconcile still failing", tenant=tenant, error=str(exc))
             else:
                 log.warning("mail background reconcile failed", tenant=tenant, error=str(exc))
-                failing = True
+            failing = "raised"
         else:
             if availability.state == "unreachable":
-                if failing:
+                if failing == "unreachable":
                     log.debug(
                         "mail provider still unreachable",
                         tenant=tenant,
@@ -162,16 +170,17 @@ async def run_periodic(
                         tenant=tenant,
                         reason=availability.reason,
                     )
-                    failing = True
+                failing = "unreachable"
                 delay = poll_interval_s * backoff
                 backoff = min(backoff * 2, MAX_UNREACHABLE_BACKOFF)
             else:
                 backoff = 1.0
-                if failing:
+                if failing is not None:
                     log.info(
                         "mail background reconcile recovered",
                         tenant=tenant,
                         state=availability.state,
+                        after=failing,
                     )
-                    failing = False
+                    failing = None
         await asyncio.sleep(delay)

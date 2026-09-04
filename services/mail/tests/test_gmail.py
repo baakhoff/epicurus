@@ -992,8 +992,32 @@ async def test_availability_names_the_exception_type_when_it_carries_no_message(
 @pytest.mark.parametrize(
     "side_effect",
     [
+        ValueError("Expecting value: line 1 column 1 (char 0)"),  # a 200 of HTML: json() fails
+        KeyError("access_token"),  # a 200 whose body is some other JSON document
+    ],
+)
+async def test_availability_is_unreachable_when_the_reply_is_not_a_token_document(
+    side_effect: Exception,
+) -> None:
+    # `get_oauth_token` ends in `resp.json()["access_token"]`, so a 2xx that is really an
+    # ingress error page (or a renamed field) raises ValueError/KeyError — neither of which is
+    # an httpx error. Something answered, but not the core we expected: we still could not
+    # find out, so it must not read as "nobody connected Google".
+    platform = MagicMock(spec=PlatformClient)
+    platform.get_oauth_token = AsyncMock(side_effect=side_effect)
+    availability = await GmailProvider(platform=platform, tenant_id="local").availability()
+    assert availability.state == "unreachable"
+    assert availability.reason is not None
+    assert "unreadable" in availability.reason
+
+
+@pytest.mark.parametrize(
+    "side_effect",
+    [
         httpx.ConnectError("core down"),
         httpx.ReadTimeout("slow"),
+        ValueError("not json"),
+        KeyError("access_token"),
     ],
 )
 async def test_availability_never_raises(side_effect: Exception) -> None:

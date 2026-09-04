@@ -46,10 +46,16 @@ MailAvailabilityState = Literal["connected", "not_connected", "unreachable"]
 """The three answers to "can this module reach a mailbox right now?" (#835).
 
 - ``connected`` — a token was obtained; the mailbox is usable.
-- ``not_connected`` — the core answered, definitively, that it holds no tokens for this
-  tenant's Google account. An **absence the operator chose**, not a fault.
-- ``unreachable`` — we could not find out. The core did not answer, or answered with a status
-  that is about the platform (auth, 5xx) rather than about the account.
+- ``not_connected`` — the core answered that it holds no usable token for this tenant's Google
+  account. Normally an **absence the operator chose**, not a fault. The boundary is only as
+  sharp as the core's own: its OAuth service maps *every* secret-store failure to the same
+  "not connected" 400, so a sealed or unreachable OpenBao still lands here rather than in
+  ``unreachable``. Splitting that at the source (``SecretNotFoundError`` → 400, any other
+  ``SecretError`` → 503, which this module would then read as ``unreachable`` unchanged) is a
+  core-side follow-up; the module reports what the core tells it.
+- ``unreachable`` — we could not find out. The core did not answer, answered with a status that
+  is about the platform (auth, 5xx) rather than about the account, or answered with something
+  that was not a token document at all.
 
 Two states would be one too few, and the missing one is the expensive one: reporting
 "nobody connected Google" when the truth is "we could not ask" sends the operator to reconnect

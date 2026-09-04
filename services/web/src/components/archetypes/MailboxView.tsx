@@ -471,7 +471,10 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
   // the expensive mistake is showing "Google is not connected — connect it in Settings" to
   // someone whose account is fine and whose core was merely restarting. The toolbar is hidden
   // here too (the same controls are equally unusable), but the exits are not offered.
-  const unreachable = list?.unreachable ?? null;
+  // Empty-string-safe: a reason that arrived blank must not hide the rail and toolbar while
+  // the panel below (which tests the same value for truthiness) falls through to "this folder
+  // is empty" — one predicate, so the two can't disagree.
+  const unreachable = list?.unreachable || null;
   // Whichever absence it is, there is no mailbox behind the chrome.
   const noMailbox = disconnected || unreachable !== null;
 
@@ -666,7 +669,18 @@ export function MailboxView({ module, pageId }: { module: string; pageId: string
                   disconnected — there is nothing to reconnect. It should come back on its own.
                 </p>
                 <div className="mt-3 flex items-center justify-center gap-2">
-                  <Button variant="outline" onClick={() => void listQuery.refetch()}>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      // Both reads, not just the list one: on the landing view `listData`
+                      // prefers `reconcileQuery.data` once that has landed (see above), so a
+                      // retry refreshing only the list would keep painting the *stale*
+                      // unreachable payload — the button would do nothing visible however
+                      // healthy the core had become, and the copy above promises otherwise.
+                      void listQuery.refetch();
+                      if (isLanding) void reconcileQuery.refetch();
+                    }}
+                  >
                     Try again
                   </Button>
                 </div>

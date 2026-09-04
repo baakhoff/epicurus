@@ -737,3 +737,47 @@ async def test_a_raised_tick_and_an_unreachable_tick_log_differently(
     assert "mail provider unreachable; background reconcile paused" not in recorder.events(
         "warning"
     )
+
+
+async def test_a_reconcile_failure_does_not_swallow_the_unreachable_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The "once" is once per *fault*, not once per unhappy stretch (#835).
+
+    A single boolean latch let the first fault mute the second: a Gmail 500 (the tick raises)
+    followed by the core going down logged the outage at `debug` as "still unreachable", so the
+    warning the mail service page tells an operator to look for never appeared for that outage —
+    and the eventual recovery line credited the wrong fault.
+    """
+    provider = _provider()
+    states = [
+        MailAvailability(state="connected"),  # tick 1: reconcile raises below
+        MailAvailability(state="unreachable", reason="core down"),
+        MailAvailability(state="unreachable", reason="core down"),
+    ]
+
+    async def _availability() -> MailAvailability:
+        return states.pop(0) if states else MailAvailability(state="connected")
+
+    provider.availability = AsyncMock(side_effect=_availability)
+    mailbox = AsyncMock(spec=CachedMailbox)
+    mailbox.reconcile = AsyncMock(side_effect=RuntimeError("gmail 500"))
+    recorder = _RecordingLog()
+    monkeypatch.setattr("epicurus_mail.poller.log", recorder)
+
+    await _run_ticks(
+        {
+            "mailbox": mailbox,
+            "provider": provider,
+            "tenant": TENANT,
+            "poll_interval_s": 0.01,
+        },
+        until=lambda: "mail provider still unreachable" in recorder.events("debug"),
+    )
+
+    # Both faults announced, in order, each exactly once — then the repeat drops to debug.
+    assert recorder.events("warning") == [
+        "mail background reconcile failed",
+        "mail provider unreachable; background reconcile paused",
+    ]
+    assert recorder.events("debug").count("mail provider still unreachable") >= 1

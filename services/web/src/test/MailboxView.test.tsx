@@ -630,6 +630,21 @@ it("refetches the list when the retry is pressed", async () => {
   await waitFor(() => expect(mockModulePage.mock.calls.length).toBeGreaterThan(before));
 });
 
+it("actually recovers the page when the retry finds a healthy core", async () => {
+  // The property the copy above promises ("It should come back on its own"). On the landing
+  // view the reconcile read wins over the list read, so a retry that refreshed only the list
+  // would leave the *stale* unreachable payload on screen forever, however healthy the core.
+  unreachablePage();
+  render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });
+  await screen.findByText("Couldn't check your mail connection.");
+
+  mockModulePage.mockImplementation(pageImpl); // the core is back
+  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+  expect(await screen.findByText("Project kickoff")).toBeInTheDocument();
+  expect(screen.queryByText("Couldn't check your mail connection.")).not.toBeInTheDocument();
+});
+
 it("hides the folder rail, search, and compose while unreachable too", async () => {
   unreachablePage();
   render(<MailboxView module="mail" pageId="mailbox" />, { wrapper });

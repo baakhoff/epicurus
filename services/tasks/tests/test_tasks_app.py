@@ -89,11 +89,20 @@ def test_status(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_manifest(client: TestClient) -> None:
+    # The version literal here duplicated the one in test_service.py::test_manifest and had
+    # drifted the same way (#845) — compare against the *declared* pyproject.toml version
+    # instead of pinning a literal a second time, so this copy can't drift again either.
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+
     resp = client.get("/manifest")
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "tasks"
-    assert data["version"] == "0.23.0"
+    assert data["version"] == declared
     tools = {t["name"] for t in data["tools"]}
     assert tools == {
         "tasks_list",

@@ -16,6 +16,7 @@ from epicurus_core import EventEnvelope
 from epicurus_mail.provider import (
     AttachmentContent,
     ComposedMessage,
+    MailAvailability,
     MailCategory,
     MailCategoryPreview,
     MailCursor,
@@ -250,11 +251,16 @@ class TestGetMessage:
 
 
 class TestStatus:
-    """/status reports connection from a fast token-presence check, not a live call (#209)."""
+    """/status reports connection from a fast token-presence check, not a live call (#209).
 
-    def _status_client(self, *, available: bool) -> TestClient:
+    Since #835 it reports *which* of the three states, with the reason: the panel is where an
+    operator looks when mail stops working, so it is the one surface that must never answer
+    "not connected" for a core it simply couldn't reach.
+    """
+
+    def _status_client(self, availability: MailAvailability) -> TestClient:
         provider = AsyncMock(spec=MailProvider)
-        provider.is_available = AsyncMock(return_value=available)
+        provider.availability = AsyncMock(return_value=availability)
         with (
             patch("epicurus_mail.app.GmailProvider", return_value=provider),
             patch("epicurus_mail.app.EventBus.from_settings", return_value=AsyncMock()),
@@ -265,14 +271,47 @@ class TestStatus:
         return TestClient(app, raise_server_exceptions=True)
 
     def test_reports_connected(self) -> None:
-        resp = self._status_client(available=True).get("/status")
+        resp = self._status_client(MailAvailability(state="connected")).get("/status")
         assert resp.status_code == 200
-        assert resp.json() == {"gmail_connected": True}
+        assert resp.json() == {
+            "gmail_connected": True,
+            "connection": "connected",
+            "detail": None,
+        }
 
     def test_reports_disconnected(self) -> None:
-        resp = self._status_client(available=False).get("/status")
+        availability = MailAvailability(state="not_connected", reason="no account")
+        resp = self._status_client(availability).get("/status")
         assert resp.status_code == 200
-        assert resp.json() == {"gmail_connected": False}
+        assert resp.json() == {
+            "gmail_connected": False,
+            "connection": "not_connected",
+            "detail": "no account",
+        }
+
+    def test_reports_unreachable_distinctly_from_disconnected(self) -> None:
+        # The #835 payload change: `gmail_connected` is False either way, so on its own it
+        # cannot tell an operator whose core is down from one who never connected Google.
+        availability = MailAvailability(state="unreachable", reason="couldn't reach the core")
+        resp = self._status_client(availability).get("/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["connection"] == "unreachable"
+        assert body["detail"] == "couldn't reach the core"
+        assert body["gmail_connected"] is False
+
+    def test_gmail_connected_keeps_its_old_meaning(self) -> None:
+        # The boolean is a compatibility field: true for `connected` and nothing else, so a
+        # reader that only knows the old payload is never told a mailbox is usable when it
+        # isn't. It renders alongside the state rather than being replaced by it.
+        for state, expected in (
+            ("connected", True),
+            ("not_connected", False),
+            ("unreachable", False),
+        ):
+            availability = MailAvailability(state=state, reason=None)  # type: ignore[arg-type]
+            body = self._status_client(availability).get("/status").json()
+            assert body["gmail_connected"] is expected
 
 
 class TestSend:
@@ -678,7 +717,9 @@ class TestGoogleNotConnected:
         for method in ("read", "get_thread", "transmit", "set_unread", "get_attachment"):
             setattr(provider, method, AsyncMock(side_effect=MailNotConnected("not connected")))
         provider.compose_reply = AsyncMock(side_effect=MailNotConnected("not connected"))
-        provider.is_available = AsyncMock(return_value=False)
+        provider.availability = AsyncMock(
+            return_value=MailAvailability(state="not_connected", reason="no Google account")
+        )
         return provider
 
     def _assert_reconnect_hint(self, resp: httpx2.Response) -> None:
@@ -689,7 +730,9 @@ class TestGoogleNotConnected:
     def test_status_reports_disconnected(self) -> None:
         resp = _client_with_provider(self._provider()).get("/status")
         assert resp.status_code == 200
-        assert resp.json() == {"gmail_connected": False}
+        body = resp.json()
+        assert body["gmail_connected"] is False
+        assert body["connection"] == "not_connected"
 
     def test_the_page_is_an_honest_empty_state_not_an_error(self) -> None:
         with _client_with_provider(self._provider()) as client:
@@ -761,3 +804,52 @@ class TestGoogleNotConnected:
         self._assert_reconnect_hint(
             client.get("/pages/mailbox/attachment?message_id=m1&attachment_id=a1")
         )
+
+
+class TestCoreUnreachable:
+    """The HTTP surfaces when the module can't find out whether Google is connected (#835).
+
+    The failure this class exists to prevent is not a crash — it is a *plausible lie*. With
+    `is_available()` reading every token-fetch failure as False, a core that was restarting
+    produced a page that said "Google is not connected. Connect it in Settings", and an
+    operator who followed that advice would disconnect and reconnect a perfectly healthy
+    account. Everything below asserts the module says "I couldn't check" instead.
+    """
+
+    REASON = "couldn't reach the core to fetch the Google token: core down"
+
+    def _provider(self) -> MailProvider:
+        provider = AsyncMock(spec=MailProvider)
+        provider.availability = AsyncMock(
+            return_value=MailAvailability(state="unreachable", reason=self.REASON)
+        )
+        return provider
+
+    def test_status_names_the_state_and_the_reason(self) -> None:
+        resp = _client_with_provider(self._provider()).get("/status")
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "gmail_connected": False,
+            "connection": "unreachable",
+            "detail": self.REASON,
+        }
+
+    def test_the_page_carries_the_reason_and_never_claims_a_disconnect(self) -> None:
+        with _client_with_provider(self._provider()) as client:
+            resp = client.get("/pages/mailbox")
+        assert resp.status_code == 200  # still not an error: plain navigation must not break
+        body = resp.json()
+        assert body["unreachable"] == self.REASON
+        # The whole point of the split — the flag that drives "connect Google in Settings"
+        # must be absent, or the shell renders exactly the misdiagnosis this issue is about.
+        assert "disconnected" not in body
+        assert body["threads"] == [] and body["labels"] == []
+
+    def test_the_page_serves_no_cached_mail_and_touches_no_provider(self) -> None:
+        provider = self._provider()
+        with _client_with_provider(provider) as client:
+            client.get("/pages/mailbox")
+            resp = client.get("/pages/mailbox?reconcile=1")
+        assert resp.json()["unreachable"] == self.REASON
+        provider.list_threads.assert_not_awaited()  # type: ignore[attr-defined]
+        provider.changed_threads_since.assert_not_awaited()  # type: ignore[attr-defined]

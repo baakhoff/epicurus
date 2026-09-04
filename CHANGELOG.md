@@ -12,6 +12,24 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Mail no longer blames Google when the problem is the core** (#835) — the mail module's
+  availability check returned a bool and read *any* failure of the token fetch as "not
+  available", so an unreachable core, an expired module→core token and "nobody has connected
+  Google" were one indistinguishable answer. Every surface then rendered that answer as the
+  not-connected one: a core that was merely restarting produced a Mail page reading *"Google is
+  not connected. Connect it in Settings"*, and an operator who followed that advice would
+  disconnect and reconnect an account that was fine. The provider now answers with three states
+  and a reason — `connected`, `not_connected` (the core answered, and it holds no Google tokens),
+  `unreachable` (we could not find out) — the same failure-attribution split the core already
+  makes for model keys after the #728 misdiagnosis. `/status` reports which state and why; the
+  mailbox page carries `unreachable` instead of `disconnected`, and the shell draws it as its own
+  empty state naming the actual reason, offering a retry and pointedly *not* a trip to Settings;
+  `mail_send` refuses with advice that fits; and the background poller stops treating an
+  unreachable core as an idle one — it warns once with the reason and backs off, instead of
+  silently skipping every tick for as long as the outage lasts. `is_available()` survives as a
+  thin compatibility wrapper, and tokens still come only from `PlatformClient.get_oauth_token`
+  (ADR-0020). `mail` 0.19.1→0.20.0 (MINOR) · `web` 0.137.1→0.138.0 (MINOR).
+
 - **Fixed a pre-existing race in the tasks board-backlog test** (#847) — the booted-lifespan
   fixture runs the real app, whose lead-time scheduler ticks once at boot and independently
   calls `list_tasks(tenant, scope="open")` in the background (#664); the backlog test asserted

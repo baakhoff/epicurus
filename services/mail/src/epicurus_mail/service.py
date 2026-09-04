@@ -24,6 +24,10 @@ turn can ask about one of them without knowing any provider query syntax.
 Mail is provider-only: with **no Google account connected** (#764) every tool answers with
 :data:`_NOT_CONNECTED_HINT` — one model-actionable sentence naming both ways out — instead of
 raising, and the page falls back to :func:`mailbox_disconnected`.
+When the module cannot even *ask* whether an account is connected (#835) that is a third,
+separate answer: :func:`unreachable_hint` and :func:`mailbox_unreachable` say the core is
+unreachable and that nothing needs reconnecting, rather than repeating the not-connected
+wording and sending an operator to fix an account that was never broken.
 """
 
 from __future__ import annotations
@@ -78,6 +82,23 @@ _NOT_CONNECTED_HINT = (
     " Settings → Connected accounts, or disable the mail module if you don't use Gmail."
 )
 
+# Shown when the module cannot reach the core to find out whether an account is connected
+# (#835) — the third availability state. Everything about this hint is the *opposite* of
+# _NOT_CONNECTED_HINT's advice, which is exactly why the two must never be interchanged: the
+# account is probably fine, there is nothing to reconnect and nothing to disable, and the only
+# useful action is to wait. Say so, name the reason, and do not offer a Settings trip that
+# would waste the operator's time and might disconnect a working account.
+_UNREACHABLE_HINT = (
+    "Couldn't tell whether Google is connected — {reason}. That's a problem reaching the core,"
+    " not a missing account, so nothing needs reconnecting; the mailbox should come back on"
+    " its own once the core answers again."
+)
+
+# The reason clause used when a provider reports ``unreachable`` without one. A provider is
+# supposed to supply it, but a hint reading "— reason unknown" is still a truthful sentence,
+# where a bare "— ." is a bug on screen.
+_UNREACHABLE_FALLBACK_REASON = "the reason wasn't reported"
+
 # Shown when ``messages.modify`` is rejected for lack of scope — the operator connected
 # Google before mail required ``gmail.modify`` and must reconnect to grant it.
 _SCOPE_HINT = (
@@ -117,6 +138,12 @@ _SCOPE_HINT_READ = (
     "Couldn't reach Gmail: the connected Google account is missing the Gmail permission this"
     " needs. Reconnect Google (Settings → Connect) to grant it."
 )
+
+
+def unreachable_hint(reason: str | None) -> str:
+    """The operator/model-facing sentence for the ``unreachable`` availability state (#835)."""
+    return _UNREACHABLE_HINT.format(reason=reason or _UNREACHABLE_FALLBACK_REASON)
+
 
 # Gmail returns 403 both for a missing OAuth scope and for per-user/per-day rate limiting
 # (``usageLimits``) — the reasons below are Google's **legacy** Discovery-API error codes for
@@ -218,7 +245,7 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.19.1",
+        version="0.20.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
@@ -439,9 +466,14 @@ def build_module(provider: MailProvider) -> EpicurusModule:
         # without this it would happily hand back a draft that can never be delivered, and
         # the operator would discover the missing connection at Confirm time (#764). Cheap
         # credential probe (#209), not a live Gmail call; refusing here keeps the draft-first
-        # split-pane from ever opening on a message with nowhere to go.
-        if not await provider.is_available():
+        # split-pane from ever opening on a message with nowhere to go. Both non-connected
+        # states refuse, but with their own wording (#835): a draft is equally undeliverable
+        # either way, while the advice ("connect Google" vs "wait, nothing is broken") is not.
+        availability = await provider.availability()
+        if availability.state == "not_connected":
             return _NOT_CONNECTED_HINT
+        if availability.state == "unreachable":
+            return unreachable_hint(availability.reason)
         message = ComposedMessage(to=recipient, subject=subject, body=body)
         return draft_review(
             kind="mail",
@@ -707,6 +739,36 @@ def mailbox_disconnected(label: str | None = None) -> dict[str, Any]:
     reconnect restores the mailbox instantly (no resync, no restart), while a disconnected
     module shows nothing it no longer has permission to show.
     """
+    return {**_empty_mailbox(label), "disconnected": True}
+
+
+def mailbox_unreachable(label: str | None = None, reason: str | None = None) -> dict[str, Any]:
+    """The `mailbox` list payload for "we couldn't find out whether Google is connected" (#835).
+
+    The same structurally-valid empty list as :func:`mailbox_disconnected`, under a **different
+    flag**, because it wants the opposite empty state. ``disconnected: true`` makes the shell
+    say "Google is not connected — connect it in Settings"; saying that when the truth is that
+    the core didn't answer sends the operator to reconnect a working account, and a disconnect/
+    reconnect round trip is not a harmless thing to talk someone into. So this carries
+    ``unreachable`` — a non-empty reason clause, present only in this state — and never
+    ``disconnected``.
+
+    A shell that only knows about ``disconnected`` degrades to the ordinary "this folder is
+    empty" view: wrong, but wrong in the harmless direction, and it never puts the
+    not-connected words on screen. Deliberately not an HTTP error, for the same reason
+    :func:`mailbox_disconnected` isn't: an unreachable core is transient, and the page should
+    recover on its next poll rather than making plain navigation look broken.
+    """
+    return {**_empty_mailbox(label), "unreachable": reason or _UNREACHABLE_FALLBACK_REASON}
+
+
+def _empty_mailbox(label: str | None) -> dict[str, Any]:
+    """A structurally-valid, *empty* `mailbox` list read — no rail, no tabs, no threads.
+
+    The shared body of the two no-mailbox payloads above; each adds its own single flag. The
+    connected path never routes through here, and neither flag appears on it, so a working
+    mailbox carries no absence keys at all.
+    """
     return {
         "title": "Mail",
         "labels": [],
@@ -716,7 +778,6 @@ def mailbox_disconnected(label: str | None = None) -> dict[str, Any]:
         "active_tab": "",
         "threads": [],
         "next_cursor": None,
-        "disconnected": True,
     }
 
 
@@ -759,6 +820,11 @@ async def build_mailbox_list(
     either read path runs, so the page states the honest reason instead of erroring or
     serving cached rows the module can no longer refresh.
 
+    **Unreachable (#835).** When the availability probe can't reach the core at all it
+    short-circuits to :func:`mailbox_unreachable` instead — the same empty list, carrying
+    ``unreachable: "<reason>"``. Same short-circuit, deliberately different flag: the page must
+    not tell an operator to reconnect Google because the core happened to be restarting.
+
     Args:
         provider: The active mail backend.
         mailbox: The cache orchestrator for the landing fast path (``None`` → always live).
@@ -775,9 +841,14 @@ async def build_mailbox_list(
     # the rows it synced while it was connected — the page would look fine and be a lie.
     # One cheap credential probe (#209, the same call `/status` and the poller make), placed
     # ahead of both paths so the live path gets the honest answer too rather than a raw 404
-    # from a token fetch mid-fan-out.
-    if not await provider.is_available():
+    # from a token fetch mid-fan-out. Both no-mailbox states stop here, under their own flag
+    # (#835): the gate answering "no" is not the same fact as the gate being unable to answer,
+    # and the empty state each wants is the other one's bad advice.
+    availability = await provider.availability()
+    if availability.state == "not_connected":
         return mailbox_disconnected(active)
+    if availability.state == "unreachable":
+        return mailbox_unreachable(active, availability.reason)
     capped = max(1, min(limit, MAILBOX_PAGE_SIZE))
     q = (query or "").strip() or None
     # Tabs sit over the Inbox only, and never over a search (a search spans every folder, so

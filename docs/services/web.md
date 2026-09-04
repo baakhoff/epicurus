@@ -463,6 +463,14 @@ rate-limit hint), and deliberately not the generic "This folder is empty" (which
 predating it — renders exactly as before. The pattern generalizes: a provider-only archetype
 page should name the absence *in its data* rather than raise, and let the shell say it.
 
+**And a module that cannot *check* is a third state, not the same one (#835).** `mailbox` also
+carries `unreachable: "<reason>"` — mutually exclusive with `disconnected` — for when the module
+could not reach the core to find out whether Google is connected at all. `MailboxView` draws it
+as its own empty state: **"Couldn't check your mail connection"**, the module's reason verbatim,
+a **Try again**, and pointedly *no* route to Settings. Showing the disconnected panel here would
+tell an operator whose account is fine to go reconnect it, which is worse than saying nothing.
+Same rule as above, one level deeper: name the absence in the data *and* say which absence it is.
+
 **Caching posture: no cold-mount flash on a view/filter switch (#712).** Every one of these
 archetypes' list-shaped queries — mailbox's folder/search/page list, the browser's
 directory/search listing, the editor's file tree and open document, calendar's date-range

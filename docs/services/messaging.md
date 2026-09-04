@@ -7,8 +7,8 @@ owns the turn in between. It is **provider-pluggable** (ADR-0016) and runs **eve
 once** (ADR-0062): the built-in **loopback** echo bridge is always on, and each real bridge is
 dormant until the operator connects it with a bot token. Host port **8093**.
 
-This module is the Phase-4 foundation; the bridges fan out as providers — **Discord (#366)**
-has landed, with Telegram (#365), Slack (#367) and WhatsApp (#368) to follow. Connect and
+The bridges fan out as providers — **Discord (#366)** and **Telegram (#365)** have landed,
+with **Slack (#367)** and **WhatsApp (#368)** targeted for milestone 2.0.0. Connect and
 manage them from the web shell's **Settings → Chat bridges** surface (#369).
 
 ## What it is

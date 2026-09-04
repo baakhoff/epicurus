@@ -33,6 +33,8 @@ from epicurus_calendar.providers.base import (
 from epicurus_calendar.spine import event_change_hash
 from epicurus_calendar.sync import (
     CalendarReconciler,
+    _collapse,
+    _Decision,
     _next_sleep,
     run_periodic,
     tick,
@@ -657,6 +659,49 @@ async def test_creations_and_cancellations_of_one_series_stay_separate_events(
 
     assert await reconciler.reconcile() == 2
     assert sorted(bus.types()) == ["calendar.event_cancelled", "calendar.event_created"]
+
+
+# ── what a collapsed decision's id *means* (#843) ────────────────────────────
+
+
+def _decision(event_id: str, *, series: str | None = None, day: int = 1) -> _Decision:
+    return _Decision(
+        event_type="calendar.event_created",
+        event_id=event_id,
+        series_id=series,
+        title="Weekly",
+        payload={},
+        start=datetime(2026, 1, day, 9, tzinfo=UTC),
+    )
+
+
+def test_a_collapsed_series_group_is_flagged_so_suppression_can_tell() -> None:
+    """Collapsing re-keys the emission onto the series id, which makes ``event_id ==
+    series_id`` — so the flag is the *only* thing left that distinguishes a series id from an
+    occurrence id downstream. Without it the self-write ledger consumed the series marker."""
+    [collapsed] = _collapse(
+        [
+            _decision("s1_1", series="s1", day=1),
+            _decision("s1_8", series="s1", day=8),
+        ]
+    )
+    assert (collapsed.event_id, collapsed.series_id) == ("s1", "s1")
+    assert collapsed.collapsed is True
+
+
+def test_a_single_occurrence_decision_is_not_flagged() -> None:
+    """One occurrence moved, so the decision is about that occurrence and its own marker — the
+    exact-id match that must still be consumed."""
+    [single] = _collapse([_decision("s1_1", series="s1")])
+    assert (single.event_id, single.collapsed) == ("s1_1", False)
+
+
+def test_a_group_formed_on_a_repeated_event_id_is_not_a_series() -> None:
+    """A group can also form without a series at all — one delta mentioning the same one-off
+    event twice. Its key is that event's own id, so its marker is an ordinary exact-id one and
+    the flag must stay off."""
+    [collapsed] = _collapse([_decision("e1", day=1), _decision("e1", day=2)])
+    assert (collapsed.event_id, collapsed.collapsed) == ("e1", False)
 
 
 # ── bounds and degradation ───────────────────────────────────────────────────

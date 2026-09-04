@@ -31,10 +31,14 @@ records a short-lived marker in the self-write ledger — keyed
 ``"<event type>|<provider>:<id>"``, and for a series-scoped write the series id too — and this
 module checks that ledger before every emission. An exact-id hit is *consumed* (so a genuinely
 external change to the same event ten minutes later is announced normally); a series-id hit is
-only *peeked* (one series-wide write comes back as one change per occurrence). The key
-deliberately excludes the change hash the ``dedup_key`` carries: suppression must survive the
-provider normalising content on the way back, and must match across the series/occurrence
-identity shift. The races this accepts are recorded in the ADR.
+only *peeked* (one series-wide write comes back as one change per occurrence, and those
+occurrences may straddle two passes — so the marker stays until its TTL expires it, #843). Which
+of the two a decision gets is decided by the ``collapsed`` flag, not by comparing ids: collapsing
+re-keys a group onto the series id, which makes ``event_id == series_id`` and would otherwise
+send the *series* marker down the consume path. The key deliberately excludes the change hash
+the ``dedup_key`` carries: suppression must survive the provider normalising content on the way
+back, and must match across the series/occurrence identity shift. The races this accepts are
+recorded in the ADR.
 
 **No-firehose, second form.** A recurring series arrives from Google as one change per
 occurrence. Emitting 30 ``event_created``s because someone added a weekly stand-up would be
@@ -129,6 +133,13 @@ class _Decision(NamedTuple):
     title: str
     payload: dict[str, Any]
     start: datetime
+    # Set by :func:`_collapse` when several occurrences of one series were folded into this
+    # single emission and it was therefore re-keyed onto the **series** id. It is the only way
+    # :meth:`CalendarReconciler._suppressed` can still tell a series id from an occurrence id
+    # afterwards — and the difference decides whether the ledger marker is peeked or consumed
+    # (#843). Never set by :func:`_classify`: a change straight off the provider is always about
+    # the id it names.
+    collapsed: bool = False
 
 
 class CalendarReconciler:
@@ -384,17 +395,33 @@ class CalendarReconciler:
     async def _suppressed(self, provider_name: str, decision: _Decision) -> bool:
         """Whether this module already announced *decision* at the provider-write seam.
 
-        Exact-id first and **consumed**: once a write's marker has done its job, a later,
-        genuinely external change to the same event must be announced normally. The series
-        marker is only **peeked**, because one series-scoped write legitimately matches many
-        occurrences and must keep matching until it expires.
+        Two shapes, and which one applies is decided by *how the decision got its id* — not by
+        comparing ids, which is the trap #843 records. A **collapsed** decision has been re-keyed
+        onto the series id by :func:`_collapse`, so its ``event_id`` *is* a series id and its
+        marker is only **peeked**: one series-scoped write legitimately matches many occurrences,
+        and those occurrences can straddle two passes (the delta paginates, an occurrence is
+        edited later in the window, a restart splits the feed). Consuming it there — which is
+        what a plain exact-id comparison did, because collapsing makes ``event_id ==
+        series_id`` — deletes the marker on the first pass and re-announces the same write on the
+        second.
+
+        Anything not collapsed is a genuine single-occurrence match and is **consumed**: once a
+        write's marker has done its job, a later, genuinely external change to the same event
+        must be announced normally. A single occurrence of a series falls back to peeking the
+        series marker when it carries no marker of its own.
+
+        A peeked series marker is never released by a read — it expires on its own TTL
+        (``SYNC_SELF_WRITE_TTL_S``, 15 minutes; pruned once per pass). There is no "the series
+        write is fully observed" moment to release it at: nothing tells us how many occurrences
+        one series write will come back as, so an explicit release would have to guess, and
+        guessing low is exactly the re-announcement this fixes.
         """
         if self._ledger is None:
             return False
-        if await self._ledger.consume(
-            tenant=self._tenant,
-            key=self_write_key(decision.event_type, provider_name, decision.event_id),
-        ):
+        key = self_write_key(decision.event_type, provider_name, decision.event_id)
+        if decision.collapsed:
+            return await self._ledger.peek(tenant=self._tenant, key=key)
+        if await self._ledger.consume(tenant=self._tenant, key=key):
             return True
         series_id = decision.series_id
         if series_id is None or series_id == decision.event_id:
@@ -520,18 +547,26 @@ def _collapse(decisions: Sequence[_Decision]) -> list[_Decision]:
     pass yield one event, not two. Both cache rows are still updated, so the quiet one is not
     re-announced later — it is simply not announced. That trade is deliberate; the alternative
     is an unbounded burst for a single click in Google's UI.
+
+    A re-keyed group is flagged ``collapsed`` so suppression can still tell what its id means
+    (#843). The flag is set only when the group key really came from a *series* id: a group that
+    formed on a repeated occurrence id (one delta mentioning the same event twice) is keyed on
+    that event's own id, and its ledger marker is an ordinary exact-id one to consume.
     """
     grouped: dict[tuple[str, str], list[_Decision]] = {}
     for decision in decisions:
         key = (decision.series_id or decision.event_id, decision.event_type)
         grouped.setdefault(key, []).append(decision)
     collapsed: list[_Decision] = []
-    for (series_key, _), group in grouped.items():
+    for (group_key, _), group in grouped.items():
         first = min(group, key=lambda d: d.start)
         if len(group) == 1:
             collapsed.append(first)
         else:
-            collapsed.append(first._replace(event_id=series_key, series_id=series_key))
+            series_scoped = any(d.series_id == group_key for d in group)
+            collapsed.append(
+                first._replace(event_id=group_key, series_id=group_key, collapsed=series_scoped)
+            )
     collapsed.sort(key=lambda d: (d.start, d.event_id))
     return collapsed
 

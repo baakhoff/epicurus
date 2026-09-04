@@ -10,10 +10,12 @@ isolation — the policy's own edge cases get their own unit tests at the top.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from qdrant_client.models import Distance, VectorParams
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_knowledge.db import NoteIndex
@@ -89,6 +91,8 @@ def test_trip_and_clear_toggle_the_observable_state() -> None:
 
 # ── The indexer, over a real vault ────────────────────────────────────────────
 
+EMBED_DIM = 4
+
 
 def _fake_vectors(texts: list[str]) -> list[list[float]]:
     return [[float(i), 0.0, 0.0, 0.0] for i in range(len(texts))]
@@ -101,9 +105,20 @@ def _platform() -> Any:
     return platform
 
 
+def _collection_info(dim: int) -> Any:
+    """A ``get_collection`` response carrying one unnamed vector config of size *dim*."""
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            params=SimpleNamespace(vectors=VectorParams(size=dim, distance=Distance.COSINE))
+        )
+    )
+
+
 def _qdrant() -> Any:
     qdrant = MagicMock()
     qdrant.collection_exists = AsyncMock(return_value=True)
+    # Matches the fake embedder's width, so the dimension guard (#865) never heals here.
+    qdrant.get_collection = AsyncMock(return_value=_collection_info(EMBED_DIM))
     qdrant.create_collection = AsyncMock()
     qdrant.upsert = AsyncMock()
     qdrant.delete = AsyncMock()

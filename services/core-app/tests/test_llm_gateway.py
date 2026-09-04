@@ -461,6 +461,185 @@ async def test_embed_refuses_when_paused() -> None:
         await _gateway(power).embed(["text"])
 
 
+# ── Hosted embedding models (#865) ────────────────────────────────────────────
+
+
+def _embed_secrets() -> _FakeSecrets:
+    return _FakeSecrets(
+        {
+            "llm/openrouter": {"api_key": "or-secret"},
+            "llm/openai": {"api_key": "sk-secret"},
+            "llm/custom": {"api_key": "cust-secret", "api_base": "http://vllm:8000/v1"},
+        }
+    )
+
+
+async def test_hosted_embed_calls_the_provider_with_its_key_and_no_ollama_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A hosted embedding id takes the provider path: LiteLLM's own id, the tenant's key from
+    # OpenBao, and none of the local runtime options (num_ctx/keep_alive/num_gpu describe an
+    # Ollama allocation and mean nothing to a provider). No api_base either — only the generic
+    # OpenAI-compatible provider carries one.
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.1, 0.2, 0.3]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    settings = await _fresh_model_settings()
+    # Settings that WOULD apply to a local model of this name must not leak onto the wire.
+    await settings.set("local", "text-embedding-3-small", ModelSettings(keep_alive="30m"))
+    gateway = _gateway(secrets=_embed_secrets(), model_settings=settings)
+
+    vectors = await gateway.embed(["hello"], model="gpt/text-embedding-3-small")
+
+    assert vectors == [[0.1, 0.2, 0.3]]
+    assert captured["model"] == "openai/text-embedding-3-small"
+    assert captured["api_key"] == "sk-secret"
+    assert captured["input"] == ["hello"]
+    assert "api_base" not in captured
+    assert not {"num_ctx", "keep_alive", "num_gpu"} & set(captured)
+
+
+async def test_openrouter_embed_keeps_the_two_slash_model_id_intact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An OpenRouter model id carries a vendor segment of its own, so only the first slash is
+    # the provider alias — splitting on every slash would send a truncated model name.
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    await _gateway(secrets=_embed_secrets()).embed(
+        ["hi"], model="openrouter/openai/text-embedding-3-small"
+    )
+    assert captured["model"] == "openrouter/openai/text-embedding-3-small"
+    assert captured["api_key"] == "or-secret"
+
+
+async def test_custom_hosted_embed_reads_its_api_base_from_the_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    await _gateway(secrets=_embed_secrets()).embed(["hi"], model="custom/bge-m3")
+    assert captured["model"] == "openai/bge-m3"
+    assert captured["api_base"] == "http://vllm:8000/v1"
+
+
+async def test_hosted_embed_without_a_stored_key_fails_like_the_chat_path() -> None:
+    # Same error class the chat path raises for an unconfigured provider, so both surfaces
+    # report "no key for this provider" identically.
+    with pytest.raises(SecretNotFoundError):
+        await _gateway().embed(["hi"], model="openrouter/openai/text-embedding-3-small")
+
+
+async def test_hosted_embed_still_serves_while_the_runtime_is_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pause (ADR-0005) protects the local GPU, so it must not reach a hosted provider — the
+    # same rule _is_available applies to chat. Memory recall and module indexing keep working.
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        return _Response({"data": [{"embedding": [0.5]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    power = PowerController()
+    power.pause()
+    gateway = _gateway(power, secrets=_embed_secrets())
+
+    assert await gateway.embed(["hi"], model="gpt/text-embedding-3-small") == [[0.5]]
+    # mark_active is a no-op while paused, so a hosted embed can never wake the runtime.
+    assert power.state is PowerState.PAUSED
+    # A *local* embed on the same paused gateway is still refused.
+    with pytest.raises(GatewayPausedError):
+        await gateway.embed(["hi"], model="nomic-embed-text")
+
+
+async def test_hosted_embed_usage_event_carries_the_tenant_and_the_real_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Constraint #1: a metered call names its tenant. A hosted embed must meter exactly like a
+    # local one — under the caller's tenant, not the default, and under the model truly called.
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    bus = _FakeBus()
+    await _gateway(bus=bus, secrets=_embed_secrets()).embed(
+        ["hi"], model="openrouter/openai/text-embedding-3-small", tenant_id="tenant-x"
+    )
+    subject, payload, tenant_id = bus.published[0]
+    assert subject == "llm.usage"
+    assert tenant_id == "tenant-x"
+    assert payload["tenant"] == "tenant-x"
+    assert payload["model"] == "openrouter/openai/text-embedding-3-small"
+
+
+async def test_hosted_embed_is_bounded_by_the_same_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One bound for both classes rather than a per-provider rule (#466).
+    async def slow_aembedding(**kwargs: Any) -> _Response:
+        await asyncio.sleep(10)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", slow_aembedding)
+    with pytest.raises(TimeoutError):
+        await _gateway(timeout=0.05, secrets=_embed_secrets()).embed(
+            ["hi"], model="gpt/text-embedding-3-small"
+        )
+
+
+async def test_explicit_local_alias_reaches_the_runtime_as_a_bare_model_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `local/nomic-embed-text` used to be pasted verbatim behind `ollama/`, asking the runtime
+    # for a model called "local/nomic-embed-text". Classifying through the registry strips the
+    # alias the same way the chat path does.
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    await _gateway().embed(["hi"], model="local/nomic-embed-text")
+    assert captured["model"] == "ollama/nomic-embed-text"
+    assert captured["api_base"] == "http://ollama:11434"
+
+
+async def test_local_embed_still_sends_its_per_model_ollama_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The local path is untouched by the hosted split: the operator's settings sheet still
+    # drives the runtime options for a local embedding model.
+    captured: dict[str, Any] = {}
+
+    async def fake_aembedding(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"data": [{"embedding": [0.0]}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    settings = await _fresh_model_settings()
+    await settings.set(
+        "local", "nomic-embed-text", ModelSettings(context_window=1024, keep_alive="30m")
+    )
+    await _gateway(model_settings=settings).embed(["hi"], model="nomic-embed-text")
+    assert captured["model"] == "ollama/nomic-embed-text"
+    assert captured["num_ctx"] == 1024
+    assert captured["keep_alive"] == "30m"
+
+
 async def test_embed_times_out_via_asyncio_wait_for(monkeypatch: pytest.MonkeyPatch) -> None:
     # LiteLLM's ollama embeddings dispatch (llms/ollama/completion/handler.py's
     # ollama_aembeddings) never threads a timeout= kwarg through to its HTTP call — unlike the

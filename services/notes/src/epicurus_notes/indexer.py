@@ -57,7 +57,10 @@ class NotesIndexer:
         self._tenant = tenant
         self._max_chars = chunk_max_chars
         self._collection = scope_collection(collection_base, tenant)
-        self._ensured = False
+        # The vector size this collection was last confirmed to hold, or ``None`` when unknown
+        # (first use, or after we dropped it). Caching the *size* rather than a "did we check"
+        # flag is what lets a switched embedding model be noticed on the next write (#865).
+        self._dim: int | None = None
 
     @property
     def collection(self) -> str:
@@ -65,14 +68,49 @@ class NotesIndexer:
         return self._collection
 
     async def _ensure_collection(self, dim: int) -> None:
-        if self._ensured:
+        """Create the collection, or recreate it when the embedding model's size changed.
+
+        A collection is created once at whatever size the embedding model of the day produced
+        (``nomic-embed-text`` is 768-d; a hosted model is typically 1536-d or more). Switch the
+        model and every later upsert carries vectors Qdrant rejects outright — an opaque
+        dimension error no retry can fix (#865). So a mismatch is healed here: the collection
+        is dropped and recreated at the new size, and the caller's upsert lands in it.
+
+        Postgres is the source of truth for notes, so nothing is *lost* by that — but the other
+        notes' vectors are, until they are written again. That is why the recreate logs loudly
+        and names the cure: the Models page's **Re-embed everything** (#332), which calls this
+        module's ``POST /reindex`` and rebuilds the whole collection from the database. Nothing
+        queries this collection today (Notes is attach-only, see the module docstring), so a
+        window of missing vectors degrades nothing in the meantime.
+        """
+        if self._dim == dim:
             return
         if not await self._qdrant.collection_exists(self._collection):
             await self._qdrant.create_collection(
                 self._collection,
                 vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
             )
-        self._ensured = True
+            self._dim = dim
+            return
+        info = await self._qdrant.get_collection(self._collection)
+        vectors = info.config.params.vectors
+        # A named-vector config reports a mapping, not one VectorParams; we never create those,
+        # so anything unrecognised is left alone rather than dropped on a guess.
+        current = vectors.size if isinstance(vectors, VectorParams) else None
+        if current is not None and current != dim:
+            log.warning(
+                "embedding dimension changed since the notes collection was created; "
+                "recreating it — run 'Re-embed everything' to rebuild every note's vectors",
+                collection=self._collection,
+                old_dim=current,
+                new_dim=dim,
+            )
+            await self._qdrant.delete_collection(self._collection)
+            await self._qdrant.create_collection(
+                self._collection,
+                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+            )
+        self._dim = dim
 
     async def _delete_vectors(self, slug: str) -> None:
         """Remove every Qdrant point whose payload ``slug`` matches."""
@@ -128,6 +166,7 @@ class NotesIndexer:
         """
         if await self._qdrant.collection_exists(self._collection):
             await self._qdrant.delete_collection(self._collection)
+        self._dim = None  # the collection is gone; the next write recreates it at today's size
         total = 0
         for slug, content in notes:
             total += await self.index_note(slug, content)

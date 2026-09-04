@@ -68,3 +68,30 @@ def test_is_hosted_rejects_provider_only_id() -> None:
     assert not registry.is_hosted("claude/   ")  # a whitespace-only model part is empty too
     # A real model part after the prefix is still hosted.
     assert registry.is_hosted("claude/opus-4")
+
+
+def test_openrouter_alias_routes_to_litellms_openrouter_provider() -> None:
+    # First-class rather than routed through `custom` (#865): it keeps the single generic
+    # OpenAI-compatible slot free and lets LiteLLM's own openrouter dispatch (and its
+    # context/cost map) apply.
+    litellm_model, provider = registry.resolve("openrouter/anthropic/claude-sonnet-4.6")
+    assert litellm_model == "openrouter/anthropic/claude-sonnet-4.6"
+    assert not provider.is_local
+    assert provider.secret_path == "llm/openrouter"
+    assert not provider.needs_base_url
+
+
+def test_only_the_first_slash_separates_alias_from_model() -> None:
+    # An aggregator names models with a slash of their own, so the id has two. Splitting on
+    # every slash would hand LiteLLM a truncated model name; `partition` keeps it whole.
+    litellm_model, provider = registry.resolve("openrouter/openai/text-embedding-3-small")
+    assert litellm_model == "openrouter/openai/text-embedding-3-small"
+    assert provider.secret_path == "llm/openrouter"
+    assert registry.is_hosted("openrouter/openai/text-embedding-3-small")
+    # A slash inside the model part of any provider survives the same way.
+    assert registry.resolve("custom/org/model")[0] == "openai/org/model"
+
+
+def test_is_hosted_still_rejects_a_bare_openrouter_prefix() -> None:
+    assert not registry.is_hosted("openrouter/")
+    assert not registry.is_hosted("openrouter/  ")

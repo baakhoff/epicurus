@@ -208,6 +208,43 @@ async def test_embed_falls_back_to_env_default_when_global_embed_default_unset()
     assert gw.embed_calls[0]["model"] == "nomic-embed-text"
 
 
+async def test_embed_passes_a_hosted_model_override_through_untouched() -> None:
+    # A module's per-module embedding choice may now name a hosted model (#865). The route is
+    # a pass-through: no id is parsed or rewritten here, so a two-slash OpenRouter id reaches
+    # the gateway exactly as stored — the gateway alone classifies and routes it.
+    prefs = await _fresh_prefs()
+    await prefs.set_embed_default("local", "nomic-embed-text")
+    gw = _FakeGateway(embed_result=[[0.0]])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gw, prefs=prefs)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/embed",
+            json={
+                "texts": ["hi"],
+                "model": "openrouter/openai/text-embedding-3-small",
+                "tenant_id": "tenant-x",
+            },
+        )
+    assert resp.status_code == 200
+    assert gw.embed_calls[0]["model"] == "openrouter/openai/text-embedding-3-small"
+    # Constraint #1: the caller's tenant reaches the gateway, which meters under it.
+    assert gw.embed_calls[0]["tenant_id"] == "tenant-x"
+
+
+async def test_embed_global_default_may_itself_be_a_hosted_model() -> None:
+    # The Models page can now store a hosted id as the global embedding default, so the
+    # priority chain has to carry one when no per-module override is given.
+    prefs = await _fresh_prefs()
+    await prefs.set_embed_default("local", "gpt/text-embedding-3-small")
+    gw = _FakeGateway(embed_result=[[0.0]])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gw, prefs=prefs)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/embed", json={"texts": ["hi"]})
+    assert gw.embed_calls[0]["model"] == "gpt/text-embedding-3-small"
+
+
 # ── /chat ──────────────────────────────────────────────────────────────────────
 
 

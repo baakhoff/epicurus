@@ -27,7 +27,7 @@ plus the shared ops endpoints. All of it is internal/local-only by default.
 
 | Method · Path | Purpose |
 | --- | --- |
-| `POST /platform/v1/embed` | Embed texts (returns float vectors). Resolution order: per-module override → global embed default pref → `MEMORY_EMBED_MODEL`. |
+| `POST /platform/v1/embed` | Embed texts (returns float vectors). Resolution order: per-module override → global embed default pref → `MEMORY_EMBED_MODEL`. Any of the three may name a **hosted** model (#865) — the core routes and keys it; the module never sees a key. |
 | `POST /platform/v1/chat` | Chat completion — **the single module-facing chat path** (ADR-0021). Module supplies messages; the core owns model/keys/fallback. Returns the shared `ChatResult`. |
 
 Modules never hold model keys — all AI goes through here (ADR-0010). See
@@ -515,6 +515,69 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `POST /platform/v1/llm/model-settings/suggest-context` | Compute **and persist** a recommended per-model context window for a freshly pulled model (#386), so it opens sized to itself instead of the global default. Body `{model}`. Reuses the `system/info` heuristic (VRAM-or-RAM + the named model's on-disk size + KV-cache type, capped at its trained length) but for *that* model rather than the active one. **Non-destructive** — an existing per-model context override is left untouched. Returns `{model, context_window, applied}` (`applied` is `false` when one was already set, or none could be computed — e.g. a hosted model with no local size). The web calls it when **any** pull finishes (catalog, variant, or manual tag). |
 | `GET /platform/v1/system/info` | Host spec + the context-window suggestion behind the Models page. Returns `{gpu, cpu, ram_total_mb, model:{name, size_mb, context_length, quantization}, suggested_context:{min, suggested, max}, kv_cache_type}`. The suggestion estimates how big a context the box can hold from VRAM (or RAM, no GPU), the active model's on-disk size, and the **KV-cache type** (a quantized cache `q8_0`/`q4_0` costs fewer bytes/token, so the same memory buys more context). Its ceiling is the model's **trained** `context_length` when known — no longer a flat 32k — so a long-context model on a roomy GPU is no longer clipped; 32768 remains only the fallback when the trained length is unknown. Best-effort: every probe degrades to `null`. |
 
+#### Providers (`llm/providers.py`)
+
+The registry maps a friendly epicurus alias to LiteLLM's own provider prefix and the OpenBao
+path holding that provider's key. A model id is `<alias>/<model>`; a bare name (or any prefix
+that is not an alias — `hf.co/org/model:tag`) targets the local runtime. Model ids are the
+operator's choice, config not code (ADR-0010) — only this alias set is fixed.
+
+| Alias | LiteLLM prefix | Key path | Notes |
+| --- | --- | --- | --- |
+| `local` | `ollama_chat` (chat) / `ollama` (embeddings) | — | The local runtime. Holds no key. |
+| `claude` | `anthropic` | `llm/anthropic` | |
+| `gpt` | `openai` | `llm/openai` | |
+| `grok` | `xai` | `llm/xai` | |
+| `deepseek` | `deepseek` | `llm/deepseek` | |
+| `gemini` | `gemini` | `llm/google` | |
+| `openrouter` | `openrouter` | `llm/openrouter` | An aggregator: one key reaches many vendors' chat **and** embedding models (#865). First-class rather than routed through `custom`, so it leaves the single OpenAI-compatible slot free and LiteLLM's own `openrouter` dispatch (and its context/cost map) applies. |
+| `custom` | `openai` | `llm/custom` | The generic OpenAI-compatible escape hatch; also reads `api_base` from its secret. |
+
+Only the **first** slash separates the alias from the model part, because an aggregator's model
+ids carry a slash of their own: `openrouter/openai/text-embedding-3-small` is provider
+`openrouter`, model `openai/text-embedding-3-small`. Everything that classifies an id splits
+with `partition`, never `split("/")` — in the core (`resolve` / `is_hosted`) and in the web
+(`isHostedModelId`). LiteLLM's static cost map carries many `openrouter/…` **chat** ids and no
+OpenRouter *embedding* ids, so `/models/details` and a saved model's `context_length` come back
+`null` for an OpenRouter embedding id. That is honest, not a bug — never a fake default.
+
+#### Embeddings — local and hosted (#865)
+
+`LlmGateway.embed` classifies its model id through the same registry as chat, so an embedding
+model can live wherever a chat model can:
+
+- **Local** — LiteLLM's `ollama` embeddings route (not the `ollama_chat` route completions
+  use), `api_base` = the Ollama URL, plus the operator's per-model runtime options
+  (`num_ctx` / `keep_alive` / `num_gpu`) when a settings sheet applies. With nothing set the
+  call is unchanged; embedding settings stay opt-in. An explicit `local/<model>` id now has its
+  alias stripped like any other, instead of reaching the runtime as `local/<model>`.
+- **Hosted** — `litellm.aembedding` with the provider's LiteLLM id and the **tenant-scoped**
+  key fetched from OpenBao at call time (`api_base` too, for `custom`). No Ollama runtime
+  option is sent — they describe a local allocation and mean nothing to a provider. A missing
+  key raises the same `SecretNotFoundError` the chat path raises.
+
+Two rules follow the chat path deliberately. **Pause (ADR-0005) applies to local models only:**
+a paused runtime refuses a local embed (running one would wake the GPU) while a hosted embed
+still serves, so memory recall and module indexing keep working on a paused box. `mark_active`
+is called either way and is a no-op while paused, so a hosted embed can never wake anything.
+And every call — local or hosted — emits the same tenant-scoped `llm.usage` event naming the
+model actually called (constraint #1). Both classes share one `asyncio.wait_for` bound derived
+from `LLM_TIMEOUT`; the `timeout=` kwarg is still never passed, because LiteLLM's Ollama
+embeddings dispatch silently drops it (#466).
+
+> **Privacy.** A hosted embedding model sends **the entire indexed corpus** — every note,
+> knowledge document, and remembered fact — to that provider, a document at a time, as it is
+> embedded, and every search query with it. That is the operator's call to make; constraint #8
+> still holds either way (modules never see the key, and never call a provider directly).
+
+The Models page's **Embedding model** select lists local models and the tenant's saved hosted
+ids in separate groups. The saved-models store holds *any* hosted id and cannot tell a chat
+model from an embedding one, so the help text says plainly that a chat model chosen there will
+fail at embed time. A hosted embedding id opens the **hosted** settings sheet — no `keep_alive`,
+no device — exactly as a hosted chat model does.
+
+Switching between models of different vector sizes is the *dimension-change contract* below.
+
 #### Capability resolution (#633, #618, #711)
 
 Two questions get asked about every model: **can it see images** (`supports_vision`, which gates
@@ -697,6 +760,32 @@ same reconcile also runs **lazily and automatically**: `UserFactStore._ensure` c
 collection's actual vector size against the current embedder's on first use each process
 lifetime, and self-heals a mismatch on the spot — so recall/save survive a model swap even
 before anyone clicks "Re-embed everything".
+
+##### The dimension-change contract (#865)
+
+Local `nomic-embed-text` is 768-d; hosted embedding models are typically 1536-d or more, so
+switching between the two classes is a **vector-size change**, not just a quality change. A
+Qdrant collection is created once, at whatever size the embedder of the day produced, and
+rejects every later upsert of a different width with an opaque `Vector dimension error` that no
+retry fixes — and rejects the search query too, so retrieval breaks before anyone notices.
+
+**"Re-embed everything" remains the documented step after switching models.** It drops each
+collection outright, so the rebuild simply creates them at the new size and no drift ever
+arises. Everything below is the safety net for an operator who switched without running it —
+each store keeps itself consistent instead of failing opaquely:
+
+| Store | On a size change |
+| --- | --- |
+| Memory facts (core) | **Re-embeds in place**, preserving each fact's id, text, and metadata — a hand-distilled fact has no source to recrawl (#436, ADR-0074). |
+| `knowledge` vault · bundled docs · module docs | **Recreates** the collection at the new size, clears the ledgers claiming it, and re-walks the source in the same pass, so the corpus is rebuilt from files rather than preserved. The bundled platform docs and the per-module docs share `<tenant>__docs`, so one shared guard clears **both** ledgers — a source healing alone would leave the other claiming vectors that no longer exist. |
+| `notes` | **Recreates** the collection at the new size and logs loudly naming "Re-embed everything"; Postgres holds the notes, and nothing queries this collection today (Notes is attach-only). |
+
+The knowledge sources settle the question **before** each pass, with one short probe embed
+against an existing collection — a corpus where every file's hash is unchanged writes nothing
+and would otherwise sail past a switch that has already broken search. The mass de-index fuse
+(#848) is untouched by all of this: it is weighed first, so a stale mount is still refused
+before anything is embedded, and a recreate is not a de-index the fuse weighs (it clears the
+ledger itself, and a cleared ledger has nothing to protect).
 
 #### Per-model settings (ADR-0044)
 

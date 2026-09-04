@@ -135,6 +135,7 @@ Registered base paths (set by the core service at runtime):
 | `llm/xai` | xAI API key |
 | `llm/deepseek` | DeepSeek API key |
 | `llm/google` | Google API key |
+| `llm/openrouter` | OpenRouter API key — one key reaching many vendors' chat **and** embedding models |
 | `llm/custom` | Custom provider endpoint + key |
 | `modules/<name>/config` | Per-module config blob |
 | `oauth/clients/<provider>` | Operator-provisioned OAuth client (`client_id`, `client_secret`) |

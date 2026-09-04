@@ -20,9 +20,11 @@ from epicurus_core import (
     add_ops_routes,
     configure_logging,
     get_logger,
+    scope_collection,
 )
 from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
 from epicurus_knowledge.db import DocIndex, NoteIndex, VersionStore
+from epicurus_knowledge.dimensions import CollectionDimensionGuard
 from epicurus_knowledge.events import KnowledgeEventEmitter
 from epicurus_knowledge.fuse import FusePolicy, rebuild_refusals
 from epicurus_knowledge.indexer import KnowledgeIndexer
@@ -110,6 +112,13 @@ def create_app() -> FastAPI:
         embed_batch_size=settings.embed_batch_size,
         fuse_policy=fuse_policy,
     )
+    # The bundled platform docs and the per-module docs share ``<tenant>__docs``, so they share
+    # one dimension guard (#865): when the embedding model's vector size changes, recreating the
+    # collection clears *both* ledgers — a source healing alone would leave the other claiming
+    # vectors that no longer exist. The vault owns its collection and keeps its own guard.
+    docs_dimensions = CollectionDimensionGuard(
+        qdrant, scope_collection("docs", settings.default_tenant_id)
+    )
     docs_indexer = KnowledgeIndexer(
         doc_index,
         qdrant,
@@ -120,6 +129,7 @@ def create_app() -> FastAPI:
         chunk_max_chars=settings.chunk_max_chars,
         embed_batch_size=settings.embed_batch_size,
         fuse_policy=fuse_policy,
+        dimensions=docs_dimensions,
     )
     # Per-module docs (#215): indexed alongside the bundled platform docs into
     # <tenant>__docs; synced at startup and on every knowledge_reindex call.
@@ -130,6 +140,7 @@ def create_app() -> FastAPI:
         tenant=settings.default_tenant_id,
         chunk_max_chars=settings.chunk_max_chars,
         fuse_policy=fuse_policy,
+        dimensions=docs_dimensions,
     )
 
     bus = EventBus.from_settings(settings)

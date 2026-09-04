@@ -17,18 +17,17 @@ from typing import TypedDict
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
-    Distance,
     FieldCondition,
     Filter,
     FilterSelector,
     MatchValue,
     PointStruct,
-    VectorParams,
 )
 
 from epicurus_core import PlatformClient, get_logger, scope_collection
 from epicurus_knowledge.chunker import Chunk, chunk_note
 from epicurus_knowledge.db import DocIndex, NoteIndex
+from epicurus_knowledge.dimensions import CollectionDimensionGuard, EmbeddingDimensionChanged
 from epicurus_knowledge.fuse import FusePolicy, FuseTrip, IndexFuse
 from epicurus_knowledge.reader import DiskVaultReader, VaultReader
 
@@ -112,6 +111,11 @@ class KnowledgeIndexer:
             empty while the ledger is not, is refused instead of reconciling a stale mount
             into a wipe. Defaults to :class:`~epicurus_knowledge.fuse.FusePolicy`'s own
             defaults; ``force=True`` on a call bypasses it.
+        dimensions: The guard that owns this Qdrant collection's vector size (#865). Pass the
+            **same** guard to every source writing the same collection — the bundled platform
+            docs and the per-module docs share ``<tenant>__docs`` — so recreating it at a new
+            embedding dimension clears all of their ledgers. Defaults to a private guard,
+            which is right for a source that owns its collection alone (the vault).
     """
 
     def __init__(
@@ -127,6 +131,7 @@ class KnowledgeIndexer:
         chunk_max_chars: int = 2000,
         embed_batch_size: int = 64,
         fuse_policy: FusePolicy | None = None,
+        dimensions: CollectionDimensionGuard | None = None,
     ) -> None:
         if reader is None:
             if vault_path is None:
@@ -140,7 +145,11 @@ class KnowledgeIndexer:
         self._max_chars = chunk_max_chars
         self._batch_size = max(1, embed_batch_size)
         self._collection = scope_collection(collection_base, tenant)
-        self._ensured = False
+        # Owns this collection's vector size (#865). Shared when another source writes the same
+        # collection (the bundled docs and the module docs both use ``<tenant>__docs``), so a
+        # recreate clears every claiming ledger; private when this source owns it alone.
+        self._dimensions = dimensions or CollectionDimensionGuard(qdrant, self._collection)
+        self._dimensions.register_reset(self._clear_ledger)
         # The mass de-index fuse for this source (#848). Public: the app reads its state for
         # GET /status, and POST /reindex asks it for a verdict before resetting anything.
         self.fuse = IndexFuse(tenant=tenant, source=collection_base, policy=fuse_policy)
@@ -152,15 +161,34 @@ class KnowledgeIndexer:
         # watch pass never overlap).
         self._run_lock = asyncio.Lock()
 
-    async def _ensure_collection(self, dim: int) -> None:
-        if self._ensured:
-            return
+    async def _clear_ledger(self) -> None:
+        """Drop every ledger row for this source — the guard's recreate hook (#865)."""
+        await self._notes.clear(tenant=self._tenant)
+
+    async def _verify_dimension(self, model: str | None) -> None:
+        """Confirm the existing collection's width against the current embedder (#865).
+
+        One short embed, paid at most once per process per collection: a pass in which every
+        file reads unchanged writes nothing, so it would otherwise sail straight past a model
+        switch that has already broken search. Skipped entirely on a fresh install (no
+        collection yet — the first upsert creates it at the right size) and once any source has
+        confirmed the width. Raises :class:`EmbeddingDimensionChanged` on a mismatch, which the
+        caller turns into a full rebuild.
+        """
         if not await self._qdrant.collection_exists(self._collection):
-            await self._qdrant.create_collection(
-                self._collection,
-                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
-            )
-        self._ensured = True
+            return
+        probe = await self._platform.embed(["dimension probe"], model=model)
+        await self._dimensions.ensure(len(probe[0]))
+
+    async def _ensure_collection(self, dim: int) -> None:
+        """Create the collection on first use, or heal it when the embedder's size changed.
+
+        Delegated to the shared :class:`CollectionDimensionGuard` so a source that shares a
+        collection with another (``<tenant>__docs``) heals both ledgers at once. Raises
+        :class:`EmbeddingDimensionChanged` after a heal; ``run`` / ``index_path`` catch it and
+        retry, which is what turns the heal into a full rebuild rather than a partial pass.
+        """
+        await self._dimensions.ensure(dim)
 
     async def _delete_note_vectors(self, note_path: str) -> None:
         """Remove all Qdrant points whose payload ``note_path`` matches."""
@@ -332,6 +360,11 @@ class KnowledgeIndexer:
         The content is read back through the file API (the core wrote it, ADR-0064); a
         vanished file (``None``) raises so the caller's best-effort ``indexed=False`` path
         fires rather than a silent no-op.
+
+        If this is the first write since the embedding model's vector size changed, the guard
+        recreates the collection and clears the ledger (#865); the single retry below then
+        lands this file in the fresh collection. Every *other* file is re-embedded by the next
+        full ``run``, which the empty ledger now forces.
         """
         content = await self._reader.read_text(rel)
         if content is None:
@@ -339,7 +372,11 @@ class KnowledgeIndexer:
         content_hash = _content_hash(content.encode("utf-8"))
         if await self._notes.get(tenant=self._tenant, note_path=rel) is not None:
             await self._delete_note_vectors(rel)
-        chunk_count = await self._index_note(rel, content, model=await self._embedding_model())
+        model = await self._embedding_model()
+        try:
+            chunk_count = await self._index_note(rel, content, model=model)
+        except EmbeddingDimensionChanged:
+            chunk_count = await self._index_note(rel, content, model=model)
         entry = await self._reader.stat(rel)
         await self._notes.upsert(
             tenant=self._tenant,
@@ -418,7 +455,7 @@ class KnowledgeIndexer:
                 ledger_rows=known,
             )
             await self._notes.clear(tenant=self._tenant)
-            self._ensured = False
+            self._dimensions.forget()
             return True
         return await self._gc_stale(force=force)
 
@@ -474,7 +511,7 @@ class KnowledgeIndexer:
             if await self._qdrant.collection_exists(self._collection):
                 await self._qdrant.delete_collection(self._collection)
             await self._notes.clear(tenant=self._tenant)
-            self._ensured = False
+            self._dimensions.forget()
 
     async def check_source_fuse(self, *, force: bool = False) -> FuseTrip | None:
         """Would rebuilding from the source right now be a mass de-index? (#848)
@@ -521,11 +558,26 @@ class KnowledgeIndexer:
         deliberately: a source that looks like a stale mount is not a source to index
         *from* either. ``force=True`` skips the fuse for this pass.
 
+        A pass that discovers the embedding model's vector size has changed (#865) heals the
+        collection — recreated at the new size, every ledger claiming it cleared — and then
+        **walks again from the top**. The second walk sees an empty ledger and a matching
+        collection, so it re-embeds the whole source in this one call; its counts are what is
+        returned, the abandoned first walk's being meaningless (its vectors and rows are gone).
+        The heal can happen at most once per pass: afterwards the guard's cached size matches.
+
         Serialised by ``self._run_lock`` so a watch-triggered pass (#232) and the startup
         index never walk the vault concurrently.
         """
         async with self._run_lock:
-            return await self._run_walk(force=force)
+            try:
+                return await self._run_walk(force=force)
+            except EmbeddingDimensionChanged as exc:
+                log.warning(
+                    "embedding dimension changed mid-pass; re-walking the source from scratch",
+                    collection=self._collection,
+                    detail=str(exc),
+                )
+                return await self._run_walk(force=force)
 
     async def _run_walk(self, *, force: bool = False) -> dict[str, int]:
         indexed = 0
@@ -566,6 +618,10 @@ class KnowledgeIndexer:
             return {"indexed": 0, "deleted": 0, "unchanged": 0, "fuse_tripped": 0}
 
         model = await self._embedding_model()  # operator's choice, resolved once per run (#128)
+        # Settle the collection's vector width before the walk, so a pass in which everything
+        # reads unchanged still notices a switched embedding model (#865). Weighed *after* the
+        # fuse, so a stale mount is still refused before anything is touched.
+        await self._verify_dimension(model)
 
         for entry in entries:
             rel = entry.path

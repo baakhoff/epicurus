@@ -1046,7 +1046,7 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.115.0"
+version = "0.116.0"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },
@@ -1057,6 +1057,7 @@ dependencies = [
     { name = "httpx" },
     { name = "httpx2" },
     { name = "litellm" },
+    { name = "prometheus-client" },
     { name = "pypdf" },
     { name = "python-multipart" },
     { name = "pywebpush" },
@@ -1076,6 +1077,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx2", specifier = ">=2.9" },
     { name = "litellm", specifier = ">=1.50" },
+    { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pypdf", specifier = ">=6.14.2" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pywebpush", specifier = ">=2.0" },
@@ -1104,13 +1106,14 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-knowledge"
-version = "0.27.4"
+version = "0.28.0"
 source = { editable = "services/knowledge" }
 dependencies = [
     { name = "asyncpg" },
     { name = "epicurus-core" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "prometheus-client" },
     { name = "qdrant-client" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
@@ -1123,6 +1126,7 @@ requires-dist = [
     { name = "epicurus-core", editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "prometheus-client", specifier = ">=0.20" },
     { name = "qdrant-client", specifier = ">=1.18.0,<1.19" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.0" },

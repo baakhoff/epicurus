@@ -329,15 +329,19 @@ def _reindexable_manifest() -> ModuleManifest:
 class _ReembedRegistry(_StubRegistry):
     """A stub registry that records re-embed fan-out POSTs instead of hitting the network."""
 
-    def __init__(self, *, fail: bool = False, **kwargs: Any) -> None:
+    def __init__(
+        self, *, fail: bool = False, body: dict[str, str] | None = None, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.posted: list[str] = []
         self._fail = fail
+        self._body = body if body is not None else {"status": "started"}
 
-    async def _post_reindex(self, base: str) -> None:
+    async def _post_reindex(self, base: str) -> dict[str, str]:
         if self._fail:
             raise httpx.ConnectError("boom")
         self.posted.append(base)
+        return self._body
 
 
 def _reembed_registry(**kwargs: Any) -> _ReembedRegistry:
@@ -373,6 +377,27 @@ async def test_reembed_skips_unhealthy_modules() -> None:
 async def test_reembed_reports_a_module_that_fails() -> None:
     registry = _reembed_registry(manifest=_reindexable_manifest(), fail=True)
     assert await registry.reembed() == [{"module": "knowledge", "status": "error"}]
+
+
+async def test_reembed_passes_through_a_module_that_refuses() -> None:
+    """A refused rebuild (#848) must not read as "started" on the Models page."""
+    registry = _reembed_registry(
+        manifest=_reindexable_manifest(),
+        body={"status": "refused", "reason": "knowledge: source read empty"},
+    )
+    assert await registry.reembed() == [
+        {
+            "module": "knowledge",
+            "status": "refused",
+            "reason": "knowledge: source read empty",
+        }
+    ]
+
+
+async def test_reembed_defaults_to_started_for_a_module_that_says_nothing() -> None:
+    """An older module answering with no body still reports the fan-out as started."""
+    registry = _reembed_registry(manifest=_reindexable_manifest(), body={})
+    assert await registry.reembed() == [{"module": "knowledge", "status": "started"}]
 
 
 async def test_get_status_proxies_module_status_url() -> None:

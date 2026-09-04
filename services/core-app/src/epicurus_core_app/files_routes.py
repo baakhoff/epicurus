@@ -30,7 +30,7 @@ is enforced here (not just hidden in the UI) via :func:`_require_writable`.
 from __future__ import annotations
 
 import mimetypes
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import suppress
 from urllib.parse import quote
 
@@ -43,6 +43,7 @@ from epicurus_core.files import PathEscapeError, normalize_rel
 from epicurus_core.tenancy import TenantError, validate_tenant_id
 from epicurus_core_app.core_events import CoreEventEmitter
 from epicurus_core_app.file_index import FileIndex
+from epicurus_core_app.file_scan import ScanFuse, namespace_for
 from epicurus_core_app.mounts import MOUNT_PREFIX, Mount
 from epicurus_core_app.object_backend import ObjectBackend
 from epicurus_core_app.upload_limits import (
@@ -89,6 +90,37 @@ class FileSearchResponse(BaseModel):
     """Name/path search hits over the core file index."""
 
     entries: list[FileEntry]
+
+
+class ScanFuseState(BaseModel):
+    """One namespace whose index purge the mass de-index fuse is refusing (#848)."""
+
+    tenant: str
+    namespace: str
+    indexed_rows: int
+    would_delete: int
+    seen_entries: int
+    reason: str
+    at: str
+
+
+class ScanStatusResponse(BaseModel):
+    """Whether any file-space scan is currently refusing to purge index rows (#848)."""
+
+    fuse_enabled: bool
+    max_delete_ratio: float
+    min_deletions: int
+    tripped: bool
+    namespaces: list[ScanFuseState]
+
+
+class RescanResponse(BaseModel):
+    """The outcome of an on-demand rescan (#848)."""
+
+    namespace: str
+    entries: int
+    forced: bool
+    tripped: bool
 
 
 def _fmt_size(size: int) -> str:
@@ -181,6 +213,8 @@ def create_files_router(
     locked_prefixes: frozenset[str] = frozenset(),
     events: CoreEventEmitter | None = None,
     mounts: Mapping[str, Mount] | None = None,
+    scan_fuse: ScanFuse | None = None,
+    rescan: Callable[..., Awaitable[int]] | None = None,
 ) -> APIRouter:
     """Build the ``/platform/v1/files`` router over a :class:`FileStore`.
 
@@ -194,7 +228,10 @@ def create_files_router(
     every file mutation passes through — operator doors and module bridges alike — so this
     router is where the core emits them. ``None`` disables emission (tests). *mounts*
     (#731) are operator-declared external roots addressed as ``mount:<name>/<sub-path>``;
-    empty/``None`` means no mounts are declared.
+    empty/``None`` means no mounts are declared. *scan_fuse* and *rescan* (#848) expose the
+    mass de-index fuse: its state on ``GET /scan-status`` and the re-run door on
+    ``POST /rescan`` (with ``force`` to purge anyway). Omitting either drops the pair of
+    routes — a router built without them behaves exactly as before.
     """
     router = APIRouter(prefix="/platform/v1/files", tags=["files"])
     mounts = mounts or {}
@@ -788,6 +825,85 @@ def create_files_router(
                 for h in hits
             ]
         )
+
+    if scan_fuse is not None:
+
+        @router.get("/scan-status", response_model=ScanStatusResponse)
+        async def scan_status(tenant_id: str | None = Query(default=None)) -> ScanStatusResponse:
+            """Report the mass de-index fuse (#848): thresholds, and any refusing namespace.
+
+            The operator-readable half of the fuse — the other half is the ``ERROR`` log line
+            and the ``epicurus_core_file_scan_fuse_tripped`` gauge. A tripped namespace means
+            the file space read empty (or nearly so) while its index rows are intact: the
+            rows were **kept**, so the Files view still lists what is really there; check the
+            mount before deciding the files are gone.
+
+            Scoped to *tenant_id* like every other route here (constraint #1). ``ScanFuse``
+            keys its state by ``(tenant, namespace)``, so an unscoped read would hand one
+            tenant another's namespace names and row counts — inert while v1 is single-tenant,
+            and exactly the leak that is invisible until it isn't.
+            """
+            tenant = _tenant(tenant_id)
+            trips = [t for t in scan_fuse.trips() if t.tenant == tenant]
+            return ScanStatusResponse(
+                fuse_enabled=scan_fuse.enabled,
+                max_delete_ratio=scan_fuse.max_delete_ratio,
+                min_deletions=scan_fuse.min_deletions,
+                tripped=bool(trips),
+                namespaces=[
+                    ScanFuseState(
+                        tenant=t.tenant,
+                        namespace=t.namespace,
+                        indexed_rows=t.indexed_rows,
+                        would_delete=t.would_delete,
+                        seen_entries=t.seen_entries,
+                        reason=t.reason,
+                        at=t.at,
+                    )
+                    for t in trips
+                ],
+            )
+
+    if rescan is not None:
+
+        @router.post("/rescan", response_model=RescanResponse)
+        async def rescan_file_space(
+            namespace: str = Query(
+                default="",
+                description="Empty for the tenant tree, or an indexed mount's name",
+            ),
+            force: bool = Query(
+                default=False,
+                description="Purge stale index rows even if the mass de-index fuse refuses",
+            ),
+            tenant_id: str | None = Query(default=None),
+        ) -> RescanResponse:
+            """Re-run the file-space scan for one namespace (#848).
+
+            The recovery door after a suspect mount: repair the mount, call this, and the
+            index converges again. ``force=true`` says the emptiness is real and purges the
+            stale rows the fuse is withholding — the only way to make the index follow a file
+            space that genuinely lost most of its contents.
+
+            *tenant_id* is threaded through to the scan and to the fuse read, so the answer
+            describes the tenant that was asked about rather than whichever one tripped last
+            (constraint #1). It defaults to the core's default tenant, which is the one the
+            startup walk and the watchers this shares a lock with also run.
+            """
+            tenant = _tenant(tenant_id)
+            try:
+                entries = await rescan(namespace, force, tenant)
+            except KeyError:
+                raise HTTPException(
+                    status_code=404, detail=f'"{namespace}" is not an indexed mount'
+                ) from None
+            label = namespace_for(f"{MOUNT_PREFIX}{namespace}/" if namespace else "")
+            tripped = scan_fuse is not None and any(
+                t.namespace == label and t.tenant == tenant for t in scan_fuse.trips()
+            )
+            return RescanResponse(
+                namespace=namespace, entries=entries, forced=force, tripped=tripped
+            )
 
     @router.get("/download")
     async def download_file(

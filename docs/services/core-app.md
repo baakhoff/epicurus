@@ -897,7 +897,7 @@ container, and its review is mandatory (nothing self-applies, ever).
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. Served from the probe cache by default; `?refresh=true` forces a fresh fleet-wide re-probe (the Modules page's manual refresh, #478). Also carries the reserved **`core`** pseudo-module (always healthy + enabled — it is this process), so the shell discovers its `review` page like any module's; the Modules screen filters it back out, since it manages what the operator *installed*. |
-| `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status}]}` (`started`/`error` per module). Best-effort — one module's failure never aborts the rest. |
+| `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status, reason?}]}` (`started`/`error`, or the module's own answer). Best-effort — one module's failure never aborts the rest. A module that **refuses** the rebuild because the source it would rebuild from reads empty reports `refused` with its `reason` (#848), rather than the fan-out assuming a rebuild it never started. |
 | `GET /platform/v1/modules/docker-status` | Whether the core can reach Docker right now (#622, ADR-0099): `{available: bool, reason: str \| null}` — `reason` is the probe's own exception text, surfaced so the Modules page states plainly what's deferred (never "removal disabled" — see the callout below) and how to enable it, without the operator attempting a removal or reading the logs. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
@@ -1351,6 +1351,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `EVENTS_RETENTION_DAYS` | `30` | How long a module event stays in the durable log (ADR-0103). `0` disables pruning — keep everything, and mind the disk. |
 | `EVENTS_PRUNE_INTERVAL_S` | `3600` | How often the event-log pruner sweeps. |
 | `AUTOMATIONS_POLL_INTERVAL_S` | `60` | How often the automations loop drains the trigger queue and checks schedules (ADR-0105). |
+| `FILES_SCAN_FUSE_ENABLED` | `true` | **Mass de-index fuse** (#848): refuse a file-space scan's purge when the rows it would delete look wholesale — a stale or empty mount must not reconcile `core_files` to zero. `FILES_SCAN_FUSE_MAX_DELETE_RATIO` (`0.5`) and `FILES_SCAN_FUSE_MIN_DELETIONS` (`5`) set the thresholds. See [file space](../reference/files.md#configuration-core-app). |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
@@ -1463,7 +1464,13 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   movability stays authoritative (#560; see [file space](../reference/files.md)). An indexed
   **external mount** (#731) shares this same table, namespaced under `mount:<name>/` — opt-in
   per mount (`FILES_EXTERNAL_MOUNTS_INDEXED`), prefix-scoped on purge so re-scanning one mount
-  never touches the tenant tree's rows or another mount's.
+  never touches the tenant tree's rows or another mount's. The scan's purge is guarded by the
+  **mass de-index fuse** (#848): a store that reads empty against a populated index — or a purge
+  taking at least half of a namespace's rows — is refused, logged, exported on `/metrics`
+  (`epicurus_core_file_scan_fuse_tripped`), and readable at `GET /platform/v1/files/scan-status`.
+  The upserts still land; only the deletions are withheld, so a stale mount leaves a stale index
+  rather than an emptied one. `POST /platform/v1/files/rescan?force=true` is the deliberate
+  override once the emptiness is confirmed real.
 - **Postgres `timezone_prefs`** — per-tenant IANA timezone for the `now` tool (ADR-0039):
   `tenant`, `timezone`. A missing row (or null) falls back to `DEFAULT_TIMEZONE`.
 - **Postgres `page_order_prefs`** — per-tenant left-nav page order (#543): `tenant`,

@@ -49,7 +49,7 @@ is no direct agent write path. The knowledge base is organised into **projects**
 
 | Tool | Inputs | Returns |
 | --- | --- | --- |
-| `knowledge_reindex()` | — | `{indexed, deleted, unchanged}` counts summed over all three sources (knowledge bases + platform docs + module docs). |
+| `knowledge_reindex(force=False)` | `force` — bypass the mass de-index fuse (#848) for this pass | `{indexed, deleted, unchanged, fuse_tripped}` counts summed over all three sources (knowledge bases + platform docs + module docs). `fuse_tripped` > 0 means a source refused to de-index and changed nothing (see [the fuse](#the-mass-de-index-fuse-848)). |
 
 **Proposals** — every structural or content change is **staged for operator review**
 (ADR-0033, #220), never applied directly; the operator approves or rejects it in the
@@ -142,7 +142,7 @@ apply directly, exactly as they already do in chat (ADR-0112).
 
 | Panel | What it shows / does |
 | --- | --- |
-| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at` · `index_phase` / `index_attempts` (background-index progress, #230). Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
+| **Status** | `note_count` (vault notes) · `doc_count` (platform-docs pages) · `module_doc_count` (module-contributed docs) · `last_indexed_at` · `index_phase` / `index_attempts` (background-index progress, #230) · `index_fuse_tripped` / `index_fuse_detail` (a source refusing to de-index, #848). Polled from `GET /status` via the core's `GET /platform/v1/modules/knowledge/status` proxy. |
 | **Settings** | Vault path (`VAULT_PATH`, default `/data/knowledge`; the on-disk tree is tenant-scoped to `/data/<tenant>/knowledge`) — editable in the shell. |
 | **Actions** | **Re-index** — triggers `knowledge_reindex` (all sources) through the core. |
 
@@ -343,8 +343,8 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
 | `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**, **`reindexable`**). |
-| `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
-| `POST /reindex` | **Force a full re-embed** of every source (vault + platform docs + module docs) with the current embedding model → `{status: "started"}` (#332, ADR-0054). Unlike the incremental `knowledge_reindex` tool, this **drops the Qdrant collections and clears the ledgers first**, so vectors built with a previous model are rebuilt rather than skipped as "unchanged". Runs in the background; watch `GET /status`. Called by the core's re-embed fan-out (the manifest sets `reindexable`). |
+| `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts, index_fuse_tripped, index_fuse_detail}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). `index_fuse_tripped` is `true` while a source is refusing to de-index and `index_fuse_detail` names it with the numbers (#848; `null` otherwise) — flat scalars, because the module status panel renders values as strings. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
+| `POST /reindex?force=<bool>` | **Force a full re-embed** of every source (vault + platform docs + module docs) with the current embedding model → `{status: "started"}` (#332, ADR-0054). Unlike the incremental `knowledge_reindex` tool, this **drops the Qdrant collections and clears the ledgers first**, so vectors built with a previous model are rebuilt rather than skipped as "unchanged". Runs in the background; watch `GET /status`. Called by the core's re-embed fan-out (the manifest sets `reindexable`). **Refused synchronously** with `{status: "refused", reason, detail}` (HTTP 200, nothing dropped) when a source would be rebuilt from nothing — the mass de-index fuse (#848); `?force=true` says the emptiness is real and rebuilds anyway. |
 | `GET /pages/{page_id}?scope=<id>` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files, read_only, versioned, scopes:[{id, title, kind}], scope, scope_noun, can_create_scope}` (page id `vault`). `scope` selects the knowledge base (empty = the first project, or the reserved `__docs__` for the read-only platform docs). `type` is `"file"` or `"dir"`; `docs` paths are scope-relative. `can_manage_files: true` enables folder CRUD; `versioned: true` enables save-history browse/restore (#ADR-0046); `read_only: true` (watch mode #232, or the `__docs__` scope) makes the page view-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
 | `POST /pages/{page_id}/project?name=<name>` | Create a new knowledge base — a top-level folder under the knowledge root → `{id, title, kind}` (#KB-refactor). 409 if it already exists, 400 for an invalid name (single segment, no separators / `..` / `.`/`_` prefix). Proxied at `POST /platform/v1/modules/knowledge/pages/{page_id}/project`. |
 | `DELETE /pages/{page_id}/project?name=<name>` | Delete a knowledge base — removes the top-level folder **and de-indexes its documents** (drops every Qdrant vector + ledger row under `<name>/`, tenant-scoped) so it leaves search at once (#340). `204` on success. 404 if absent, 400 for an invalid name, **409** when the vault is read-only (watch mode, #232). The operator's **Remove** affordance — the agent never deletes a base (no tool, no review op). Proxied at `DELETE /platform/v1/modules/knowledge/pages/{page_id}/project`. |
@@ -392,7 +392,55 @@ The same incremental logic applies to the vault and platform-docs sources:
    file's hash/mtime/chunk-count in Postgres only after its vectors land, so an interrupted
    run leaves the ledger consistent.
 
-Deleted files are purged from both stores on the next index run.
+Deleted files are purged from both stores on the next index run — unless the deletion looks
+wholesale, in which case the **mass de-index fuse** refuses the pass (below).
+
+### The mass de-index fuse (#848)
+
+An index pass deletes whatever the source no longer has, and a source that reads empty is
+indistinguishable from a source whose contents were deleted. On 2026-08-30 a stale bind
+mount made the core see an empty `/data`; the vault read empty, and one pass reconciled the
+`knowledge_notes` ledger and the `<tenant>__knowledge` collection down to nothing — with no
+error anywhere, because "the vault is empty" is a legitimate state (`VaultReader` reports an
+absent vault as empty, never as a failure).
+
+Every pass is therefore weighed **before it touches anything**, per tenant and per source:
+
+| Situation | Outcome |
+| --- | --- |
+| Ledger is empty (first-ever index) | never trips — there is nothing to protect |
+| Source reads empty, ledger is not | **always trips**, at any size (even a 1-note ledger) |
+| Deletions ≥ `KNOWLEDGE_INDEX_FUSE_MAX_DELETE_RATIO` of the ledger **and** ≥ `KNOWLEDGE_INDEX_FUSE_MIN_DELETIONS` rows | **trips** |
+| Anything smaller | runs normally — the fuse is invisible |
+
+A tripped pass is **abandoned whole**: no adds, no deletes, ledger and collection exactly as
+they were. (The adds go with the deletes deliberately — a source that looks like a stale
+mount is not a source to index *from* either.) The refusal is logged at `ERROR` with the
+numbers, counted on `/metrics` (`epicurus_knowledge_index_fuse_tripped` and
+`epicurus_knowledge_index_fuse_trips_total`, labelled `tenant` + `source`), and shown on
+`GET /status` as `index_fuse_tripped` / `index_fuse_detail`. A pass that reconciles normally
+re-arms it.
+
+The reconcile-time stale-path GC (#470) is fused the same way. The module-docs source is
+fused on its final purge only — there the adds have already landed and are harmless — and
+its "source reads empty" case is *not* escalated past the floor, because a registry that
+lists no doc-serving module is an ordinary state (a one-module install disabling that
+module), not a stale mount. Since the whole module-doc corpus is currently smaller than the
+floor (two doc-serving modules, three pages), that source is in practice unguarded until it
+grows past `KNOWLEDGE_INDEX_FUSE_MIN_DELETIONS` — a deliberate trade for state that rebuilds
+itself from the modules on the next pass.
+
+**Deliberate wholesale deletion** is still possible: `force=true` on the `knowledge_reindex`
+tool, or `POST /reindex?force=true`. Without it, `POST /reindex` refuses **synchronously**
+(`{"status": "refused", "reason": …}`) rather than starting — it drops every ledger before
+rebuilding, so the fuse has to decide *before* the evidence is erased.
+`KNOWLEDGE_INDEX_FUSE_ENABLED=false` turns the whole guard off.
+
+**What an operator does when it trips:** check the file space first — the notes are almost
+always still there and the container simply cannot see them (see
+[Startup & recovery](../infrastructure/startup-and-recovery.md)). Repair the mount and
+re-index normally. Only if the notes really are gone should the index follow them down with
+`force`.
 
 ### Resilient startup (#230)
 
@@ -518,6 +566,9 @@ platform services read these docs if needed.
 | `VAULT_WATCH_DEBOUNCE_MS` | `1500` | Coalescing window (ms) for a burst of vault changes before a re-index is triggered. |
 | `KNOWLEDGE_EVENTS_DEBOUNCE_S` | `120` | Quiet window (s) a document must sit unsaved before `knowledge.doc_updated` fires on the event spine (#665) — one event per editing session, not per auto-save. |
 | `KNOWLEDGE_INDEX_FAILED_COOLDOWN_S` | `900` | Minimum gap (s) between `knowledge.index_failed` emissions — a stuck vault must not storm the spine once per watcher wake (#665). |
+| `KNOWLEDGE_INDEX_FUSE_ENABLED` | `true` | The mass de-index fuse (#848): refuse an index pass whose deletions look wholesale rather than editorial, so a stale/empty mount cannot silently wipe the ledger and the collection. Set `false` only for a source that legitimately churns that hard. |
+| `KNOWLEDGE_INDEX_FUSE_MAX_DELETE_RATIO` | `0.5` | Share of the ledger whose deletion in one pass is treated as suspect. |
+| `KNOWLEDGE_INDEX_FUSE_MIN_DELETIONS` | `5` | Absolute floor for the ratio rule — fewer deletions never trip it, so a three-note base stays prunable. A source that reads **entirely** empty trips at any size regardless. |
 
 Knowledge documents live at `/data/<tenant>/knowledge` in the **shared file space** — bound
 into the **core** via `EPICURUS_FILES_ROOT` (the env var that mounts the `/data` tree; it
@@ -616,8 +667,9 @@ Package `epicurus_knowledge`:
 | --- | --- |
 | `chunker.py` | Heading-aware markdown splitter. |
 | `db.py` | `knowledge_notes` ledger (`NoteIndex`) + `knowledge_doc_index` ledger (`DocIndex`); per-path `indexed_at` powers the hover-card's *Last indexed*. Also `knowledge_versions` (`VersionStore`): editor-save content snapshots with dedup + 50-version retention (#ADR-0046). |
-| `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source **and a `VaultReader`**); the walk + single-file read go through the reader (the file API by default — #346/ADR-0070), deriving `mtime_ns` from the entry mtime; accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save; `move_path` re-keys the index after a move — a single file swaps its vectors directly, a folder move reconciles via a full run (#470); a run-lock serialises full passes so the watcher (#232) and startup index never overlap; `reconcile` self-heals a wiped Qdrant collection (#229) and, when the collection is intact, GCs ledger rows for paths the vault no longer has (#470). |
-| `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). |
+| `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source **and a `VaultReader`**); the walk + single-file read go through the reader (the file API by default — #346/ADR-0070), deriving `mtime_ns` from the entry mtime; accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save; `move_path` re-keys the index after a move — a single file swaps its vectors directly, a folder move reconciles via a full run (#470); a run-lock serialises full passes so the watcher (#232) and startup index never overlap; `reconcile` self-heals a wiped Qdrant collection (#229) and, when the collection is intact, GCs ledger rows for paths the vault no longer has (#470). Both the walk's delete phase and that GC are weighed by the source's `IndexFuse` first (#848); `check_source_fuse` answers the same question for `POST /reindex`, *before* a reset erases the ledger it would protect. |
+| `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). Threads `force` (#848) to every source, and sums `fuse_tripped` alongside the index counts so a refusal shows up in `last_result`, not only in the logs. |
+| `fuse.py` | The mass de-index fuse (#848): `FusePolicy` (thresholds), `IndexFuse` (one per tenant + source — the verdict, the loud log, the Prometheus gauge/counter, and the tripped state `GET /status` reads), and `rebuild_refusals` (the `POST /reindex` pre-check across all three sources). |
 | `watcher.py` | The vault file-watcher (#232): `VaultWatcher` (`watchfiles.awatch` → debounced incremental re-index) + `VaultChangeFilter` (ignore `.obsidian/`/`.trash/`, `.md` only). The one path that still reads the disk directly — inotify has no file-API analogue — so it (and the reads it triggers) run only in **watch mode**, where the vault is a disk mount (#346/ADR-0070). Started by `app.py` when `VAULT_WATCH=true`. |
 | `service.py` | MCP tools — read-only navigation (`knowledge_search` → entity-ref chips, `knowledge_list_projects`, `knowledge_tree`, `knowledge_read_document`), `knowledge_reindex`, the write tools that stage suggestions (`knowledge_create_document` (create), `knowledge_propose_edit` update/delete, `knowledge_propose_move`, `knowledge_propose_rename` (rename-in-place → a `move` suggestion), `knowledge_propose_folder`, `knowledge_propose_project` — #KB-refactor / #220), and the suggestion-lifecycle tools (`knowledge_list_suggestions`, `knowledge_read_suggestion`, `knowledge_update_suggestion`, `knowledge_withdraw_suggestion` — #744, over `SuggestionReview.read`/`.update`/`.withdraw`) + manifest UI + the `editor` and `review` page specs. The shared `_finalize` helper (review-off auto-apply) reports a delete's already-gone target (`SuggestionTargetGone`, #761) as the honest not-found outcome, not the generic "review is off but applying failed" wrapper it uses for every other auto-apply failure — that wrapper assumes the suggestion is still staged, which isn't true once `approve` has resolved it. |
 | `pages.py` | The `editor` page surface (#130): the knowledge-base switcher + scopes (#KB-refactor), document/folder tree, read, save, folder CRUD (create, delete, move — #216), and `create_project` (new knowledge base) + the read-only `__docs__` platform-docs scope. `VaultPages` **reads** through a `VaultReader` (the file API by default — #346/ADR-0070; a `DiskVaultReader` for the bundled `__docs__` scope) and **writes** through the core file API (`PlatformClient.files_*`, core path `knowledge/<rel>` — #356/ADR-0064); `create_pages_router` registers the HTTP endpoints. `move_item` relocates the file then calls the indexer's `move_path` to keep the ledger + Qdrant in step (#470) — before this fix only the suggestion-approval path re-indexed a move. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. Each save snapshots a version via the injected `VersionStore`, and `list_versions`/`get_version` back the version-history endpoints (#ADR-0046). |

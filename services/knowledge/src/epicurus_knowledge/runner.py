@@ -20,17 +20,19 @@ _log = get_logger("knowledge.runner")
 
 # Index outcome counts, summed across sources.
 Counts = dict[str, int]
-_COUNT_KEYS = ("indexed", "deleted", "unchanged")
+# ``fuse_tripped`` (#848) counts the sources whose pass was refused by the mass de-index
+# fuse, so a refusal is visible on ``GET /status``'s ``last_result``, not only in the logs.
+_COUNT_KEYS = ("indexed", "deleted", "unchanged", "fuse_tripped")
 
 
 class SourceIndexer(Protocol):
     """Anything the runner can drive — vault, platform-docs, and module-docs indexers."""
 
-    async def reconcile(self) -> bool:
+    async def reconcile(self, *, force: bool = False) -> bool:
         """Self-heal stale state before indexing (#229); ``True`` if it changed anything."""
         ...
 
-    async def run(self) -> dict[str, int]: ...
+    async def run(self, *, force: bool = False) -> dict[str, int]: ...
 
 
 @dataclass(slots=True)
@@ -90,17 +92,20 @@ class IndexRunner:
         self._on_failed = on_failed
         self.state = IndexState()
 
-    async def run_once(self) -> Counts:
+    async def run_once(self, *, force: bool = False) -> Counts:
         """Run every indexer once and return the summed ``{indexed, deleted, unchanged}``.
 
         A reconcile pre-pass runs across *all* sources first (#229, #470), so any that share a
         Qdrant collection (the vault/platform-docs/module-docs all touch ``<tenant>__docs``)
         clear their stale ledgers before the first ``run`` recreates the collection, and any
         with a ledger row for a path that no longer exists gets it GC'd before the walk.
+
+        *force* is threaded to every source and bypasses the mass de-index fuse (#848) for
+        this pass — the operator's deliberate "yes, that source really is empty now".
         """
         reconciled = 0
         for indexer in self._indexers:
-            if await indexer.reconcile():
+            if await indexer.reconcile(force=force):
                 reconciled += 1
         if reconciled:
             _log.warning(
@@ -110,7 +115,7 @@ class IndexRunner:
 
         total: Counts = dict.fromkeys(_COUNT_KEYS, 0)
         for indexer in self._indexers:
-            result = await indexer.run()
+            result = await indexer.run(force=force)
             for key in _COUNT_KEYS:
                 total[key] += int(result.get(key, 0))
         return total
@@ -120,17 +125,22 @@ class IndexRunner:
         delay: float = self._base * (2.0 ** (attempt - 1))
         return min(self._cap, delay)
 
-    async def run_with_retry(self) -> None:
+    async def run_with_retry(self, *, force: bool = False) -> None:
         """Index until a full pass succeeds or attempts are exhausted.
 
         Re-running is safe: each indexer is incremental, so a retry only touches files
         that are still new or changed. Cancellation (app shutdown) propagates cleanly.
+
+        A fuse-refused pass (#848) is *not* an error and is not retried — the source is
+        readable, it just looks wrong — so the phase still lands on ``ready`` with
+        ``fuse_tripped`` in ``last_result``. Retrying could not help: the next pass would
+        weigh the same numbers and refuse again.
         """
         for attempt in range(1, self._max_attempts + 1):
             self.state.attempts = attempt
             self.state.phase = "indexing"
             try:
-                total = await self.run_once()
+                total = await self.run_once(force=force)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # deps not ready, embed failure, etc. — retry.

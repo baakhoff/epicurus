@@ -189,3 +189,42 @@ Active and recently resolved alerts are visible in Grafana at
 
 Historical firing periods appear in the Prometheus expression browser at
 `http://localhost:9090` under **Alerts**.
+
+### The Files view or knowledge search looks empty after a boot {#mass-deindex-fuse}
+
+A cold boot can bring the stack up with a **stale bind mount**: the container sees an empty
+`/data` while the real file space is intact on the host. Everything downstream then reads
+"there are no files" as truth. That is what happened on 2026-08-30 — the core's file scan
+reconciled `core_files` to zero rows and a knowledge re-index emptied the vault's Qdrant
+collection, with no error logged anywhere.
+
+Since #848 the derived indexes **refuse** that reconciliation instead of performing it (the
+*mass de-index fuse*). What you will see:
+
+- `epicurus-core-app` logs `mass de-index fuse tripped; index purge refused` at `ERROR`, with
+  the row counts, and `GET /platform/v1/files/scan-status` lists the refusing namespace.
+- `epicurus-knowledge` logs its equivalent (`mass de-index fuse tripped; index pass refused`)
+  per source; the Modules page's **knowledge** status
+  panel shows `index fuse tripped: true` with the detail, and a `POST /reindex` answers
+  `{"status": "refused", …}` rather than starting.
+- The metrics `epicurus_core_file_scan_fuse_tripped` and
+  `epicurus_knowledge_index_fuse_tripped` sit at `1`.
+
+The indexes are **stale, not lost** — the rows and vectors were kept. Recover the mount, not
+the index:
+
+1. Confirm the file space really is populated on the host (`ls` the directory
+   `EPICURUS_FILES_ROOT` points at, then `docker compose exec core-app ls /data/<tenant>`;
+   the container view is the one that lies).
+2. If the container's view is empty, restart the WSL2 backend and recreate the container:
+   `wsl.exe --shutdown`, restart Docker Desktop, then
+   `docker compose up -d --force-recreate core-app`.
+3. With `/data` visible again, re-run the scan and the index:
+   `curl -X POST 'http://localhost:8082/platform/v1/files/rescan'` (core-app's published host
+   port — `CORE_PORT`, see [ports](../reference/ports.md); `8080` is the echo module) and
+   knowledge's **Re-index** action (or `POST /reindex`). Both re-arm their fuse on the first
+   clean pass.
+
+Only if the file space genuinely lost its contents should the indexes follow it down: add
+`?force=true` to the rescan and the re-index. `force` deletes the derived state the fuse is
+protecting — confirm step 1 before using it.

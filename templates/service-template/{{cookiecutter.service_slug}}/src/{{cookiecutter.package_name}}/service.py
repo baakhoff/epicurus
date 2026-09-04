@@ -56,3 +56,32 @@ def build_module() -> EpicurusModule:
 #        from sqlalchemy.orm import Mapped, mapped_column
 #
 #        mtime_ns: Mapped[int] = mapped_column(BigInteger)   # NOT Integer
+#
+# 3. Does this module hold data the operator would expect to take with them when
+#    they move to another epicurus (#867)? Then it is *portable*: declare the flag
+#    and serve the two routes with the shared helper — never hand-roll an export
+#    format, and never put a secret in a record (a module holds none; the core
+#    reports what to re-enter). The store upserts by a **stable** id, so applying
+#    the same archive twice is a no-op:
+#
+#        from epicurus_core import (
+#            ImportReport, PortabilityRecord, add_portability_routes,
+#        )
+#
+#        module = EpicurusModule(MODULE_NAME, version="0.1.0", portable=True)
+#
+#        class Portability:
+#            schema = f"{MODULE_NAME}/1"     # bump when a record's SHAPE changes
+#
+#            async def export(self, *, tenant_id: str):
+#                for row in await store.all(tenant_id):
+#                    yield PortabilityRecord(kind="thing", id=row.id, data=row.as_dict())
+#
+#            async def import_(self, *, tenant_id, records, dry_run) -> ImportReport:
+#                report = ImportReport(schema_name=self.schema)
+#                async for record in records:
+#                    ...                      # upsert by record.id; never delete
+#                    report.record(record.kind, "created")
+#                return report
+#
+#        add_portability_routes(app, module, Portability())

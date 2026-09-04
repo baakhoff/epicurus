@@ -70,6 +70,7 @@ class EpicurusModule:
         oauth_scopes: dict[str, list[str]] | None = None,
         docs_url: str | None = None,
         reindexable: bool = False,
+        portable: bool = False,
         automation_templates: list[AutomationTemplate] | None = None,
     ) -> None:
         self._name = name
@@ -87,6 +88,11 @@ class EpicurusModule:
         self._oauth_scopes = dict(oauth_scopes or {})
         self._docs_url = docs_url
         self._reindexable = reindexable
+        # Tenant data portability (#867): the module serves ``GET /export`` /
+        # ``POST /import`` via ``add_portability_routes``, and the core's tenant export
+        # fans out to it. Declaring the flag without wiring the routes would make the
+        # export report the module as failed, so raise it in the same change that adds them.
+        self._portable = portable
         # Preset automations offered on the shell's Templates tab (ADR-0105). Declaring one
         # never creates anything: the operator instantiates it, so installing a module can
         # never make the assistant start acting on its own.
@@ -226,6 +232,7 @@ class EpicurusModule:
             oauth_scopes=dict(self._oauth_scopes),
             docs_url=self._docs_url,
             reindexable=self._reindexable,
+            portable=self._portable,
             automation_templates=list(self._automation_templates),
         )
 

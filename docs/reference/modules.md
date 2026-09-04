@@ -25,6 +25,7 @@ EpicurusModule(
     pages: list[PageSpec] | None = None,
     docs_url: str | None = None,
     reindexable: bool = False,
+    portable: bool = False,
 )
 ```
 
@@ -98,7 +99,97 @@ app = module.http_app()
 | `oauth_scopes` | `dict[str, list[str]]` | `{}` | OAuth API scopes the module needs per provider (#241), e.g. `{"google": ["https://www.googleapis.com/auth/calendar"]}`. The shell unions these across modules and requests them at connect (`?scope=`); the core always adds the default identity scopes. Empty = only identity scopes needed |
 | `docs_url` | `str \| None` | `None` | relative path on the module (e.g. `/module-docs`) returning usage docs the knowledge service auto-indexes (#215); see *Per-module docs* below |
 | `reindexable` | `bool` | `False` | the module holds embeddings and serves `POST /reindex` (drop + rebuild its Qdrant collection with the current model); the core's re-embed fan-out calls it when the embedding model changes (#332, ADR-0054). A module whose source has gone wholesale empty may **refuse** the rebuild rather than destroy its index — knowledge answers `{status: "refused", …}` and takes `?force=true` (#848) |
+| `portable` | `bool` | `False` | the module exports/imports its own tenant data (#867): it serves `GET /export` + `POST /import` via `add_portability_routes`, and the core's tenant export fans out to it. Modules that hold nothing worth carrying leave it `False` and are recorded in the archive as excluded; see *Portability* below |
 | `automation_templates` | `list[AutomationTemplate]` | `[]` | preset automations the module suggests, offered on the shell's Templates tab — **never auto-instantiated** (ADR-0105); see *Automation templates* below |
+
+## Portability — `GET /export` / `POST /import` (#867)
+
+Tenant data portability: an operator exports one epicurus and imports it into another
+(see [Export & import](../user/export-import.md) and the
+[platform API](platform-api.md#portability-867)). The core assembles the archive, but only a
+module knows what its own source-of-truth data is — so the contract is shaped exactly like
+`reindexable`: a manifest flag, a pair of routes the shared library serves for the module,
+and a fan-out the core drives.
+
+### `add_portability_routes`
+
+`epicurus_core.add_portability_routes(app: FastAPI, module: EpicurusModule, store)` —
+serves both routes for *store*. Declaring `portable=True` and calling this are separate
+steps on purpose: the flag is what the core fans out over, so a module that is still wiring
+its store can serve the routes while saying "not yet".
+
+The `store` is a small protocol (`epicurus_core.PortabilityStore`) — no base class:
+
+| Member | Meaning |
+| --- | --- |
+| `schema` *(property)* | `"<module>/<n>"` — the module's name and its **record** schema version. Not its release version (that travels beside it as `component_version`); bump `n` only when a record's shape changes in a way an older reader could not handle. |
+| `export(*, tenant_id) -> AsyncIterator[PortabilityRecord]` | An async generator yielding this tenant's source-of-truth records. Yield, don't collect — the core writes each line straight into the archive. |
+| `async import_(*, tenant_id, records, dry_run) -> ImportReport` | Apply (or with `dry_run`, only count) an incoming stream. **Upsert by `record.id`; never delete.** An unknown `kind` is counted as `skipped` with a warning, not an error. |
+
+### Record format
+
+Both routes speak **NDJSON** (`application/x-ndjson`), one JSON object per line. The first
+line is a header, every line after it is a record:
+
+```jsonc
+{"schema": "calendar/1", "component_version": "0.21.0"}          // header
+{"kind": "event", "id": "evt-8f2c", "data": {"title": "lunch"}}  // one record per line
+```
+
+`kind` is the module's own vocabulary; `id` must be **stable across installations** — it is
+the whole basis of the idempotent upsert, so a surrogate autoincrement key is exactly the
+wrong choice.
+
+| Route | Notes |
+| --- | --- |
+| `GET /export?tenant_id=…` | Streams the NDJSON above. `tenant_id` is required — there is no default tenant hiding in the contract (constraint #1). |
+| `POST /import?tenant_id=…&dry_run=…` | Accepts the same stream. Answers `{schema, counts: {<kind>: {created, updated, skipped}}, warnings: [...]}`. |
+
+### Compatibility
+
+Decided from the header **before a byte is written**, by both the core's import preview and
+the module's own door (`epicurus_core.schema_verdict`):
+
+| Incoming vs. local | Outcome |
+| --- | --- |
+| same version | applied |
+| **older** | applied, with a warning; the store owns any field-level migration |
+| **newer** | **409** — refused whole, never half-applied |
+| a different module | **409** |
+
+### Rules
+
+* **Additive, never destructive.** Nothing in this contract can delete. Applying the same
+  archive twice is a no-op (`skipped`/`updated`, nothing duplicated).
+* **Never put a secret in a record.** A module holds no credentials to begin with
+  (ADR-0010/0020); the core reports what the operator must re-enter.
+* **Export only source of truth.** Derived state (a Qdrant collection, a provider cache) is
+  rebuilt after import by the file rescan and the re-embed fan-out — exporting it would
+  carry vectors that are specific to the source's embedding model.
+
+```python
+from epicurus_core import ImportReport, PortabilityRecord, add_portability_routes
+
+module = EpicurusModule("calendar", version="0.21.0", portable=True)
+
+
+class CalendarPortability:
+    schema = "calendar/1"
+
+    async def export(self, *, tenant_id: str):
+        for event in await store.all(tenant_id):
+            yield PortabilityRecord(kind="event", id=event.id, data=event.as_dict())
+
+    async def import_(self, *, tenant_id, records, dry_run) -> ImportReport:
+        report = ImportReport(schema_name=self.schema)
+        async for record in records:
+            outcome = await store.upsert(tenant_id, record.id, record.data, dry_run=dry_run)
+            report.record(record.kind, outcome)
+        return report
+
+
+add_portability_routes(app, module, CalendarPortability())
+```
 
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema) ·

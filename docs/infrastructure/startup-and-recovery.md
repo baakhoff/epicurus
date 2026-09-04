@@ -19,14 +19,13 @@ host: Docker Desktop must itself start before any container can run.
 After the next Windows boot, Docker Desktop starts automatically, and the
 epicurus stack comes up within ~30 seconds without operator action.
 
-**Verify the setting is active (PowerShell):**
+**Verify the setting is active (from a WSL bash shell, via Windows interop):**
 
-```powershell
-Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" |
-  Select-Object -Property "Docker Desktop"
+```bash
+reg.exe query "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "Docker Desktop"
 ```
 
-A non-empty result confirms the registry entry is set.
+A result (not "unable to find the specified registry key") confirms the entry is set.
 
 ### What happens on reboot
 
@@ -40,7 +39,7 @@ A non-empty result confirms the registry entry is set.
 
 ## Confirming the stack is healthy
 
-```powershell
+```bash
 # From the repo root — shows all containers and their health status.
 docker compose ps
 ```
@@ -55,7 +54,7 @@ firing.
 
 If `docker compose ps` shows a container as `exited` or `restarting`:
 
-```powershell
+```bash
 # Check recent logs for the failing service.
 docker compose logs --tail 50 <service-name>
 
@@ -78,9 +77,9 @@ bootstrap still downloading, not a fault.
 
 If the 404s persist:
 
-```powershell
+```bash
 # Did the bootstrap give up? Look for "model bootstrap" lines.
-docker compose logs core-app | Select-String "model bootstrap"
+docker compose logs core-app | grep "model bootstrap"
 
 # What is actually installed?
 docker compose exec ollama ollama list
@@ -99,13 +98,13 @@ also seal if the sidecar crashes or loses its key.
 
 **Check the seal status:**
 
-```powershell
+```bash
 docker compose exec openbao bao status
 ```
 
 **If `openbao-unseal` is not running:**
 
-```powershell
+```bash
 docker compose restart openbao-unseal
 ```
 
@@ -119,11 +118,9 @@ the unseal key off-box (in a password manager) is essential.
 
 **Manual unseal** (if the sidecar cannot be fixed quickly):
 
-```powershell
-$key = Read-Host "Unseal key" -AsSecureString
-$plainKey = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-  [Runtime.InteropServices.Marshal]::SecureStringToBSTR($key))
-docker compose exec openbao bao operator unseal $plainKey
+```bash
+read -s -p "Unseal key: " key; echo
+docker compose exec openbao bao operator unseal "$key"
 ```
 
 ### Every secret read fails with "permission denied" {#openbao-token-expired}
@@ -143,8 +140,8 @@ warns weeks before the lease actually runs out.
 
 **Confirm** (a live token prints a TTL; an expired one 403s):
 
-```powershell
-docker compose exec -e BAO_TOKEN=$env:OPENBAO_TOKEN openbao bao token lookup
+```bash
+docker compose exec -e BAO_TOKEN=$OPENBAO_TOKEN openbao bao token lookup
 ```
 
 **Recover** — mint a periodic replacement with the root token from `.env.secrets`, put it in
@@ -160,7 +157,7 @@ This is the filesystem where Docker stores named volumes.
 
 **Check current usage:**
 
-```powershell
+```bash
 # From inside a container that has the WSL2 root mounted:
 docker run --rm -v /:/rootfs:ro alpine df -h /rootfs
 ```
@@ -181,8 +178,8 @@ Docker Desktop occasionally needs to be restarted after major Windows updates
 
 1. Check Docker Desktop's status in the system tray.
 2. If it shows an error, right-click → **Restart**.
-3. If restarting doesn't help, open a PowerShell terminal and run:
-   `wsl --shutdown`, then restart Docker Desktop.
+3. If restarting doesn't help, from a WSL bash shell run `wsl.exe --shutdown` (Windows
+   interop puts `wsl.exe` on the WSL `PATH`), then restart Docker Desktop.
 
 ### Checking alert history
 

@@ -274,13 +274,17 @@ async def engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
 
 
 async def _wire(
-    engine: AsyncEngine, *, google: _FakeGoogle | None = None, prefs: CollectionPrefs | None = None
+    engine: AsyncEngine,
+    *,
+    google: _FakeGoogle | None = None,
+    prefs: CollectionPrefs | None = None,
+    ttl_s: float = 900.0,
 ) -> _Wiring:
     local_store = LocalEventStore(engine)
     await local_store.init()
     sync_store = CalendarSyncStore(engine)
     await sync_store.init()
-    ledger = SelfWriteLedger(engine, ttl_s=900.0)
+    ledger = SelfWriteLedger(engine, ttl_s=ttl_s)
     await ledger.init()
     backend = google if google is not None else _FakeGoogle()
     bus = _RecordingBus()
@@ -366,6 +370,144 @@ async def test_a_series_written_here_is_announced_once_not_once_per_occurrence(
     )
     assert wiring.bus.types() == ["calendar.event_created"]
     assert await wiring.reconciler.reconcile() == 0
+    assert wiring.bus.types() == ["calendar.event_created"]
+
+
+# ── a series write straddling two passes (#843) ──────────────────────────────
+
+
+def _split_feed(google: _FakeGoogle, head: int) -> list[EventChange]:
+    """Hold back all but the first *head* pending changes; returns what was held back.
+
+    A real delta splits a series write across passes for several ordinary reasons — the feed
+    paginates, the poll interval lands mid-write, a restart cuts the pass in half, an occurrence
+    is edited a minute after the rest. The provider fake drains everything pending in one call,
+    so the split is staged here rather than left to chance.
+    """
+    pending = list(google.pending)
+    google.pending = pending[:head]
+    return pending[head:]
+
+
+async def test_a_series_write_observed_across_two_passes_is_announced_once(
+    engine: AsyncEngine,
+) -> None:
+    """The #843 regression, stated as the invariant it broke.
+
+    The first pass sees two of the three occurrences, so they collapse and the emission is
+    re-keyed onto the *series* id. That made ``event_id == series_id``, which sent the **series**
+    marker down the ledger's ``consume`` path and deleted it — so the third occurrence, arriving
+    on the very next pass, found nothing to match and re-announced a write this module had
+    already announced itself. One series write is one event, however the provider chops it up.
+    """
+    wiring = await _wire(engine)
+    await wiring.router.create_event(
+        tenant_id=TENANT,
+        title="Weekly",
+        start=_dt(9),
+        end=_dt(10),
+        recurrence="FREQ=WEEKLY;COUNT=3",
+    )
+    assert wiring.bus.types() == ["calendar.event_created"]
+
+    held_back = _split_feed(wiring.google, 2)
+    assert len(held_back) == 1
+    assert await wiring.reconciler.reconcile() == 0  # collapsed group → peeked, not consumed
+
+    wiring.google.pending = held_back
+    assert await wiring.reconciler.reconcile() == 0
+    assert wiring.bus.types() == ["calendar.event_created"]
+
+
+async def test_a_collapsed_pass_leaves_the_series_marker_in_the_ledger(
+    engine: AsyncEngine,
+) -> None:
+    """The mechanism under the test above, asserted directly on the ledger: a collapsed group
+    peeks, so the marker is still there for the occurrences that have not arrived yet."""
+    wiring = await _wire(engine)
+    series = await wiring.router.create_event(
+        tenant_id=TENANT,
+        title="Weekly",
+        start=_dt(9),
+        end=_dt(10),
+        recurrence="FREQ=WEEKLY;COUNT=3",
+    )
+    marker = f"calendar.event_created|google:{series.id}"
+    assert await wiring.ledger.peek(tenant=TENANT, key=marker) is True
+
+    _split_feed(wiring.google, 2)
+    await wiring.reconciler.reconcile()
+    assert await wiring.ledger.peek(tenant=TENANT, key=marker) is True
+
+
+async def test_two_collapsed_passes_of_one_series_write_stay_quiet(
+    engine: AsyncEngine,
+) -> None:
+    """Both halves collapse, so both take the peek path — the marker has to survive twice."""
+    wiring = await _wire(engine)
+    series = await wiring.router.create_event(
+        tenant_id=TENANT,
+        title="Weekly",
+        start=_dt(9),
+        end=_dt(10),
+        recurrence="FREQ=WEEKLY;COUNT=3",
+    )
+    # A fourth occurrence of the same series write, so each pass carries two.
+    wiring.google.arrives(
+        Event(
+            id=f"{series.id}_3",
+            title="Weekly",
+            start=_dt(9) + timedelta(days=21),
+            end=_dt(10) + timedelta(days=21),
+            provider="google",
+            recurring_event_id=series.id,
+        )
+    )
+    held_back = _split_feed(wiring.google, 2)
+    assert len(held_back) == 2
+
+    assert await wiring.reconciler.reconcile() == 0
+    wiring.google.pending = held_back
+    assert await wiring.reconciler.reconcile() == 0
+    assert wiring.bus.types() == ["calendar.event_created"]
+
+
+async def test_a_single_occurrence_exact_match_still_consumes_its_marker(
+    engine: AsyncEngine,
+) -> None:
+    """The other half of the invariant: only a *genuine* single-occurrence exact match consumes.
+
+    A one-off write is observed once, its marker has done its job, and it must go — otherwise a
+    later external edit of the same event would be muted for the rest of the TTL.
+    """
+    wiring = await _wire(engine)
+    created = await wiring.router.create_event(
+        tenant_id=TENANT, title="Standup", start=_dt(9), end=_dt(10)
+    )
+    marker = f"calendar.event_created|google:{created.id}"
+    assert await wiring.ledger.peek(tenant=TENANT, key=marker) is True
+
+    assert await wiring.reconciler.reconcile() == 0
+    assert await wiring.ledger.peek(tenant=TENANT, key=marker) is False
+
+
+async def test_a_series_marker_is_released_by_its_ttl_not_by_a_read(
+    engine: AsyncEngine,
+) -> None:
+    """Peeking never releases the marker, so the TTL is what does — and it must really do it, or
+    an external series edit would be muted forever. With the TTL already elapsed the very same
+    occurrences are news again."""
+    wiring = await _wire(engine, ttl_s=0.0)
+    await wiring.router.create_event(
+        tenant_id=TENANT,
+        title="Weekly",
+        start=_dt(9),
+        end=_dt(10),
+        recurrence="FREQ=WEEKLY;COUNT=3",
+    )
+    wiring.bus.published.clear()
+    assert await wiring.ledger.prune(tenant=TENANT) >= 1
+    assert await wiring.reconciler.reconcile() == 1
     assert wiring.bus.types() == ["calendar.event_created"]
 
 

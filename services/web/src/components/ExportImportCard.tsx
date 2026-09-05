@@ -25,6 +25,8 @@ import type {
 
 const POLL_MS = 1_000;
 
+/** Not `@/lib/format`'s `formatBytes`: that one answers `""` for 0 (right for an optional
+ *  size chip, wrong inside "Download archive (…)"), and an empty archive is a real state. */
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -188,7 +190,9 @@ function ReportView({ report }: { report: PortabilityReport }) {
         {report.rescan_error ? (
           <span className="text-danger">failed ({report.rescan_error})</span>
         ) : (
-          `re-scanned (${report.rescan_entries ?? 0} entries)`
+          `${report.rescan_forced ? "force-re-scanned" : "re-scanned"} (${
+            report.rescan_entries ?? 0
+          } entries)`
         )}
         {" · "}
         {report.reembed_error ? (

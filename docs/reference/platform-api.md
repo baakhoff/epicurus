@@ -549,8 +549,11 @@ into another. Operator-facing (the Settings card drives it); every endpoint is t
 via `?tenant_id=` (default: the deployment's tenant), and a job id belonging to another
 tenant reads as **404**, not 403.
 
-Both halves run as **durable background jobs**: the request returns immediately and the
-shell polls, so a page reload finds the job again. The archive itself lives in a
+Both halves run as **durable background jobs**: the request returns immediately, the work
+continues server-side whatever the browser does, and the shell polls until it settles. The
+job row outlives the request, so it can be re-read by id at any time — the Settings card
+holds the id only for the life of the page, so a reload today starts the operator over
+rather than re-attaching (there is no list endpoint yet). The archive itself lives in a
 **disposable staging directory** (`PORTABILITY_STAGING_DIR`), swept after
 `PORTABILITY_RETENTION_HOURS` — a download of a swept archive is a **410**, and the answer
 is to export again.
@@ -634,16 +637,18 @@ Applies a staged import in the background. **202**. **409** if the job is not `s
      "created": 4812, "updated": 0, "skipped": 0, "warnings": []}
   ],
   "files": {"written": 130, "skipped": 4, "conflicts": ["notes/edited.md"]},
-  "rescan_entries": 134, "rescan_error": null,
+  "rescan_entries": 134, "rescan_error": null, "rescan_forced": true,
   "reembed": [{"module": "knowledge", "status": "started"}], "reembed_error": null,
   "reenter_secrets": {"provider_keys": ["openai"], "connected_accounts": ["google"]}
 }
 ```
 
 `conflicts` names files that exist here with **different bytes** — never overwritten. After
-the components land, the core runs the **forced** file rescan (#848 would otherwise rightly
-refuse a fresh install's empty→populated flip) and the re-embed fan-out (#332); both are
-reported, and either failing does not invalidate the data that already landed.
+the components land, the core runs the file rescan for **this import's tenant** with the
+#848 mass de-index fuse bypassed (it would otherwise rightly refuse a fresh install's
+empty→populated flip) and then the re-embed fan-out (#332); both are reported, and either
+failing does not invalidate the data that already landed. `rescan_forced` says the fuse was
+waived, so a safety rule is never overridden without the report naming it.
 `reenter_secrets` repeats the source's secret inventory — **names only**, since no secret
 material is ever in an archive.
 

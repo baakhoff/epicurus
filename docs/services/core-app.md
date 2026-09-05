@@ -988,8 +988,11 @@ schema, module version, and the reason for anything skipped), the **exclusions**
 reasons, and the **secret inventory** — names only.
 
 **What travels: source of truth only.** Derived state is not exported; it is rebuilt after
-the import (the forced file rescan, then the #332 re-embed fan-out). Operational state is
-not exported either: it is about *this* installation and means nothing in another one.
+the import — the file rescan for **the tenant just imported into** (never the deployment
+default: the apply threads its tenant all the way down), run with the #848 mass de-index
+fuse bypassed and `rescan_forced: true` on the report to say so, then the #332 re-embed
+fan-out. Operational state is not exported either: it is about *this* installation and
+means nothing in another one.
 
 | Set (`core/<set>.ndjson`) | Tables |
 | --- | --- |
@@ -1034,7 +1037,8 @@ speaking a schema this install cannot read is recorded as `skipped` with its rea
 job carries on — moving house does not cost the operator their conversations because the
 mail container is restarting.
 
-**Staging.** Jobs are durable rows (`portability_jobs`) so a page reload finds them; the
+**Staging.** Jobs are durable rows (`portability_jobs`), so an export survives the request
+that started it and stays readable by id; the
 archive itself lives in `PORTABILITY_STAGING_DIR`, a **disposable cache** (constraint #2)
 swept after `PORTABILITY_RETENTION_HOURS`. A download of a swept archive is a `410`, and the
 answer is to export again.

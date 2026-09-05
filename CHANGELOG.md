@@ -34,9 +34,9 @@ images to GHCR.
   empty→populated flip, hence *forced*, and the report says so); and **no secret ever enters an
   archive** (keys stay in OpenBao; the manifest carries their *names* so the import report can
   say what to re-enter and reconnect, and a test greps the produced bytes for the fixture's key
-  values). Jobs are durable rows so a page reload finds them again; the archive itself is a
-  disposable staging artefact (constraint #2), and a download of a swept one answers 410 rather
-  than pretending. Module implementations (calendar, tasks, notes, knowledge, mail, messaging,
+  values). Jobs are durable rows, so the work outlives the request that started it and stays
+  readable by id; the archive itself is a disposable staging artefact (constraint #2), and a
+  download of a swept one answers 410 rather than pretending. Module implementations (calendar, tasks, notes, knowledge, mail, messaging,
   storage) are separate follow-up issues. `epicurus-core` 0.35.0→0.36.0 (MINOR) · `core-app`
   0.117.0→0.118.0 (MINOR) · `web` 0.139.0→0.140.0 (MINOR).
 

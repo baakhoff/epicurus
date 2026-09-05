@@ -14,9 +14,12 @@ Three properties the implementation is built around, in order of importance:
   or speaking a schema this installation cannot read is recorded and stepped over — an
   operator moving house does not lose their conversations because the mail container is
   restarting.
-* **Nothing large is ever wholly in memory.** Each component is streamed to its own staged
-  part file and handed to tar; the file space is copied a file at a time; the apply reads
-  each member back as a stream.
+* **No component is ever wholly in memory.** Each one is streamed to its own staged part file
+  and handed to tar; an NDJSON member is read back line by line and a module's member is
+  proxied to it chunk by chunk. The one exception is a *file*, which both halves read whole
+  because :class:`~epicurus_core.files.FileStore` has no chunked read — which is exactly why
+  the per-file ceiling (``PORTABILITY_MAX_FILE_MB``) exists rather than being optional polish,
+  and why it can go away the day the store grows a ``read_stream``.
 
 Staging is a **disposable cache directory** (constraint #2): the archive is a build artefact,
 reproducible by pressing Export again, and the durable state is the job row that points at
@@ -625,7 +628,7 @@ class PortabilityService:
                     name = member[len(MODULE_MEMBER_PREFIX) : -len(".ndjson")]
                     report.components.append(await self._apply_module(reader, member, name, tenant))
                 report.files = await self._apply_files(reader, tenant)
-            await self._rebuild(report)
+            await self._rebuild(report, tenant)
             await self._jobs.update(
                 tenant=tenant, job_id=job_id, status="done", report=as_json(report)
             )
@@ -743,17 +746,25 @@ class PortabilityService:
                 transfer.conflicts.append(path)
         return transfer
 
-    async def _rebuild(self, report: ImportReportView) -> None:
+    async def _rebuild(self, report: ImportReportView, tenant: str) -> None:
         """Re-derive what the archive deliberately omitted: the file index, then the vectors.
 
         The rescan is **forced** (#848): a fresh install's index is empty and the imported
         tree is not, which is exactly the wholesale flip the mass de-index fuse exists to
-        refuse. Forcing it is the operator's "yes, this really is the new tree" — and the
-        report says the rescan was forced so nothing about that is implicit.
+        refuse. Forcing it is the operator's "yes, this really is the new tree" — and
+        ``rescan_forced`` on the report says so, so nothing about that is implicit.
+
+        It is also **tenant-scoped** (constraint #1). The core's rescan helper falls back to
+        the deployment's default tenant when handed none, so an apply that dropped the tenant
+        here would rebuild the wrong tree's index and report its count as this import's. The
+        apply knows the tenant all the way down; the last step must not be where it forgets.
+        The re-embed fan-out carries no tenant of its own — it is the existing #332 call, and
+        each module re-embeds its own tenant's corpus (single-tenant in v1).
         """
         if self._rescan is not None:
             try:
-                report.rescan_entries = await self._rescan(force=True)
+                report.rescan_entries = await self._rescan(force=True, tenant=tenant)
+                report.rescan_forced = True
             except Exception as exc:
                 report.rescan_error = f"{type(exc).__name__}: {exc}"
                 log.warning("portability post-import rescan failed", error=str(exc))

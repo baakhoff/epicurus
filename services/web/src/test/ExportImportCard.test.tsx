@@ -111,6 +111,7 @@ const DONE_IMPORT = {
     files: { written: 3, skipped: 1, conflicts: ["notes/edited.md"] },
     rescan_entries: 12,
     rescan_error: null,
+    rescan_forced: true,
     reembed: [{ module: "knowledge", status: "started" }],
     reembed_error: null,
     reenter_secrets: SECRETS,
@@ -195,7 +196,9 @@ describe("ExportImportCard (#867)", () => {
     expect(await screen.findByText(/42 new/)).toBeInTheDocument();
     expect(screen.getByText(/3 written/)).toBeInTheDocument();
     expect(screen.getByText(/left alone because they differ here/)).toBeInTheDocument();
-    expect(screen.getByText(/re-scanned \(12 entries\)/)).toBeInTheDocument();
+    // "force-", not just "re-scanned": the #848 fuse was waived to let a fresh install
+    // accept a populated tree, and a waived safety rule has to be visible in the report.
+    expect(screen.getByText(/force-re-scanned \(12 entries\)/)).toBeInTheDocument();
   });
 
   it("shows what an archive deliberately leaves behind", async () => {

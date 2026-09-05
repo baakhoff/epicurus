@@ -195,13 +195,16 @@ def _service(
     bases: dict[str, str] | None = None,
     streams: dict[str, bytes] | None = None,
     facts: FakeFacts | None = None,
-    rescans: list[bool] | None = None,
+    rescans: list[tuple[bool, str | None]] | None = None,
     reembeds: list[dict[str, str]] | None = None,
     max_file_bytes: int = 0,
 ) -> TestService:
     async def rescan(force: bool = False, tenant: str | None = None) -> int:
+        # Records the *tenant* as well as the force flag: the real helper defaults to the
+        # deployment tenant when handed none, so a dropped tenant here would rebuild the
+        # wrong tree's index and never fail a test that only looked at ``force``.
         if rescans is not None:
-            rescans.append(force)
+            rescans.append((force, tenant))
         return 7
 
     async def reembed() -> list[dict[str, str]]:
@@ -606,7 +609,7 @@ async def test_apply_restores_core_rows_files_and_facts_then_rebuilds(tmp_path: 
     engine = await _engine(tmp_path)
     await _seed_core(engine)
     facts = FakeFacts(["the user prefers mornings"])
-    rescans: list[bool] = []
+    rescans: list[tuple[bool, str | None]] = []
     service = _service(
         tmp_path,
         engine,
@@ -649,9 +652,11 @@ async def test_apply_restores_core_rows_files_and_facts_then_rebuilds(tmp_path: 
         assert report.files.written == 1
         assert await service._files.read_bytes(tenant=TENANT, path="notes/hello.md") == b"# hello"
         assert [f.text for f in facts.facts] == ["the user prefers mornings"]
-        # The rebuilds the archive deliberately depends on, both reported, rescan forced.
-        assert rescans == [True]
+        # The rebuilds the archive deliberately depends on, both reported — and the rescan
+        # is forced *for this import's tenant*, never the deployment default (constraint #1).
+        assert rescans == [(True, TENANT)]
         assert report.rescan_entries == 7
+        assert report.rescan_forced is True
         assert report.reembed == [{"module": "knowledge", "status": "started"}]
         # And the operator is told what to re-enter, at the moment it matters.
         assert report.reenter_secrets.provider_keys == ["openai"]

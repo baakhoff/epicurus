@@ -212,6 +212,11 @@ class ImportReportView(BaseModel):
     # either can fail without invalidating the data that already landed.
     rescan_entries: int | None = None
     rescan_error: str | None = None
+    # Whether that rescan ran with the #848 mass de-index fuse bypassed. It always does after
+    # an import — a fresh install's empty index flipping to a populated one is precisely what
+    # the fuse refuses — and saying so in the report is what keeps that from being a silent
+    # override of a safety rule the operator never saw waived.
+    rescan_forced: bool = False
     reembed: list[dict[str, str]] = Field(default_factory=list)
     reembed_error: str | None = None
     # Repeated from the source manifest so the operator sees it at the moment it matters.

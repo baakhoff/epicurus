@@ -1799,6 +1799,10 @@ export const PortabilityReport = z.object({
     .default({ written: 0, skipped: 0, conflicts: [] }),
   rescan_entries: z.number().nullish(),
   rescan_error: z.string().nullish(),
+  // The rescan runs with the #848 mass de-index fuse bypassed — a fresh install's
+  // empty→populated flip is exactly what that fuse refuses. The card says so out loud
+  // rather than letting a waived safety rule go unmentioned.
+  rescan_forced: z.boolean().default(false),
   reembed: z.array(z.record(z.string(), z.string())).default([]),
   reembed_error: z.string().nullish(),
   reenter_secrets: PortabilitySecrets.default({ provider_keys: [], connected_accounts: [] }),

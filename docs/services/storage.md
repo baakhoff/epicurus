@@ -86,6 +86,8 @@ into the unified Files page; the operator never calls storage directly.
 | `GET /download?path=…` | **Object-only streaming** (binary-safe) — streams a catalogued object from MinIO with its stored content type. Path-traversal attempts → **HTTP 400**, **404** when the object is not catalogued. The core's `GET /platform/v1/files/download` proxies here for object entries (file-space files stream from the core's own store). |
 | `POST /objects/move` (body `{from_path, to_path}`) | **Rename/move an object (#381 / #391).** Object entries only. **404** missing src, **409** dst occupied, **400** traversal. Returns `{path}`. The core invokes this when a Files move targets a storage object. |
 | `DELETE /objects?path=…` | **Delete an object and its subtree (#564).** Object entries only. Returns `{deleted}` — idempotent (a missing object is a clean `false`, not a 404). **400** the root or a read-only (`source="fs"`) entry. The core's `DELETE /platform/v1/files/entry` falls back here when a Files-page delete targets a storage object (chat upload / agent object). |
+| `GET /export?tenant_id=…` · `POST /import?tenant_id=…&dry_run=…` | **Tenant portability, the catalogue half (#876)** — NDJSON records, served by `add_portability_routes`. See *Portability* below. |
+| `GET /export/blobs?tenant_id=…` · `GET /export/blobs/{id}?tenant_id=…` · `PUT /import/blobs/{id}?tenant_id=…&sha256=…&size=…&content_type=…` | **Tenant portability, the byte half (#876)** — the objects themselves, listed and streamed. Storage is the only module that serves these today. |
 | `GET /health` · `GET /metrics` · `GET /manifest` | Ops + the module manifest. |
 
 > **Path safety.** Object paths are normalised and confined to the tenant bucket
@@ -186,6 +188,60 @@ longer mounts or scans the shared file space (the core does, behind `FILES_WATCH
   lazily, one bucket per tenant. Chat uploads live here under the `uploads/` prefix; the
   `storage_object_*` tools store text objects in the same bucket under the agent's chosen key.
   Either way the object is catalogued in `storage_files` so the core Files page lists it.
+
+## Portability (#876)
+
+Storage is the one module whose export is **bytes**. Every other portable module carries rows;
+here the rows are only half the story — the objects live in the tenant's own MinIO bucket,
+which is *not* part of the core-owned file space the archive already carries under `files/`.
+Lose the bytes and an operator moves house to a list of filenames; lose the rows and the bytes
+land in a bucket nothing can see. So the module implements both halves of the
+[portability contract](../reference/modules.md#portability--get-export--post-import-867):
+`PortabilityStore` for the catalogue and `BlobPortabilityStore` for the objects.
+
+**Schema `storage/1`.** `EpicurusModule(portable=True)`; the store is
+`epicurus_storage/portability.py`, wired in `app.py`.
+
+| Kind | Stable id | What travels |
+| --- | --- | --- |
+| `file` | the object **path** (`uploads/a1-scan.pdf`) — the natural key, unique per tenant, and the same id its blob uses | `name` · `size` · `mtime` |
+| `folder` | the folder **path** (`uploads`) | `name` |
+| *blob* | the same object path as the `file` record it belongs to | the object's bytes, with the `content_type` MinIO holds them under |
+
+Folders travel as records of their own rather than being re-derived from file paths on import:
+deriving them would be nearly right and quietly wrong, since a folder the operator created and
+then emptied has no file under it to derive it from.
+
+**Excluded**
+
+| Left out | Why |
+| --- | --- |
+| `storage_files` rows with `source="fs"` | **derived** — the legacy mirror of the core-owned file space (ADR-0063), which the archive carries itself under `files/`. Exporting them would carry that tree twice, and carry it as *this* module's source of truth when it is not. |
+| the surrogate `storage_files.id` | a per-database autoincrement means nothing in another installation; the path is the natural key the upsert matches on. |
+| `tenant` | never travels — stripped on export, re-applied from the **target** tenant on import (constraint #1). |
+| `source` | implied: everything exported here is an object row, and the import writes it back as one. |
+| `updated_at` | **operational** — when *this* installation last wrote the row. It says nothing about the file, and carrying it would make an unchanged re-import look like a change. |
+| the MinIO bucket's own state (bucket policy, versioning, an uncatalogued object) | **not source of truth** — the catalogue is what every surface reads, so an object with no row is unreachable here and would arrive unreachable. |
+| secrets | never — the module holds none (ADR-0010/0020). |
+
+**Rules it obeys.** Import is an upsert by path and **never deletes**. A second apply is a
+no-op: an identical row is `skipped`, and a blob is skipped when the object already at that id
+hashes to the same SHA-256. **Nothing is ever overwritten** — an id holding *different* bytes
+keeps them and is reported as a conflict, the same rule the core applies to a file-space file
+the operator has since edited. A row this module does not own (a read-only `source="fs"` entry
+at the same path) is skipped rather than rewritten. An unknown `kind` is `skipped` with a
+warning. Nothing is ever held whole in memory: objects are read with `ObjectStore.open_object`
+and written with `ObjectStore.put_stream`, which switches to a multipart upload mid-stream (so
+a transfer that fails its digest check aborts without publishing a byte).
+
+**A record without its bytes.** The per-blob ceiling (`PORTABILITY_MAX_FILE_MB`) applies to each
+object. An over-cap object is omitted from the archive and **named** in the export job's reason
+and in the import report's `missing` list — but **its catalogue record still travels**. After
+the import the file is listed in the Files page with its size and its download answers **404**
+until the operator copies those bytes across by hand. That is deliberate: dropping the row
+instead would leave no trace that the file ever existed, and nothing for the operator to go and
+fetch. The same applies to an object whose bytes are already gone on the source — its row
+travels, its blob is not listed.
 
 ## Dependencies
 

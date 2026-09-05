@@ -191,6 +191,76 @@ class CalendarPortability:
 add_portability_routes(app, module, CalendarPortability())
 ```
 
+### Blobs — a module whose data is *bytes* (#876)
+
+Records model rows. A module that also owns **objects** — [`storage`](../services/storage.md)
+and its per-tenant bucket, which is *not* in the core-owned file space — implements a second,
+optional protocol, `epicurus_core.BlobPortabilityStore`, and the same
+`add_portability_routes` call serves three more routes for it. Nothing else changes: the
+manifest flag is still `portable`, and the core discovers the byte half from
+`GET /export/blobs` answering **200** rather than **404**. A module with no bytes is untouched
+by any of this — the three-member store above is still the whole contract for it.
+
+| Member | Meaning |
+| --- | --- |
+| `blobs(*, tenant_id) -> AsyncIterator[BlobRef]` | An async generator yielding `{id, size, content_type}` for every blob this tenant owns. Use the **same `id` as the record** the blob belongs to, and the two pair up with no join table. |
+| `open_blob(*, tenant_id, blob_id) -> AsyncIterator[bytes]` | That blob's bytes, chunk by chunk (`epicurus_core.BLOB_CHUNK_BYTES` is the hint). Raise `FileNotFoundError` for an unknown id — the route turns it into a 404 *before* the response starts, so a missing blob is never a truncated download. |
+| `async put_blob(*, tenant_id, blob_id, sha256, size, content_type, chunks) -> BlobOutcome` | Write one blob, additively. **Consume the whole stream before publishing anything** (see *Verification*). Answers `{id, outcome, warning}`. |
+
+`BlobRef` deliberately carries **no digest**: a store that had to declare one would have to
+read its entire corpus to produce the listing, and read it again to serve the bytes. The core
+hashes the archived member on the way back in and declares *that* digest on the `PUT`, which
+is the one that actually protects the transfer.
+
+| Route | Notes |
+| --- | --- |
+| `GET /export/blobs?tenant_id=…` | NDJSON, one `BlobRef` per line — **no header line** (the record stream's header already names the schema). Absent (404) on a module without bytes. |
+| `GET /export/blobs/{id}?tenant_id=…` | The blob's bytes, streamed. An id is a whole path (`uploads/a/b.pdf`), so it is a `:path` parameter — URL-encode it. |
+| `PUT /import/blobs/{id}?tenant_id=…&sha256=…&size=…&content_type=…` | The bytes back. **400** if the body does not match the declared digest or length. |
+
+**Idempotency is by content.** `put_blob` compares the digest of whatever already sits at that
+id: equal → `skipped`; **different → `skipped`, with the id named in `warning` and the stored
+bytes left exactly as they are**. Nothing in the blob half overwrites, for the same reason the
+core never overwrites a file-space file whose bytes differ — an operator's later edit is the
+clearest case there is of something an import has no business replacing. A second apply of the
+same archive therefore writes nothing.
+
+**Verification is the library's, not yours.** The route wraps the incoming body in
+`epicurus_core.verified_chunks`, which raises at end of stream if the digest or the length
+disagrees. That is *why* a store must not publish before the stream is exhausted: a backend
+that committed early would commit bytes that never validated. (`storage`'s
+`ObjectStore.put_stream` switches to a multipart upload mid-stream for exactly this reason —
+an abort leaves the key holding whatever it held.)
+
+**The per-blob ceiling.** The core applies `PORTABILITY_MAX_FILE_MB` to each blob. An over-cap
+blob is omitted from the archive but **still listed**, so the import reports it as `missing`
+rather than leaving the operator to notice a count that does not add up.
+
+```python
+from epicurus_core import BlobOutcome, BlobRef, add_portability_routes
+
+
+class StoragePortability:  # …plus schema / export / import_ as above
+    async def blobs(self, *, tenant_id: str):
+        for entry in await index.files(tenant_id):
+            stat = await objects.stat_object(tenant=tenant_id, key=entry.path)
+            yield BlobRef(id=entry.path, size=stat.size, content_type=stat.content_type)
+
+    async def open_blob(self, *, tenant_id: str, blob_id: str):
+        async for chunk in objects.open_object(tenant=tenant_id, key=blob_id):
+            yield chunk
+
+    async def put_blob(self, *, tenant_id, blob_id, sha256, size, content_type, chunks):
+        if await objects.stat_object(tenant=tenant_id, key=blob_id) is not None:
+            same = await digest_of(tenant_id, blob_id) == sha256
+            await drain(chunks)  # still consume it: the verification runs there
+            return BlobOutcome(id=blob_id, outcome="skipped", warning=None if same else "differs")
+        await objects.put_stream(
+            tenant=tenant_id, key=blob_id, chunks=chunks, content_type=content_type
+        )
+        return BlobOutcome(id=blob_id, outcome="created")
+```
+
 ### `ToolSpec`
 `name: str` · `description: str = ""` · `input_schema: dict = {}` (JSON Schema) ·
 `writes_document: WritesDocument | None = None` (below) ·

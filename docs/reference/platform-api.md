@@ -590,6 +590,8 @@ will attempt (a progress display needs its denominator up front).
   "progress": [
     {"name": "conversations", "kind": "core", "state": "included", "count": 4812,
      "schema": "core/1", "version": "0.118.0", "member": "core/conversations.ndjson"},
+    {"name": "storage", "kind": "module", "state": "included", "count": 61,
+     "blobs": 58, "blob_bytes": 391051264, "member": "modules/storage.ndjson"},
     {"name": "mail", "kind": "module", "state": "skipped", "reason": "module is unreachable"},
     {"name": "files", "kind": "files", "state": "included", "count": 130}
   ],
@@ -602,6 +604,12 @@ will attempt (a progress display needs its denominator up front).
 `state` is `pending` · `running` · `included` · `skipped` · `failed`. **`skipped` is a
 fact, not a failure** — a module that is disabled, unreachable, or simply not `portable` is
 recorded with its reason and the job carries on.
+
+`blobs` / `blob_bytes` are the byte half of a module that has one (#876) — counted apart from
+`count` because a hundred records and a hundred objects are the same number and wildly
+different archives. A module with no bytes reports `0`. An object above
+`PORTABILITY_MAX_FILE_MB` is omitted and **named in `reason`**, exactly as an over-cap file is;
+its catalogue record still travels.
 
 ### `GET /platform/v1/portability/exports/{id}/archive`
 
@@ -621,6 +629,8 @@ applied. **413** over `PORTABILITY_MAX_ARCHIVE_MB`, **400** if it is not a reada
     "components": [
       {"name": "conversations", "kind": "core", "records": 4812, "verdict": "ok",
        "schema": "core/1"},
+      {"name": "storage", "kind": "module", "records": 61, "blobs": 58, "verdict": "ok",
+       "schema": "storage/1"},
       {"name": "calendar", "kind": "module", "records": 220, "verdict": "warning",
        "detail": "written by an older schema (calendar/1); the module will upgrade it"},
       {"name": "tasks", "kind": "module", "records": 40, "verdict": "refused",
@@ -652,7 +662,12 @@ Applies a staged import in the background. **202**. **409** if the job is not `s
 {
   "components": [
     {"name": "conversations", "kind": "core", "state": "included",
-     "created": 4812, "updated": 0, "skipped": 0, "warnings": []}
+     "created": 4812, "updated": 0, "skipped": 0, "blobs": null, "warnings": []},
+    {"name": "storage", "kind": "module", "state": "included",
+     "created": 61, "updated": 0, "skipped": 0,
+     "blobs": {"written": 57, "skipped": 1, "bytes_written": 390002688,
+               "conflicts": ["uploads/edited.pdf"], "missing": ["uploads/film.mov"]},
+     "warnings": ["1 object(s) travelled as catalogue entries without their bytes: …"]}
   ],
   "files": {"written": 130, "skipped": 4, "conflicts": ["notes/edited.md"]},
   "rescan_entries": 134, "rescan_error": null, "rescan_forced": true,
@@ -660,6 +675,13 @@ Applies a staged import in the background. **202**. **409** if the job is not `s
   "reenter_secrets": {"provider_keys": ["openai"], "connected_accounts": ["google"]}
 }
 ```
+
+A component's `blobs` is `null` unless that module carried bytes (#876). `conflicts` are ids
+that already held **different** bytes here and were left untouched; `missing` are ids the
+archive listed but whose bytes it does not carry (omitted at export by the per-blob ceiling) —
+their catalogue records still landed, so the entry is listed and its download 404s until the
+operator copies those bytes across by hand. Both are repeated in `warnings` so a reader that
+only shows warnings still sees them.
 
 `conflicts` names files that exist here with **different bytes** — never overwritten. After
 the components land, the core runs the file rescan for **this import's tenant** with the

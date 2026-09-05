@@ -12,6 +12,29 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Your uploads move house too — the tenant archive now carries bytes, not just rows**
+  (#876, part of #866) — every other module's data is rows, and `storage`'s is not: the files
+  you drop into chat and the objects the agent writes live in a per-tenant object bucket, which
+  is nowhere in the file space the archive already carried. Exporting the catalogue alone would
+  have handed you a list of filenames at the far end. So the module contract grows an optional
+  **byte half** — a second, tiny protocol (`blobs` / `open_blob` / `put_blob`) that the same
+  `add_portability_routes` call serves, discovered by the core from a route answering rather
+  than declared in a manifest, so no module that has no bytes is touched by it. An archive now
+  carries `modules/<name>/blobs.ndjson` and one member per object, and `storage` exports its
+  catalogue as records whose stable id is the file's path — the *same* id its bytes travel
+  under, so a row and its file pair up with nothing to join on. Nothing is ever held whole:
+  each object is streamed through the disposable staging directory in both directions, and in
+  and out of the object backend behind the module's own seam (multipart above 8 MiB), so a
+  four-gigabyte upload is never a four-gigabyte allocation and nothing here assumes MinIO.
+  Idempotency is by **content**: the core hashes each archived member and declares the digest on
+  the way in, the module skips an object it already holds byte-identically, and an id that holds
+  *different* bytes keeps them and is named as a conflict — the same rule the file space already
+  had, so a second apply writes nothing and an import can never overwrite an edit you made
+  since. The per-file ceiling applies per object; an over-cap one is omitted and **named**,
+  while its catalogue record still travels, so the file stays listed with its size and you know
+  exactly which bytes to carry across by hand instead of discovering the gap later. `storage`
+  0.9.3→0.10.0 (MINOR) · `epicurus-core` 0.36.0→0.37.0 (MINOR) · `core-app` 0.119.0→0.120.0
+  (MINOR).
 - **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
   an operator could stand up a second epicurus but had no way to *move into it*. The volume
   backups in `infra/backups` image one deployment for disaster recovery; nothing carried a

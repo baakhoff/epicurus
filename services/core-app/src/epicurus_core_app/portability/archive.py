@@ -5,6 +5,8 @@
     manifest.json                 what this archive is, and what it deliberately omits
     core/<set>.ndjson             the core's own data, one set per member
     modules/<name>.ndjson         each portable module's stream, verbatim
+    modules/<name>/blobs.ndjson   that module's blob listing, verbatim (#876)
+    modules/<name>/blobs/<id>     one member per blob — the bytes themselves
     files/<path>                  the tenant file space, paths relative to the tenant root
 
 Deliberately boring: gzip and tar, JSON and newline-delimited JSON. An operator can open
@@ -28,7 +30,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
-from epicurus_core import PortabilityRecord, StreamHeader, get_logger
+from epicurus_core import BlobRef, PortabilityRecord, StreamHeader, get_logger
 from epicurus_core_app.portability.models import (
     ARCHIVE_MANIFEST_MEMBER,
     CORE_MEMBER_PREFIX,
@@ -43,6 +45,9 @@ __all__ = [
     "MemberError",
     "core_member",
     "files_member",
+    "module_blob_member",
+    "module_blob_prefix",
+    "module_blobs_member",
     "module_member",
     "sanitize_member",
 ]
@@ -68,6 +73,21 @@ def module_member(name: str) -> str:
 
 def files_member(relative_path: str) -> str:
     return f"{FILES_MEMBER_PREFIX}{relative_path}"
+
+
+def module_blobs_member(name: str) -> str:
+    """Where a module's blob *listing* lives — one :class:`BlobRef` per line (#876)."""
+    return f"{MODULE_MEMBER_PREFIX}{name}/blobs.ndjson"
+
+
+def module_blob_prefix(name: str) -> str:
+    """The member prefix every one of a module's blobs sits under."""
+    return f"{MODULE_MEMBER_PREFIX}{name}/blobs/"
+
+
+def module_blob_member(name: str, blob_id: str) -> str:
+    """Where one blob's bytes live — the id kept verbatim, so the layout stays readable."""
+    return f"{module_blob_prefix(name)}{blob_id}"
 
 
 def sanitize_member(name: str) -> str | None:
@@ -185,9 +205,29 @@ class ArchiveReader:
         return member in self._members
 
     def ndjson_members(self, prefix: str) -> list[str]:
-        """Every ``.ndjson`` member under *prefix*, in archive order."""
+        """Every component ``.ndjson`` member **directly** under *prefix*, in archive order.
+
+        "Directly" is load-bearing since blobs arrived (#876): a module's own bytes live at
+        ``modules/<name>/blobs/<id>``, and a stored file legitimately called ``notes.ndjson``
+        would otherwise be read back as if it were the export stream of a module named
+        ``<name>/blobs/notes``. A component member has exactly one path segment after its
+        prefix; anything deeper belongs to that component, not beside it.
+        """
         return [
-            name for name in self._members if name.startswith(prefix) and name.endswith(".ndjson")
+            name
+            for name in self._members
+            if name.startswith(prefix)
+            and name.endswith(".ndjson")
+            and "/" not in name[len(prefix) :]
+        ]
+
+    def blob_members(self, module_name: str) -> list[tuple[str, int]]:
+        """``(blob id, size)`` for every blob member of *module_name*, in archive order."""
+        prefix = module_blob_prefix(module_name)
+        return [
+            (name[len(prefix) :], self._members[name].size)
+            for name in sorted(self._members)
+            if name.startswith(prefix)
         ]
 
     def file_members(self) -> list[tuple[str, int]]:
@@ -258,6 +298,9 @@ class ArchiveReader:
         Deliberately *not* re-serialized from parsed records: the module must receive the
         stream the source module wrote, header line and all, so that it applies its own
         compatibility rule to the real thing rather than to the core's paraphrase of it.
+
+        The same reader serves a blob member (which is bytes, not lines); the name is kept
+        for its callers.
         """
         tar = self._require()
         info = self._members.get(member)
@@ -298,12 +341,34 @@ class ArchiveReader:
             except Exception as exc:
                 raise MemberError(f"{member}: malformed record on line {number}: {exc}") from exc
 
+    async def blob_refs(self, member: str) -> AsyncIterator[BlobRef]:
+        """Every :class:`BlobRef` of a blob listing member — no header line to skip (#876).
+
+        The listing travels verbatim, so it names blobs the archive may not actually carry:
+        an object over the per-blob export ceiling is listed and omitted, deliberately, so
+        the import can say which bytes are missing instead of leaving it to be inferred.
+        """
+        number = 0
+        async for line in self.lines(member):
+            number += 1
+            try:
+                yield BlobRef.model_validate_json(line)
+            except Exception as exc:
+                raise MemberError(f"{member}: malformed blob ref on line {number}: {exc}") from exc
+
     async def count_records(self, member: str) -> int:
         """How many records one member carries (its lines, less the header)."""
         total = 0
         async for _ in self.lines(member):
             total += 1
         return max(total - 1, 0)
+
+    async def count_lines(self, member: str) -> int:
+        """How many non-empty lines a member has — a blob listing carries no header."""
+        total = 0
+        async for _ in self.lines(member):
+            total += 1
+        return total
 
     def _require(self) -> tarfile.TarFile:
         if self._tar is None:

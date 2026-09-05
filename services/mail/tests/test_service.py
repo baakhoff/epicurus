@@ -611,6 +611,18 @@ async def test_manifest_declares_mailbox_page() -> None:
     assert [(p.id, p.archetype) for p in manifest.pages] == [("mailbox", "mailbox")]
 
 
+async def test_manifest_declares_not_portable() -> None:
+    # Tenant data portability (#867/#874): every table mail persists is a Gmail-derived cache,
+    # not source-of-truth data, so the module deliberately leaves the flag off (the documented
+    # convention for "nothing worth carrying" — docs/reference/modules.md) rather than listing
+    # an always-empty component in every tenant export. GET /export + POST /import are still
+    # served (epicurus_mail.portability.MailPortability) so flipping this on later needs no new
+    # wiring — see test_portability.py for the route-level coverage of that store.
+    provider = _make_provider()
+    manifest = await build_module(provider).manifest()
+    assert manifest.portable is False
+
+
 # ── mail_archive / mail_trash tools (ADR-0087) ───────────────────────────────
 
 

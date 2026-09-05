@@ -10,6 +10,8 @@ disk dies; this is the path when a person moves house.
   operational and deliberately do not.
 * :mod:`.archive` — the ``.tar.gz`` layout, written and read off the event loop.
 * :mod:`.jobs` — the durable, tenant-scoped job rows a page reload can find again.
+* :mod:`.secrets` — what the source holds in OpenBao that the archive deliberately does not:
+  names only, the modules' own credentials included.
 * :mod:`.service` — the orchestrator: fan out, assemble, preview, apply, rebuild.
 * :mod:`.routes` — ``/platform/v1/portability``.
 """
@@ -23,9 +25,11 @@ from epicurus_core_app.portability.models import (
     ComponentEntry,
     ImportPreview,
     ImportReportView,
+    PortabilityJobSummary,
     SecretsInventory,
 )
 from epicurus_core_app.portability.routes import create_portability_router
+from epicurus_core_app.portability.secrets import collect_module_secrets
 from epicurus_core_app.portability.service import PortabilityService
 
 __all__ = [
@@ -36,7 +40,9 @@ __all__ = [
     "ImportReportView",
     "PortabilityJob",
     "PortabilityJobStore",
+    "PortabilityJobSummary",
     "PortabilityService",
     "SecretsInventory",
+    "collect_module_secrets",
     "create_portability_router",
 ]

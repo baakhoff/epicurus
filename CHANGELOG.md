@@ -12,6 +12,27 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **An export survives a reload — and the archive says which bridges to reconnect** (#877,
+  #875, part of #866) — the Export & import card kept its job id in component state and
+  nothing else, so refreshing the tab mid-export orphaned the run: it finished staging on the
+  server, was never offered to anyone, and was quietly cleaned up a day later. The job row was
+  durable all along; what was missing was a way to *find* it without an id. The core now
+  answers `GET /platform/v1/portability/jobs` — this tenant's last 20 jobs, newest first, both
+  kinds, each with an `archive_available` answered from the filesystem rather than from the
+  row, so a download link appears exactly when the download would work and a cleaned-up
+  archive says so plainly instead of handing out a link that 410s. The card reads that list on
+  mount and re-attaches to the newest job of each kind, whatever this tab did or did not
+  start: a running export resumes its progress, a finished one offers its download, an apply
+  left mid-flight comes back with its report, and a **Recent jobs** disclosure holds the rest.
+  It re-attaches on a second device and in a different browser too — which is why the server's
+  list is the source of truth and `localStorage` is not used at all. Alongside it, the
+  archive's secret inventory grew a third part (`module_secrets`): the export probes each
+  enabled module's declared OpenBao paths for **presence** — never the value — so a module
+  that persists no rows and still holds a credential is no longer invisible to the fan-out.
+  `messaging` is exactly that module: nothing to export, and a bot token per connected bridge,
+  so the import report now says "re-enter in module settings: messaging — discord, telegram"
+  instead of leaving the operator to find out on the far side that Discord went quiet.
+  `core-app` 0.118.0→0.119.0 (MINOR) · `web` 0.140.0→0.141.0 (MINOR).
 - **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
   an operator could stand up a second epicurus but had no way to *move into it*. The volume
   backups in `infra/backups` image one deployment for disaster recovery; nothing carried a

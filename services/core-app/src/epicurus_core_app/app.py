@@ -163,6 +163,7 @@ from epicurus_core_app.portability import (
     PortabilityJobStore,
     PortabilityService,
     SecretsInventory,
+    collect_module_secrets,
     create_portability_router,
 )
 from epicurus_core_app.push import (
@@ -854,13 +855,14 @@ def create_app() -> FastAPI:
     portability_jobs = PortabilityJobStore(engine)
 
     async def _portability_secrets(tenant: str) -> SecretsInventory:
-        """Which provider keys and connected accounts the source holds — names only.
+        """Which provider keys, connected accounts and module credentials the source holds.
 
         Secrets never enter the archive (they live in OpenBao). Naming them is the whole
         service this can render: the import report replays the list as "re-enter these,
         reconnect those" instead of leaving the operator to discover it one broken feature
-        at a time. Best-effort on both halves — an inventory we could not take must not fail
-        an otherwise good export.
+        at a time. The third part covers the modules' own credentials (#875) — a module that
+        exports no rows can still hold a bot token the core wrote for it. Best-effort in
+        each part: an inventory we could not take must not fail an otherwise good export.
         """
         keys: list[str] = []
         with suppress(Exception):
@@ -870,7 +872,11 @@ def create_app() -> FastAPI:
             with suppress(Exception):
                 if (await oauth.get_status(provider, tenant)).connected:
                     accounts.append(provider)
-        return SecretsInventory(provider_keys=sorted(keys), connected_accounts=accounts)
+        return SecretsInventory(
+            provider_keys=sorted(keys),
+            connected_accounts=accounts,
+            module_secrets=await collect_module_secrets(registry, secrets, tenant=tenant),
+        )
 
     portability = PortabilityService(
         jobs=portability_jobs,

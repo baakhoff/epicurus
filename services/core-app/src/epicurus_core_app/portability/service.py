@@ -165,6 +165,14 @@ class PortabilityService:
         """One job of this tenant's, or ``None`` — the routes' single read path."""
         return await self._jobs.get(tenant=tenant, job_id=job_id)
 
+    async def recent(self, *, tenant: str, limit: int = 20) -> list[PortabilityJob]:
+        """This tenant's most recent jobs, newest first — what a reloaded tab re-attaches to.
+
+        Deliberately does not sweep: a listing is a read, and dropping the operator's last
+        archive because they refreshed the page would be a surprising thing for one to do.
+        """
+        return await self._jobs.recent(tenant=tenant, limit=limit)
+
     def job_dir(self, tenant: str, job_id: str) -> Path:
         """This job's own directory in the disposable staging area (tenant-scoped)."""
         return self._staging / tenant / job_id

@@ -245,11 +245,16 @@ def build_module(provider: MailProvider) -> EpicurusModule:
     """Build the mail module and register its MCP tools."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.20.0",
+        version="0.21.0",
         description=(
             "Provider-agnostic mail — search, read, and draft-first send/reply. Gmail is the v0.1"
             " provider."
         ),
+        # Tenant data portability (#867/#874): every table this module persists is a
+        # Gmail-derived cache (see epicurus_mail.portability), so the store's export is
+        # always empty — but declaring the flag puts mail in the archive with an honest
+        # zero count instead of a silent, unexplained absence.
+        portable=True,
         ui=UiSection(
             icon="mail",
             summary=(

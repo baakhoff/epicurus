@@ -12,6 +12,17 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Mail joins tenant export/import — with an honest zero to carry** (#874, part of #866) —
+  `mail` declares `portable=True` and now serves `GET /export` / `POST /import`
+  (`MailPortability`, schema `mail/1`) for the core's tenant export/import orchestrator (#867).
+  Checking what the module actually persists (`mail_thread`, `mail_label`, `mail_sync`,
+  `mail_landing`, `mail_category`) found that every one of them is a Gmail-derived cache
+  (ADR-0096, #623/#765) — mail has no local mailbox, so nothing it stores is source-of-truth
+  data, and ADR-0133 excludes exactly that from an export. The wiring still lands (rather than
+  leaving the module unlisted) so an operator sees mail in the archive with a genuine zero count
+  instead of a silent absence, and a second apply of the same (always-empty) stream stays the
+  clean no-op the contract promises. `mail` 0.20.0→0.21.0 (MINOR).
+
 - **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
   an operator could stand up a second epicurus but had no way to *move into it*. The volume
   backups in `infra/backups` image one deployment for disaster recovery; nothing carried a

@@ -192,6 +192,12 @@ reconnect restores the mailbox with no resync and no restart. Full behaviour:
 [No connected account](#no-connected-account-764). This release also resyncs the in-code manifest
 version, which had drifted to `0.17.0` behind the package.
 
+**v0.21.0** (#867/#874): **tenant data portability.** Mail declares `portable=True` and serves
+`GET /export` / `POST /import` for the core's export/import orchestrator. Every table the module
+persists turns out to be a Gmail-derived cache, not source-of-truth data, so the export stream is
+always a header with zero records — see [Portability](#portability-867874) below for the full
+excluded list and why.
+
 ---
 
 ## Contract
@@ -260,6 +266,8 @@ proxies them to the web shell (the shell never calls the module directly).
 | `POST` | `/pages/mailbox/send` | body: `MailboxSend` → `{"id": str}` | **Human-initiated compose/reply from the page (ADR-0087).** With `reply_to_message_id` re-derives threading via `compose_reply`, else composes from `to`/`subject`/`body`/`cc`; then transmits and publishes `mail.sent`. Operator-only via the gated core proxy — never an MCP tool, so the agent still cannot send (ADR-0085). |
 | `POST` | `/pages/mailbox/mark-read` | body: `{thread_id, message_ids}` → `{"thread_id": str, "marked": int}` | **Mark a thread's messages read on open (#625).** Clears the unread flag on each `message_ids` at the provider (`set_unread`, #277) then writes the thread's read state through to the local cache (ADR-0096) so the list row converges at once. Operator-only via the gated proxy; a Gmail scope/rate-limit error relays its hint; empty `message_ids` is a no-op. |
 | `GET` | `/pages/mailbox/attachment` | `?message_id=&attachment_id=` → bytes | Streams one attachment's bytes (with content-type + download disposition) for the core proxy to relay; nothing is stored (ADR-0087). |
+| `GET` | `/export` | `?tenant_id=` → NDJSON | Tenant data portability (#867/#874). Always a header line and nothing else — see [Portability](#portability-867874) below. |
+| `POST` | `/import` | `?tenant_id=&dry_run=` → `ImportReport` | Tenant data portability (#867/#874). Every record it is handed is an unrecognized kind (`skipped` + a warning) — see [Portability](#portability-867874) below. |
 
 The core exposes these via:
 
@@ -278,6 +286,10 @@ draft-review Confirm (`ModuleRegistry.send_draft`, ADR-0085). The mail page's ow
 ADR-0087) instead posts to `…/pages/mailbox/send` above: a **human-initiated** send that shares the
 module's transmit but never the agent draft pane. The `send` and `attachment` proxies are gated on
 the `mailbox` archetype (a non-mailbox page 404s), mirroring the editor doc gate.
+
+`GET /export` / `POST /import` are likewise not shell-proxied — they are reached only by the core's
+tenant export/import orchestrator over the internal Docker network (`PortabilityService`, #867),
+never by an operator directly.
 
 #### `mailbox` archetype shapes (ADR-0087)
 
@@ -733,6 +745,52 @@ materialization of the landing view, not a mail store. Every table is scoped by 
 | `mail_sync` | `(tenant_id)` | The change cursor: Gmail `history_id`; IMAP `uid_validity`/`uid_next` reserved (all `BigInteger`). |
 | `mail_landing` | `(tenant_id, label)` | Per-folder landing metadata: the page-1 `next_cursor` (so a cached view keeps its "Older") and when it was last full-synced. |
 | `mail_category` | `(tenant_id, label, category_id)` | The Inbox's category tabs (#765): title, unread count, and the newest-message preview, in strip order, with the `cached_at` that drives the TTL. An empty `category_id` is the negative-cache row — "the provider was asked and has no categories here". |
+
+---
+
+## Portability (#867/#874)
+
+`mail` declares `portable=True` and serves `GET /export` / `POST /import`
+(`epicurus_mail.portability.MailPortability`, schema **`mail/1`**) — see the
+[reference contract](../reference/modules.md#portability--get-export--post-import-867). Every one of the five tables
+above is a **Gmail-derived cache** (ADR-0096, #623/#765), not source-of-truth data: Gmail is the
+mailbox, and every row is rebuilt wholesale by the next full sync or reconcile tick if it were
+dropped. ADR-0133 excludes exactly this — a derived index or provider cache/mirror — from
+export, which leaves mail with **no record kind to carry**:
+
+| Kind | Stable id | Fields that travel | Notes |
+| --- | --- | --- | --- |
+| *(none)* | — | — | The export stream is always a header line and nothing else. |
+
+**Excluded** — every persisted table, all for the same reason (a Gmail-derived cache):
+
+| Table | Why excluded |
+| --- | --- |
+| `mail_thread` | Cached landing rows; rebuilt from Gmail on the next full sync or reconcile delta. |
+| `mail_label` | Cached rail folders + unread counts; rebuilt on the next full sync. |
+| `mail_sync` | The provider change cursor (Gmail `history_id`); operational state, not a fact to replay into a fresh install. |
+| `mail_landing` | Per-folder cache metadata (the page-1 `next_cursor`, last-synced stamp); rebuilt on the next full sync. |
+| `mail_category` | The Inbox's TTL'd category-tab cache (#765); rebuilt by the next provider fan-out. |
+
+No column in any of these tables carries message content, an address, or anything else the
+operator would consider sensitive free text — they hold only Gmail ids, counts, cursors, and
+short UI labels the provider itself supplies (subjects/senders/snippets, all already visible in
+the mailbox). The exclusion above is about *derivation*, not sensitivity: even if these tables
+held nothing sensitive at all, ADR-0133 still excludes a rebuildable provider cache from the
+portable archive.
+
+The module still implements the full contract (rather than leaving `portable=False`, which the
+core also supports for a module with nothing to carry) so mail appears in an export/import run
+with an honest zero count instead of a silent, unexplained absence, and the routes are ready the
+day mail gains an actual per-tenant setting worth carrying — none exists today. `import_` counts
+every record it receives as an unrecognized kind (`skipped`, with a warning); a second apply of
+the same (always-empty) stream is the same clean no-op as the first.
+
+**Amendment to the epic's starting list.** #866/#874 named `mail_landing`/`mail_category` as
+"landing/category prefs" worth carrying. Reading `epicurus_mail/db.py` shows both are TTL'd
+Gmail-derived caches exactly like `mail_thread`/`mail_label`/`mail_sync` — the module holds no
+genuine per-tenant preference anywhere. The final list carries nothing; see the closing issue
+comment for the paste-ready ADR-0133 amendment.
 
 ---
 

@@ -342,7 +342,7 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | --- | --- |
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**, **`reindexable`**). |
+| `GET /manifest` | Module manifest (tools, events, UI declaration, **`pages`**, **`attachable`**, **`resolver`**, **`reindexable`**, **`portable`**). |
 | `GET /status` | Live index stats: `{note_count, doc_count, module_doc_count, last_indexed_at, index_phase, index_attempts, index_fuse_tripped, index_fuse_detail}`. `index_phase` ∈ `pending`/`indexing`/`ready`/`retrying`/`error` (#230). `index_fuse_tripped` is `true` while a source is refusing to de-index and `index_fuse_detail` names it with the numbers (#848; `null` otherwise) — flat scalars, because the module status panel renders values as strings. Proxied by the core at `GET /platform/v1/modules/knowledge/status`. |
 | `POST /reindex?force=<bool>` | **Force a full re-embed** of every source (vault + platform docs + module docs) with the current embedding model → `{status: "started"}` (#332, ADR-0054). Unlike the incremental `knowledge_reindex` tool, this **drops the Qdrant collections and clears the ledgers first**, so vectors built with a previous model are rebuilt rather than skipped as "unchanged". Runs in the background; watch `GET /status`. Called by the core's re-embed fan-out (the manifest sets `reindexable`). **Refused synchronously** with `{status: "refused", reason, detail}` (HTTP 200, nothing dropped) when a source would be rebuilt from nothing — the mass de-index fuse (#848); `?force=true` says the emptiness is real and rebuilds anyway. |
 | `GET /pages/{page_id}?scope=<id>` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files, read_only, versioned, scopes:[{id, title, kind}], scope, scope_noun, can_create_scope}` (page id `vault`). `scope` selects the knowledge base (empty = the first project, or the reserved `__docs__` for the read-only platform docs). `type` is `"file"` or `"dir"`; `docs` paths are scope-relative. `can_manage_files: true` enables folder CRUD; `versioned: true` enables save-history browse/restore (#ADR-0046); `read_only: true` (watch mode #232, or the `__docs__` scope) makes the page view-only. Proxied at `GET /platform/v1/modules/knowledge/pages/{page_id}`. |
@@ -363,6 +363,8 @@ index ledger. The web renders an in-app `href` as a same-tab router link (the sh
 | `GET /attachments/{ref_id}` | Attachment resolve: `{title, path, text}` for one vault doc; the core injects it into the turn. `ref_id` is the opaque base64url id from the picker. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver (#143): a cited doc → a `HoverCard`. `kind` is `knowledge`. Proxied at `GET /platform/v1/modules/knowledge/resolve/{kind}/{ref_id}`. |
 | `GET /module-docs` | Module docs endpoint — `{"documents": [{"path": "…", "content": "…"}]}`; the knowledge indexer fetches this via the core proxy (#215). Not `/docs` (FastAPI Swagger UI). |
+| `GET /export?tenant_id=<id>` | Tenant data portability (#867, #873): streams `knowledge_suggestions` + `knowledge_suggestion_decisions` as NDJSON, header line first (`{schema: "knowledge/1", component_version}`). See *Portability* below. |
+| `POST /import?tenant_id=<id>&dry_run=<bool>` | Accepts the same stream and upserts by stable id → `{schema, counts: {<kind>: {created, updated, skipped}}, warnings}`. **409** if the stream's schema is newer or from a different module. See *Portability* below. |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by the MCP SDK's `MCPServer`). |
 
 ## How search works
@@ -665,6 +667,60 @@ core path `knowledge/<rel>`): knowledge **reads and writes** them through the co
 (`PlatformClient.files_*` — #356/ADR-0064 for writes, #346/ADR-0070 for reads), holding no
 `/data` mount in normal mode. The Postgres ledgers and Qdrant collections above are derived
 indexes over those files.
+
+## Portability
+
+`GET /export` / `POST /import` (`portable: true` in the manifest) — the module half of
+tenant data portability (#867, ADR-0133). Schema **`knowledge/1`**; served by
+`epicurus_core.add_portability_routes` over `KnowledgePortability`
+(`epicurus_knowledge/portability.py`).
+
+**What travels** — knowledge's only source-of-truth tenant data outside the vault itself:
+the operator-review queue.
+
+| Kind | Stable id | Columns carried |
+| --- | --- | --- |
+| `suggestion` | `sid` (the opaque uuid `knowledge_suggestions` already mints at `SuggestionStore.add` — a natural id, never a surrogate) | `path`, `operation`, `proposed_content`, `origin`, `note`, `to_path`, `created_at` (ISO-8601) |
+| `suggestion_decision` | `sid` (the resolved suggestion's own uuid, carried into `knowledge_suggestion_decisions` at `SuggestionAuditStore.record`) | `path`, `operation`, `origin`, `note`, `proposed_content`, `applied_content`, `to_path`, `decision`, `proposed_at` / `decided_at` (ISO-8601) |
+
+Both tables' surrogate `id` and `tenant` columns never travel (ADR-0133); a decision's
+derived `title` (`doc_title(path)`, computed on read for the review-audit view) is likewise
+excluded — the export carries only the columns the row itself owns. Import is an upsert by
+`sid`: a byte-identical row reports `skipped` (so a second apply of the same archive is a
+true no-op), a changed one `updated`, a new one `created` — nothing is ever deleted, matching
+every other record kind under this contract.
+
+**Excluded** (derived — rebuilt from the vault after import, never exported):
+
+| Table / collection | Why |
+| --- | --- |
+| `knowledge_notes` | The vault's incremental-index ledger (mtimes/hashes) — meaningless without the files it tracks, and rebuilt by the walk below. |
+| `knowledge_doc_index` | Same, for the bundled platform docs — an image asset present on every install, not tenant data. |
+| `knowledge_module_docs` | Per-module usage-docs ledger — regenerated from each enabled module's `/module-docs` at the next index pass. |
+| `knowledge_versions` | Editor save-history snapshots — operational history of *this* install's editing sessions, not portable state; ADR-0133 excludes operational state generally. |
+| `<tenant>__knowledge` / `<tenant>__docs` (Qdrant) | Vectors are specific to the source's embedding model (`dimensions.py`); carrying them into an install running a different model would silently poison search. |
+
+The **vault's own content** travels a different way entirely: it's file-space data, not a
+row in this module's tables, so it rides the archive's `files/` tree (the core's own half of
+#867) rather than an NDJSON record here.
+
+**Rebuild after import.** The core's apply order writes `files/` first, then calls each
+module's `/import`, then runs the file rescan and the re-embed fan-out (#332) — `POST
+/reindex` with no `force` flag. On a fresh install this is safe by construction: the mass
+de-index fuse (`fuse.py`, #848) only ever trips when a **non-empty** ledger would be mostly
+or wholly de-indexed (`IndexFuse.evaluate`'s first check is `ledger_rows <= 0` → never trips),
+and a freshly created knowledge service starts with empty `knowledge_notes` /
+`knowledge_doc_index` ledgers — there is nothing yet for the fuse to protect. The unforced
+`/reindex` walks the just-written vault tree from a zero ledger and indexes it in full,
+exactly as an initial index would. Importing *into* an already-populated install is safe for
+the same reason from the other direction: the vault only gained files, so the pass has
+nothing to delete and the fuse has nothing to refuse.
+
+**Not exercised in CI:** the mass-de-index-fuse interaction above is reasoned from
+`fuse.py`/`app.py` and covered by `services/knowledge/tests/test_fuse.py`'s existing unit
+coverage of `IndexFuse.evaluate`'s zero-ledger case; no new portability-specific test drives
+a real `/reindex` call after an import, since the underlying behavior is unchanged by this
+lane and already has its own tests.
 
 ## Dependencies
 

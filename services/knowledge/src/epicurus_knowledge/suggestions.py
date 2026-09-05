@@ -21,13 +21,20 @@ This module owns:
 
 Approve/reject are **not** MCP tools — exposing them to the agent would let it approve
 its own proposals, defeating the gate. They are operator-only endpoints the shell calls.
+
+Both stores also carry the module's tenant-portability contract (#867, #873):
+``portable_export``/``portable_upsert`` on each let ``epicurus_knowledge.portability.
+KnowledgePortability`` stream and upsert these two tables by their own stable ``sid`` —
+the module's only source-of-truth tenant data outside the vault itself.
 """
 
 from __future__ import annotations
 
 import difflib
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import DateTime, String, Text, delete, func, select
@@ -35,7 +42,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from epicurus_core import get_logger
+from epicurus_core import ImportOutcome, get_logger
 from epicurus_core.db import ensure_columns
 from epicurus_core.review import (
     ApplyResult,
@@ -261,6 +268,107 @@ class SuggestionStore:
             await session.commit()
             return True
 
+    # ── portability (#873) ──────────────────────────────────────────────────
+
+    async def portable_export(self, *, tenant: str) -> AsyncIterator[dict[str, Any]]:
+        """Every pending suggestion for *tenant*, as a portability-record ``data`` payload.
+
+        ``sid`` (the module's own stable id, minted at :meth:`add`) travels under the
+        ``"sid"`` key so the caller can lift it out as the record id; the surrogate ``id``
+        and ``tenant`` never travel (ADR-0133). Materialised to a list before yielding so
+        the session closes promptly rather than staying open for the whole export.
+        """
+        async with self._session() as session:
+            rows = list(
+                await session.scalars(
+                    select(_StoredSuggestion)
+                    .where(_StoredSuggestion.tenant == tenant)
+                    .order_by(_StoredSuggestion.id)
+                )
+            )
+        for row in rows:
+            yield {
+                "sid": row.sid,
+                "path": row.path,
+                "operation": row.operation,
+                "proposed_content": row.proposed_content,
+                "origin": row.origin,
+                "note": row.note,
+                "to_path": row.to_path or "",
+                "created_at": row.created_at.isoformat(),
+            }
+
+    async def portable_upsert(
+        self, *, tenant: str, sid: str, data: dict[str, Any], dry_run: bool
+    ) -> ImportOutcome:
+        """Upsert one suggestion by its stable ``sid`` — never deletes (ADR-0133, #873).
+
+        A row identical to what is already here reports ``"skipped"`` (so re-applying the
+        same archive is a true no-op, not a spurious ``"updated"`` on every field);
+        otherwise it is ``"created"`` or ``"updated"``. ``dry_run`` reports the outcome
+        without writing.
+        """
+        fields = {
+            "path": _str_field(data, "path"),
+            "operation": _str_field(data, "operation"),
+            "proposed_content": _str_field(data, "proposed_content"),
+            "origin": _str_field(data, "origin", "agent"),
+            "note": _str_field(data, "note"),
+            "to_path": _str_field(data, "to_path"),
+        }
+        created_at = _parse_timestamp(data.get("created_at"))
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredSuggestion).where(
+                    _StoredSuggestion.tenant == tenant, _StoredSuggestion.sid == sid
+                )
+            )
+            if row is None:
+                if dry_run:
+                    return "created"
+                session.add(
+                    _StoredSuggestion(tenant=tenant, sid=sid, created_at=created_at, **fields)
+                )
+                await session.commit()
+                return "created"
+            unchanged = row.created_at == created_at and all(
+                getattr(row, name) == value for name, value in fields.items()
+            )
+            if unchanged:
+                return "skipped"
+            if dry_run:
+                return "updated"
+            for name, value in fields.items():
+                setattr(row, name, value)
+            row.created_at = created_at
+            await session.commit()
+            return "updated"
+
+
+def _parse_timestamp(value: Any) -> datetime:
+    """Parse an ISO-8601 timestamp from an import record; fall back to now on a bad value.
+
+    A malformed or missing timestamp must not fail the whole import (#873) — it's one
+    field on one record, not a reason to abandon the rest of the stream.
+    """
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+    return datetime.now(UTC)
+
+
+def _str_field(data: dict[str, Any], key: str, default: str = "") -> str:
+    """*data[key]* as a string, or *default* when it's absent or explicitly ``null``.
+
+    ``str(None)`` would otherwise write the literal text ``"None"`` into a column — an
+    archive field an older exporter omitted, or a record hand-edited to ``null``, must fall
+    back to the column's own default instead (#873).
+    """
+    value = data.get(key)
+    return str(value) if value is not None else default
+
 
 def _to_value(row: _StoredSuggestion) -> Suggestion:
     return Suggestion(
@@ -425,6 +533,100 @@ class SuggestionAuditStore:
                 .order_by(_StoredDecision.id.desc())
             )
             return None if row is None else _decision_to_value(row)
+
+    # ── portability (#873) ──────────────────────────────────────────────────
+
+    async def portable_export(self, *, tenant: str) -> AsyncIterator[dict[str, Any]]:
+        """Every resolved decision for *tenant*, as a portability-record ``data`` payload.
+
+        Raw columns, not :class:`ReviewDecision` — that shape's ``title`` is derived from
+        ``path`` on read, and a derived field has no business travelling in an export
+        (ADR-0133). ``sid`` travels under the ``"sid"`` key for the caller to lift out as
+        the record id; the surrogate ``id`` and ``tenant`` never travel.
+        """
+        async with self._session() as session:
+            rows = list(
+                await session.scalars(
+                    select(_StoredDecision)
+                    .where(_StoredDecision.tenant == tenant)
+                    .order_by(_StoredDecision.id)
+                )
+            )
+        for row in rows:
+            yield {
+                "sid": row.sid,
+                "path": row.path,
+                "operation": row.operation,
+                "origin": row.origin,
+                "note": row.note,
+                "proposed_content": row.proposed_content,
+                "applied_content": row.applied_content,
+                "to_path": row.to_path or "",
+                "decision": row.decision,
+                "proposed_at": row.proposed_at.isoformat(),
+                "decided_at": row.decided_at.isoformat(),
+            }
+
+    async def portable_upsert(
+        self, *, tenant: str, sid: str, data: dict[str, Any], dry_run: bool
+    ) -> ImportOutcome:
+        """Upsert one resolved decision by its stable ``sid`` — never deletes (ADR-0133, #873).
+
+        A decision is immutable history once recorded (:meth:`record`'s own docstring), but
+        the *import* path still has to be an upsert like every other kind: a second apply of
+        the same archive must report ``"skipped"``, and an archive written by an older
+        install that later gained a field must still be able to fill it in as ``"updated"``.
+        The retention cap (:data:`MAX_DECISIONS`) applies only to :meth:`record`'s own
+        prune, not to an import — an operator importing history should not have it silently
+        capped again.
+        """
+        fields = {
+            "path": _str_field(data, "path"),
+            "operation": _str_field(data, "operation"),
+            "origin": _str_field(data, "origin", "agent"),
+            "note": _str_field(data, "note"),
+            "proposed_content": _str_field(data, "proposed_content"),
+            "applied_content": _str_field(data, "applied_content"),
+            "to_path": _str_field(data, "to_path"),
+            "decision": _str_field(data, "decision"),
+        }
+        proposed_at = _parse_timestamp(data.get("proposed_at"))
+        decided_at = _parse_timestamp(data.get("decided_at"))
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredDecision).where(
+                    _StoredDecision.tenant == tenant, _StoredDecision.sid == sid
+                )
+            )
+            if row is None:
+                if dry_run:
+                    return "created"
+                session.add(
+                    _StoredDecision(
+                        tenant=tenant,
+                        sid=sid,
+                        proposed_at=proposed_at,
+                        decided_at=decided_at,
+                        **fields,
+                    )
+                )
+                await session.commit()
+                return "created"
+            unchanged = (
+                row.proposed_at == proposed_at
+                and row.decided_at == decided_at
+                and all(getattr(row, name) == value for name, value in fields.items())
+            )
+            if unchanged:
+                return "skipped"
+            if dry_run:
+                return "updated"
+            for name, value in fields.items():
+                setattr(row, name, value)
+            row.proposed_at = proposed_at
+            row.decided_at = decided_at
+            await session.commit()
+            return "updated"
 
 
 # ── review orchestration ──────────────────────────────────────────────────────

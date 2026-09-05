@@ -12,6 +12,34 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
+  an operator could stand up a second epicurus but had no way to *move into it*. The volume
+  backups in `infra/backups` image one deployment for disaster recovery; nothing carried a
+  person's own data across installations. Settings now has an **Export & import** card that
+  writes the whole tenant — chats, memory facts, playbooks and instructions, automations,
+  notifications, every preference, the file space, and each portable module's own data — into a
+  plain `.tar.gz` you can open and read (`manifest.json` · `core/<set>.ndjson` ·
+  `modules/<name>.ndjson` · `files/…`), and reads one back. The module half is a contract shaped
+  exactly like `reindexable`: a `portable` manifest flag plus `add_portability_routes`, which
+  serves `GET /export` / `POST /import` over NDJSON for any store implementing three members —
+  so a module lane implements its half without inventing an export format. Four properties are
+  load-bearing and tested as such: **import never destroys** (upsert by stable id, so applying
+  the same archive twice is a no-op and importing into a populated install merges rather than
+  replaces — and a file whose bytes differ here is named as a conflict, never overwritten);
+  **one component's failure is one component's failure** (a module that is disabled, unreachable,
+  or speaking a schema this core cannot read is skipped with its reason while everything else
+  lands); **only source of truth travels** (the file index and every Qdrant collection are
+  rebuilt afterwards by the forced rescan and the #332 re-embed fan-out, because a vector is
+  specific to the model that made it — #848 would otherwise rightly refuse a fresh install's
+  empty→populated flip, hence *forced*, and the report says so); and **no secret ever enters an
+  archive** (keys stay in OpenBao; the manifest carries their *names* so the import report can
+  say what to re-enter and reconnect, and a test greps the produced bytes for the fixture's key
+  values). Jobs are durable rows so a page reload finds them again; the archive itself is a
+  disposable staging artefact (constraint #2), and a download of a swept one answers 410 rather
+  than pretending. Module implementations (calendar, tasks, notes, knowledge, mail, messaging,
+  storage) are separate follow-up issues. `epicurus-core` 0.35.0→0.36.0 (MINOR) · `core-app`
+  0.117.0→0.118.0 (MINOR) · `web` 0.139.0→0.140.0 (MINOR).
+
 - **Six module manifests were lying on screen** (#845) — the Modules page badge reads
   `manifest.version`, which every module hardcodes as a literal in `build_module()` rather than
   reading its own package's declared version. Six of them had drifted behind `pyproject.toml`

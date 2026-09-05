@@ -53,6 +53,8 @@ import {
   PageOrderPrefs,
   PendingSuggestion,
   PlatformInfo,
+  PortabilityExportJob,
+  PortabilityImportJob,
   PowerStatus,
   ProfileView,
   ProviderInfo,
@@ -957,6 +959,48 @@ export const api = {
       `/platform/v1/messaging/bridges/${encodeURIComponent(bridge)}`,
       { method: "DELETE" },
     ),
+
+  // ── Tenant data portability (#867) ──────────────────────────────────────
+  // Export: start (202, returns at once), poll, then download. Import: upload — which
+  // only ever *reads* the archive and answers a preview — then apply, then poll.
+  startPortabilityExport: () =>
+    request(PortabilityExportJob, "/platform/v1/portability/exports", { method: "POST" }),
+  portabilityExport: (jobId: string) =>
+    request(PortabilityExportJob, `/platform/v1/portability/exports/${encodeURIComponent(jobId)}`),
+  // A same-origin URL for the finished archive, used as an `<a href download>` — the same
+  // shape as `mailboxAttachmentUrl`, so the browser streams the bytes and no blob is held
+  // in the tab's memory (an archive can be gigabytes).
+  portabilityArchiveUrl: (jobId: string) =>
+    `/platform/v1/portability/exports/${encodeURIComponent(jobId)}/archive`,
+  // Multipart, so it bypasses the JSON `request` helper (like uploadAttachment). A 413
+  // (over the size cap) or 400 (not a readable archive) surfaces as ApiError with the
+  // server's own detail so the card can render it verbatim.
+  uploadPortabilityArchive: async (file: File): Promise<PortabilityImportJob> => {
+    const form = new FormData();
+    form.append("file", file);
+    const response = await epFetch("/platform/v1/portability/imports", {
+      method: "POST",
+      body: form,
+    });
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new ApiError(response.status, detail);
+    }
+    return PortabilityImportJob.parse(await response.json());
+  },
+  applyPortabilityImport: (jobId: string) =>
+    request(
+      PortabilityImportJob,
+      `/platform/v1/portability/imports/${encodeURIComponent(jobId)}/apply`,
+      { method: "POST" },
+    ),
+  portabilityImport: (jobId: string) =>
+    request(PortabilityImportJob, `/platform/v1/portability/imports/${encodeURIComponent(jobId)}`),
 };
 
 /**

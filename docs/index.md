@@ -18,7 +18,8 @@ however you expose your own server).
 
 - **[User Guide](user/index.md)** — install, configure, and run epicurus. Includes
   [Running without Google](user/running-without-google.md) — turning a provider off per
-  module or platform-wide, and what keeps working after.
+  module or platform-wide, and what keeps working after — and
+  [Export & import](user/export-import.md), moving a whole tenant to another installation.
 - **[Services & Modules](services/index.md)** — a page per running block: the core
   runtime, the web shell, and each module — what it does, its tools/endpoints, config,
   and data.

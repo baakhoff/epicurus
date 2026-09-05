@@ -12,6 +12,22 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`knowledge` joins tenant export/import: the suggestion queue travels, the vault's indexes
+  rebuild** (#873, part of #866) — the module now declares `portable: true` and serves `GET
+  /export` / `POST /import` (schema `knowledge/1`) so an operator's pending
+  agent-proposed changes and their resolved-decision history move with them into a new
+  install. What travels is exactly the module's source-of-truth data outside the vault
+  itself: `knowledge_suggestions` and `knowledge_suggestion_decisions`, each upserted by the
+  stable `sid` the module already mints — never the surrogate row id. Everything derived
+  stays behind and is rebuilt after import instead: `knowledge_notes` / `knowledge_doc_index`
+  / `knowledge_module_docs` (index ledgers), `knowledge_versions` (editor save history), and
+  the `<tenant>__knowledge` / `<tenant>__docs` Qdrant collections, whose vectors are specific
+  to the source's embedding model. The vault's own files ride the archive's `files/` tree, not
+  a record here; the core's post-import rescan and #332 re-embed fan-out walk them back into
+  an index on the target install, safely — a fresh install's ledgers start at zero rows, which
+  is exactly the case the #848 mass de-index fuse always lets through. `knowledge` 0.29.0→0.30.0
+  (MINOR).
+
 - **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
   an operator could stand up a second epicurus but had no way to *move into it*. The volume
   backups in `infra/backups` image one deployment for disaster recovery; nothing carried a

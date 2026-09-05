@@ -1,9 +1,11 @@
-/** The Settings Export & import card (#867).
+/** The Settings Export & import card (#867, #877).
  *
  *  What matters here is the *shape of the interaction*, not the styling: an export polls
  *  until it is ready and only then offers a download; an upload shows a preview and applies
- *  nothing until Apply is pressed; an incompatible archive cannot be applied at all; and the
- *  "re-enter these secrets" line reaches the operator at both ends.
+ *  nothing until Apply is pressed; an incompatible archive cannot be applied at all; the
+ *  "re-enter these secrets" line reaches the operator at both ends; and — #877 — a job this
+ *  tab did not start is picked up from the server's job list, because a reload used to
+ *  orphan a running export into an archive nobody was ever offered.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -17,12 +19,14 @@ const mockExport = vi.fn();
 const mockUpload = vi.fn();
 const mockApply = vi.fn();
 const mockImport = vi.fn();
+const mockJobs = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return {
     ApiError: actual.ApiError,
     api: {
+      portabilityJobs: (...a: unknown[]) => mockJobs(...a),
       startPortabilityExport: (...a: unknown[]) => mockStartExport(...a),
       portabilityExport: (...a: unknown[]) => mockExport(...a),
       portabilityArchiveUrl: (id: string) => `/platform/v1/portability/exports/${id}/archive`,
@@ -118,12 +122,31 @@ const DONE_IMPORT = {
   },
 };
 
+const RUNNING_EXPORT_ROW = {
+  id: "job-1",
+  kind: "export",
+  status: "running",
+  created_at: "2026-09-04T09:00:00+00:00",
+  updated_at: "2026-09-04T09:00:00+00:00",
+  archive_available: false,
+  size_bytes: 0,
+};
+
+const READY_EXPORT_ROW = {
+  ...RUNNING_EXPORT_ROW,
+  status: "ready",
+  archive_available: true,
+  size_bytes: 2_097_152,
+};
+
 beforeEach(() => {
   mockStartExport.mockReset();
   mockExport.mockReset();
   mockUpload.mockReset();
   mockApply.mockReset();
   mockImport.mockReset();
+  mockJobs.mockReset();
+  mockJobs.mockResolvedValue([]);
 });
 
 function pickFile(name = "epicurus.tar.gz"): void {
@@ -133,10 +156,14 @@ function pickFile(name = "epicurus.tar.gz"): void {
 }
 
 describe("ExportImportCard (#867)", () => {
-  it("makes no requests until the operator asks", () => {
+  it("reads the job list on mount and starts nothing", async () => {
     render(<ExportImportCard />, { wrapper });
+    // The one request an idle card makes — and the only thing that can find a job this tab
+    // did not start. Nothing is *begun* without a press.
+    await waitFor(() => expect(mockJobs).toHaveBeenCalled());
     expect(mockStartExport).not.toHaveBeenCalled();
     expect(mockExport).not.toHaveBeenCalled();
+    expect(mockImport).not.toHaveBeenCalled();
   });
 
   it("polls an export and only offers the download once it is ready", async () => {
@@ -236,5 +263,74 @@ describe("ExportImportCard (#867)", () => {
     pickFile("huge.tar.gz");
 
     expect(await screen.findByText(/exceeds the 4096-byte upload limit/)).toBeInTheDocument();
+  });
+
+});
+
+describe("ExportImportCard — re-attaching after a reload (#877)", () => {
+  it("picks up a running export from the job list and polls it to ready", async () => {
+    mockJobs
+      .mockResolvedValueOnce([RUNNING_EXPORT_ROW])
+      .mockResolvedValue([READY_EXPORT_ROW]);
+    mockExport.mockResolvedValueOnce(RUNNING_EXPORT).mockResolvedValue(READY_EXPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    // Nothing was pressed: the progress on screen belongs to a job started before the load.
+    expect(await screen.findByText("conversations")).toBeInTheDocument();
+    await waitFor(() => expect(mockExport).toHaveBeenCalledWith("job-1"));
+    expect(mockStartExport).not.toHaveBeenCalled();
+
+    const link = await screen.findByRole("link", { name: /download archive/i }, { timeout: 5000 });
+    expect(link).toHaveAttribute("href", "/platform/v1/portability/exports/job-1/archive");
+  });
+
+  it("does not offer a download whose archive has been cleaned up", async () => {
+    // The failure mode the retention window guarantees: the job row outlives its archive.
+    mockJobs.mockResolvedValue([{ ...READY_EXPORT_ROW, archive_available: false }]);
+    mockExport.mockResolvedValue(READY_EXPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    expect(await screen.findByText(/that archive has been cleaned up/i)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /download archive/i })).not.toBeInTheDocument();
+  });
+
+  it("picks up an import left mid-apply and shows the report it finishes with", async () => {
+    mockJobs.mockResolvedValue([
+      {
+        id: "imp-1",
+        kind: "import",
+        status: "running",
+        created_at: "2026-09-04T09:05:00+00:00",
+        updated_at: "2026-09-04T09:05:00+00:00",
+        archive_available: false,
+        size_bytes: 0,
+      },
+    ]);
+    mockImport
+      .mockResolvedValueOnce({ ...STAGED_IMPORT, status: "running" })
+      .mockResolvedValue(DONE_IMPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    await waitFor(() => expect(mockImport).toHaveBeenCalledWith("imp-1"));
+    expect(await screen.findByText(/42 new/, undefined, { timeout: 5000 })).toBeInTheDocument();
+    expect(mockUpload).not.toHaveBeenCalled();
+  });
+
+  it("lists the recent jobs, with a download link only where there is an archive", async () => {
+    mockJobs.mockResolvedValue([
+      READY_EXPORT_ROW,
+      { ...READY_EXPORT_ROW, id: "job-0", archive_available: false },
+    ]);
+    mockExport.mockResolvedValue(READY_EXPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    expect(await screen.findByText(/recent jobs \(2\)/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /download \(2\.0 MB\)/i }),
+    ).toHaveAttribute("href", "/platform/v1/portability/exports/job-1/archive");
+    expect(
+      screen.queryByRole("link", { name: /\/exports\/job-0\/archive/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/archive cleaned up/i)).toBeInTheDocument();
   });
 });

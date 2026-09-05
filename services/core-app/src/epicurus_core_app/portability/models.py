@@ -32,6 +32,7 @@ __all__ = [
     "ImportPreview",
     "ImportReportView",
     "ImportVerdict",
+    "PortabilityJobSummary",
     "SecretsInventory",
     "as_json",
 ]
@@ -127,6 +128,30 @@ class ArchiveManifest(BaseModel):
     components: list[ComponentEntry] = Field(default_factory=list)
     exclusions: list[ExclusionEntry] = Field(default_factory=list)
     secrets: SecretsInventory = Field(default_factory=SecretsInventory)
+
+
+class PortabilityJobSummary(BaseModel):
+    """One row of ``GET /platform/v1/portability/jobs`` — enough to re-attach, no more (#877).
+
+    Deliberately not either job view: the list exists so a reloaded tab can find the job it
+    started, and dragging every component entry, manifest and report along for twenty rows
+    would make the cheapest read on the surface the most expensive one. The card follows an
+    id it recognises here into the full view it already had.
+    """
+
+    id: str
+    kind: Literal["export", "import"]
+    # A plain string rather than a Literal: the two kinds have different vocabularies
+    # (``running``/``ready``/``failed`` against ``staged``/``running``/``done``/``failed``),
+    # and a union of both would let this model claim a pairing neither job can produce.
+    status: str
+    created_at: str
+    updated_at: str
+    # Only an export has an archive, only once it is ``ready``, and only for as long as its
+    # staged file survives (staging is a disposable cache). Answered from the filesystem, so
+    # the card offers a download link exactly when the download would work.
+    archive_available: bool = False
+    size_bytes: int = 0
 
 
 class ExportJobView(BaseModel):

@@ -1820,3 +1820,20 @@ export const PortabilityImportJob = z.object({
   error: z.string().nullish(),
 });
 export type PortabilityImportJob = z.infer<typeof PortabilityImportJob>;
+
+/** One row of the job list (#877) — enough to re-attach to a job this tab did not start.
+ *
+ * `status` stays a plain string because the two kinds have different vocabularies, and
+ * `archive_available` is the server's answer about the *file*, not the row: staging is a
+ * disposable cache, so a `ready` export can outlive its archive and must not be offered as
+ * a download when it has. */
+export const PortabilityJobSummary = z.object({
+  id: z.string(),
+  kind: z.enum(["export", "import"]),
+  status: z.string(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  archive_available: z.boolean().default(false),
+  size_bytes: z.number().default(0),
+});
+export type PortabilityJobSummary = z.infer<typeof PortabilityJobSummary>;

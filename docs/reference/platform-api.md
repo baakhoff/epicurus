@@ -569,12 +569,34 @@ tenant reads as **404**, not 403.
 
 Both halves run as **durable background jobs**: the request returns immediately, the work
 continues server-side whatever the browser does, and the shell polls until it settles. The
-job row outlives the request, so it can be re-read by id at any time — the Settings card
-holds the id only for the life of the page, so a reload today starts the operator over
-rather than re-attaching (there is no list endpoint yet). The archive itself lives in a
-**disposable staging directory** (`PORTABILITY_STAGING_DIR`), swept after
+job row outlives the request, so it can be re-read by id at any time — and, since #877, it
+can be *found* without an id: `GET .../jobs` lists this tenant's recent jobs, which is how a
+reloaded tab (or a second device) re-attaches to a run it did not start. The archive itself
+lives in a **disposable staging directory** (`PORTABILITY_STAGING_DIR`), swept after
 `PORTABILITY_RETENTION_HOURS` — a download of a swept archive is a **410**, and the answer
 is to export again.
+
+### `GET /platform/v1/portability/jobs`
+
+This tenant's recent jobs, **newest first**, both kinds, capped at the last **20**.
+
+```jsonc
+[
+  {"id": "…", "kind": "export", "status": "ready",
+   "created_at": "…", "updated_at": "…",
+   "archive_available": true, "size_bytes": 20971520},
+  {"id": "…", "kind": "import", "status": "done",
+   "created_at": "…", "updated_at": "…",
+   "archive_available": false, "size_bytes": 0}
+]
+```
+
+A summary, not a second copy of the job views — follow an id into `exports/{id}` or
+`imports/{id}` for progress, manifest, preview or report. `status` is a plain string because
+the two kinds have different vocabularies. **`archive_available`** answers about the *file*,
+not the row: true only for an export that is `ready` **and** whose staged archive is still on
+disk, so the shell offers a download exactly when the download would work. Listing never
+sweeps — a refresh must not cost the operator their last archive.
 
 ### `POST /platform/v1/portability/exports`
 

@@ -22,6 +22,14 @@ A module that is turned off, unreachable, or simply has no data worth carrying i
 and the export carries on. Losing your conversations because the mail container happened to
 be restarting would be an absurd way to lose your conversations.
 
+**You can close the tab.** The job runs on the server, not in the browser, and the card
+finds it again when you come back — on a reload, on a second device, in a different browser.
+A run still going carries on where you left it; a finished one still has its **Download
+archive** link waiting. **Recent jobs** at the foot of the card lists the ones before it,
+each with its own download while its archive lasts. (Archives are cleaned up after a while —
+see the table at the end. A job whose archive has gone says so, and the answer is to export
+again.)
+
 When the job is ready a **Download archive** link appears. The archive is a plain gzipped
 tar you can open with tools you already have:
 

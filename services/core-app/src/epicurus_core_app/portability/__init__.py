@@ -23,6 +23,7 @@ from epicurus_core_app.portability.models import (
     ComponentEntry,
     ImportPreview,
     ImportReportView,
+    PortabilityJobSummary,
     SecretsInventory,
 )
 from epicurus_core_app.portability.routes import create_portability_router
@@ -36,6 +37,7 @@ __all__ = [
     "ImportReportView",
     "PortabilityJob",
     "PortabilityJobStore",
+    "PortabilityJobSummary",
     "PortabilityService",
     "SecretsInventory",
     "create_portability_router",

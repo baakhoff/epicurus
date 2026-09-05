@@ -1132,6 +1132,14 @@ archive itself lives in `PORTABILITY_STAGING_DIR`, a **disposable cache** (const
 swept after `PORTABILITY_RETENTION_HOURS`. A download of a swept archive is a `410`, and the
 answer is to export again.
 
+**And findable without an id** (#877). Durability is not re-attachment: the Settings card
+held its job id in component state, so a reload orphaned the run — the archive finished
+staging, was never offered, and was swept a day later.
+`GET /platform/v1/portability/jobs` lists the tenant's last 20 jobs newest-first with
+`archive_available` answered from the filesystem, so the shell offers a download exactly when
+one would succeed. The listing never sweeps: a read must not cost the operator their last
+archive.
+
 ### Chat bridges (ADR-0062)
 
 The connect/manage surface behind the web shell's **Settings → Chat bridges** (#369). The core

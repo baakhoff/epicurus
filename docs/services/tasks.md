@@ -327,6 +327,12 @@ web-form-facing text now says "the backlog" / "Show → Backlog" instead of "the
 `tasks_add` tool description, both `due` param descriptions, and a task's hover-card `href`
 (now `/m/tasks/board?show=backlog` for an undated task rather than a separate page's URL).
 
+**v0.24.0** adds **tenant data portability** (#867/#871): the module declares
+`portable=True` and serves `GET /export` / `POST /import` via `add_portability_routes`
+(schema `tasks/1`), so the core's export/import orchestrator can carry local tasks, the
+recurrence rule of a Google-linked task, and the operator's lead-time preference between
+installs — see *Portability*, below.
+
 ## The contract it exposes
 
 ### MCP tools (agent-facing)
@@ -389,6 +395,8 @@ side table keyed by task id (ADR-0082).
 | `GET /attachments` | Chat-attachment picker (ADR-0019): open tasks as `{ref_id, kind, title}`. Core-proxied. |
 | `GET /attachments/{ref_id}` | Resolve an attached task to `{title, excerpt}` (ADR-0019); missing task is `404`. Core-proxied. |
 | `GET /resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced task (ADR-0019); `kind` is `task`. Returns a `HoverCard`; unknown kind / missing task is `404`. Core-proxied. |
+| `GET /export?tenant_id=` | Tenant data portability (#867/#871): NDJSON export of this tenant's source-of-truth records (schema `tasks/1`) — see *Portability*, below. |
+| `POST /import?tenant_id=&dry_run=` | Apply an NDJSON export back — upsert by stable id, never deletes. `409` on a newer or foreign schema; see *Portability*, below. |
 | `GET /calendar-feed?start=&end=` | Open tasks with a due date in `[start, end)` (`end` exclusive), as calendar-feed items (#469, ADR-0088): `{id, title, date, status, ref_id, kind}`. No manifest declaration — probed generically by the core's cross-module aggregate, `GET /platform/v1/calendar-feed` (see [core-app](core-app.md)). |
 | `GET /mcp` (streamable-HTTP) | MCP tool surface (served by the MCP SDK's `MCPServer`). |
 
@@ -716,6 +724,44 @@ Two more tables, in the same shared Postgres:
 | --- | --- | --- |
 | `tasks_lead_time_prefs` | `(tenant)` PK | The `task_due_soon` lead time in days; `NULL`/missing falls back to `DEFAULT_LEAD_DAYS` (1). |
 | `tasks_fired_markers` | `(tenant, task_id, marker)` unique | A fire-once claim — `task_id` is provider-qualified (`"local:<id>"` / `"google:<id>"`, inferred from `Task.list_id` the same way `TasksRouter._stamp` distinguishes local from external), `marker` is `"due_soon"` or `"overdue"`, `fired_at_ns` (`BigInteger`, nanosecond epoch) records when. A row's mere existence is the claim; a second insert attempt for the same key violates the unique constraint and is read as "already fired," not an error. |
+
+## Portability (#867/#871)
+
+The module implements `epicurus_core.PortabilityStore` (`portability.py`, `TasksPortability`)
+and serves it via `add_portability_routes` (`GET /export` / `POST /import`, both tenant-scoped)
+— the module half of tenant data export/import (ADR-0133). Schema **`tasks/1`**. Every kind is
+upserted by its own stable id on import; nothing here ever deletes, and a second apply of the
+same export reports everything `skipped`/`updated` with nothing duplicated.
+
+| `kind` | Stable id | Columns that travel |
+| --- | --- | --- |
+| `task` | `tasks_local.id` (the task's own uuid — never the surrogate `pk`) | `title`, `notes`, `due`, `completed`, `completed_at`, `created_at` (ISO-8601), `status`, `priority`, `tags` (JSON array), `repeat`. |
+| `task_repeat` | `"<list_id>:<task_id>"` — `task_repeats`' own natural composite key | `list_id`, `task_id`, `rrule`. |
+| `lead_time_prefs` | a fixed id (`"prefs"`) — one record per tenant | `lead_days`. Exported only when the operator has set one explicitly; the unset default (`DEFAULT_LEAD_DAYS`) travels with the module's code, not the archive. |
+
+**Excluded, and why:**
+
+- **The Google task itself.** A connected Google task list lives in the operator's Google
+  account, not this module's database — there is no mirror table to export. After import, the
+  operator reconnects the account (as any OAuth-backed module requires) to see the tasks again;
+  any already-imported `task_repeat` rows reattach to them by id the moment they do. This is why
+  `task_repeat` travels even though the task it decorates does not — it is the *only* copy of
+  that rule (Google Tasks has no recurrence field of its own, ADR-0082), so leaving it behind
+  would silently drop a Google-linked task's recurrence on the new install.
+- **`tasks_fired_markers`** (operational) — the lead-time scheduler's fire-once dedup state
+  (#664). Re-firing a `task_due_soon`/`task_overdue` notification once on the new install is
+  harmless (the operator hasn't seen it there yet); carrying stale markers over would instead
+  risk *suppressing* a real one.
+- **Collection selection** (the operator's enabled Google lists + active list) is core-side
+  state (`module_prefs.collections`, ADR-0030), already carried by the core's own export —
+  duplicating it here would just be two copies of the same fact to keep in sync.
+
+No docker-dependent tests exist in this module (confirmed: no `testcontainers`/`docker`
+reference anywhere under `services/tasks`); `tests/test_portability.py` is a plain unit suite
+against a file-backed SQLite store, covering the export shape, the round trip (export → wipe →
+import → equal), the idempotent second apply, `dry_run` writing nothing, an unknown `kind`
+counting as skipped with a warning, tenant isolation, and the route's schema-compatibility
+gate (same/older/newer/foreign, via `schema_verdict`).
 
 ## Dependencies
 

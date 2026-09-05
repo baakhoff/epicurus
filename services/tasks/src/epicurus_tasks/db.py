@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from sqlalchemy import (
     Boolean,
@@ -256,6 +257,84 @@ class TaskStore:
             )
             await session.commit()
 
+    async def export_tasks(self, *, tenant_id: str) -> AsyncIterator[dict[str, Any]]:
+        """Every local task for *tenant_id* as a plain dict (portability export, #871).
+
+        ``id`` is the task's own stable id — the module's natural key, never the surrogate
+        ``pk`` — so it round-trips as a `PortabilityRecord.id` unchanged. ``tenant_id`` and
+        ``pk`` are the only two columns left out; every other column travels, including the
+        legacy ``completed`` flag (kept alongside ``status`` for exact round-trip fidelity)
+        and ``created_at`` (serialized to an ISO-8601 string).
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredTask)
+                .where(_StoredTask.tenant_id == tenant_id)
+                .order_by(_StoredTask.pk)
+            )
+            for row in rows:
+                yield {
+                    "id": row.id,
+                    "title": row.title,
+                    "notes": row.notes,
+                    "due": row.due,
+                    "completed": row.completed,
+                    "completed_at": row.completed_at,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "status": row.status,
+                    "priority": row.priority,
+                    "tags": json.loads(row.tags) if row.tags else [],
+                    "repeat": row.repeat,
+                }
+
+    async def upsert_task(
+        self,
+        *,
+        tenant_id: str,
+        id: str,
+        title: str,
+        notes: str | None,
+        due: str | None,
+        completed: bool,
+        completed_at: str | None,
+        created_at: datetime | None,
+        status: str | None,
+        priority: str | None,
+        tags: list[str],
+        repeat: str | None,
+        dry_run: bool = False,
+    ) -> Literal["created", "updated"]:
+        """Insert or update the task with this exact *id* — never a generated one.
+
+        Portability import (#871): unlike :meth:`add_task`, the id is the caller's stable
+        id, not a fresh uuid — that is what makes re-applying the same exported stream an
+        idempotent no-op rather than a pile of duplicates. *dry_run* reports which outcome
+        would happen without writing anything.
+        """
+        async with self._session() as session:
+            row = await session.scalar(
+                select(_StoredTask).where(_StoredTask.tenant_id == tenant_id, _StoredTask.id == id)
+            )
+            outcome: Literal["created", "updated"] = "updated" if row is not None else "created"
+            if dry_run:
+                return outcome
+            if row is None:
+                row = _StoredTask(id=id, tenant_id=tenant_id)
+                if created_at is not None:
+                    row.created_at = created_at
+                session.add(row)
+            row.title = title
+            row.notes = notes
+            row.due = due
+            row.completed = completed
+            row.completed_at = completed_at
+            row.status = status
+            row.priority = priority
+            row.tags = json.dumps(tags or [])
+            row.repeat = repeat
+            await session.commit()
+        return outcome
+
 
 class _StoredRepeat(_Base):
     """An emulated recurrence rule for an *external-provider* task, tenant-scoped (ADR-0082).
@@ -339,3 +418,49 @@ class RepeatStore:
     async def delete(self, *, tenant_id: str, list_id: str, task_id: str) -> None:
         """Retire a task's rule — GC when the task is deleted or vanishes from Google."""
         await self.set(tenant_id=tenant_id, list_id=list_id, task_id=task_id, rrule=None)
+
+    async def export_repeats(self, *, tenant_id: str) -> AsyncIterator[dict[str, str]]:
+        """Every external-provider repeat rule for *tenant_id* (portability export, #871).
+
+        The **only** copy of a Google-linked task's recurrence rule — Google Tasks has no
+        recurrence field of its own (ADR-0082) — so it travels even though the Google task
+        it decorates does not (the operator's Google account is the source of truth for the
+        task itself; this table just supplements what that account can't hold).
+        """
+        async with self._session() as session:
+            rows = await session.execute(
+                select(_StoredRepeat.list_id, _StoredRepeat.task_id, _StoredRepeat.rrule)
+                .where(_StoredRepeat.tenant_id == tenant_id)
+                .order_by(_StoredRepeat.pk)
+            )
+            for list_id, task_id, rrule in rows.tuples().all():
+                yield {"list_id": list_id, "task_id": task_id, "rrule": rrule}
+
+    async def upsert(
+        self,
+        *,
+        tenant_id: str,
+        list_id: str,
+        task_id: str,
+        rrule: str,
+        dry_run: bool = False,
+    ) -> Literal["created", "updated"]:
+        """Upsert one repeat rule by its natural ``(list_id, task_id)`` key (import, #871).
+
+        *dry_run* reports the outcome (a row already existing there is an ``"updated"``)
+        without writing; a live call defers to :meth:`set`, which is already an idempotent
+        delete-then-insert.
+        """
+        async with self._session() as session:
+            existing = await session.scalar(
+                select(_StoredRepeat.pk).where(
+                    _StoredRepeat.tenant_id == tenant_id,
+                    _StoredRepeat.list_id == list_id,
+                    _StoredRepeat.task_id == task_id,
+                )
+            )
+        outcome: Literal["created", "updated"] = "updated" if existing is not None else "created"
+        if dry_run:
+            return outcome
+        await self.set(tenant_id=tenant_id, list_id=list_id, task_id=task_id, rrule=rrule)
+        return outcome

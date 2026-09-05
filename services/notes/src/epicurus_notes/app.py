@@ -20,6 +20,7 @@ from epicurus_core import (
     PlatformClient,
     add_manifest_route,
     add_ops_routes,
+    add_portability_routes,
     configure_logging,
     get_logger,
 )
@@ -29,6 +30,7 @@ from epicurus_notes.events import NoteEventEmitter
 from epicurus_notes.indexer import NotesIndexer
 from epicurus_notes.mirror import NotesMirror
 from epicurus_notes.pages import NotesPages, create_pages_router
+from epicurus_notes.portability import NotesPortability
 from epicurus_notes.service import MODULE_NAME, build_module
 from epicurus_notes.settings import NotesSettings
 from epicurus_notes.suggestions import (
@@ -125,6 +127,11 @@ def create_app() -> FastAPI:
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
+    # The tenant export/import contract (#872, ADR-0133) — GET /export + POST /import over
+    # the notes tables. Bodies travel with the rows: the `.md` mirror is derived output that
+    # nothing reads back, so metadata alone would land the operator a Notes page of empty
+    # documents (see epicurus_notes.portability).
+    add_portability_routes(app, module, NotesPortability(engine))
 
     # The review page (#KB-refactor): registered BEFORE the editor pages router so its
     # literal /pages/review route wins over the editor's /pages/{page_id} path param.

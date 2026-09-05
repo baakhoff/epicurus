@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from qdrant_client.models import Distance, VectorParams
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
@@ -133,6 +135,16 @@ def _make_indexer(
 
     qdrant = MagicMock()
     qdrant.collection_exists = AsyncMock(return_value=True)
+    # Matches the fake embedder's width, so the dimension guard (#865) never heals here.
+    qdrant.get_collection = AsyncMock(
+        return_value=SimpleNamespace(
+            config=SimpleNamespace(
+                params=SimpleNamespace(
+                    vectors=VectorParams(size=len(embed_vectors[0]), distance=Distance.COSINE)
+                )
+            )
+        )
+    )
     qdrant.create_collection = AsyncMock()
     qdrant.upsert = AsyncMock()
     qdrant.delete = AsyncMock()

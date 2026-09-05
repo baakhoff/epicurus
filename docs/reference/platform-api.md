@@ -52,16 +52,33 @@ No provider key ever leaves the core.
    persisted in `llm_prefs`; #214).
 3. `MEMORY_EMBED_MODEL` env setting (`nomic-embed-text` by default).
 
-Once the embedding model is chosen, any **per-model settings** the operator set for it
-(context window, keep-alive — `PUT /platform/v1/llm/model-settings`, ADR-0044) are applied as
-Ollama runtime options. With nothing set, the embed call is unchanged.
+**Local or hosted (#865).** Any link in that chain may name a **hosted** model — a known
+provider alias plus a model part (`gpt/text-embedding-3-small`,
+`openrouter/openai/text-embedding-3-small`) — and the core classifies and routes it through the
+same provider registry it uses for chat, with the tenant's key fetched from OpenBao at call
+time. The route itself parses nothing: the id reaches the gateway exactly as stored, so an
+aggregator id whose model part contains a slash of its own survives intact. Constraint #8 is
+unchanged — the module supplies texts and a model name, never a key.
+
+Two behaviours differ by class:
+
+- **Per-model settings** (context window, keep-alive, device — `PUT
+  /platform/v1/llm/model-settings`, ADR-0044) are Ollama runtime options and are applied to a
+  **local** model only. A hosted call sends none of them. With nothing set, a local embed call
+  is unchanged.
+- **Pause** (ADR-0005) blocks a **local** embed with `503` (running one would wake the GPU); a
+  hosted embed serves normally while the runtime is paused, exactly as hosted chat does.
+
+Switching between models of different vector sizes (768-d local vs 1536-d hosted) is a
+dimension change — see the [dimension-change contract](../services/core-app.md#the-dimension-change-contract-865)
+and run **Re-embed everything** afterwards.
 
 **Request body**
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `texts` | `list[str]` | Yes | Texts to embed.  One vector returned per item. |
-| `model` | `str \| null` | No | Per-module override.  Omit to use the global embed default or env default. |
+| `model` | `str \| null` | No | Per-module override, local or hosted.  Omit to use the global embed default or env default. |
 | `tenant_id` | `str \| null` | No | Tenant scope.  Defaults to the core's configured tenant. |
 
 **Response**
@@ -83,7 +100,8 @@ Ollama runtime options. With nothing set, the embed call is unchanged.
 
 | Status | Condition |
 | --- | --- |
-| 503 | Gateway is paused (ADR-0005) — resume to run local inference. |
+| 503 | Gateway is paused (ADR-0005) and the resolved model is **local** — resume to run local inference. A hosted embedding model is unaffected. |
+| 500 | The resolved hosted provider has no stored key, or the provider call failed. |
 
 ---
 

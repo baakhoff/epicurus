@@ -40,7 +40,13 @@ import {
 } from "@/components/ui";
 import { ALL_TAGS, CATALOG, TAG_LABELS, filterCatalog, formatGb, type CatalogTag } from "@/data/catalog";
 import { api } from "@/lib/api";
-import { PROVIDER_LABELS, PROVIDER_MODEL_HINTS, formatBytes, relativeTime } from "@/lib/format";
+import {
+  PROVIDER_LABELS,
+  PROVIDER_MODEL_HINTS,
+  formatBytes,
+  isHostedModelId,
+  relativeTime,
+} from "@/lib/format";
 import type {
   ProviderInfo,
   SavedHostedModel,
@@ -1453,10 +1459,20 @@ export function EmbedDefault() {
   const queryClient = useQueryClient();
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
+  // Saved hosted models (#865): the gateway embeds through a hosted provider the same way it
+  // chats through one, so they belong in this select too. The store holds *any* hosted id and
+  // cannot tell a chat model from an embedding one — hence the warning in the help text.
+  const savedHosted = useQuery({ queryKey: ["savedModels"], queryFn: () => api.savedModels() });
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const current = llmPrefs.data?.global_embed_default ?? "";
   const available = (models.data ?? []).filter((m) => !m.hidden);
+  const hosted = savedHosted.data ?? [];
+  // A stored choice that neither list offers — a local model since deleted, or a hosted one since
+  // unsaved — is still the live default, so it gets its own option rather than letting the select
+  // fall back to "System default" and misreport what the core is actually using.
+  const known = new Set([...available.map((m) => m.name), ...hosted.map((h) => h.model)]);
+  const orphan = current && !known.has(current) ? current : null;
 
   const setEmbedDefault = useMutation({
     mutationFn: (model: string | null) => api.setGlobalEmbedDefault(model),
@@ -1472,7 +1488,9 @@ export function EmbedDefault() {
       <h3 className="mb-1 font-serif text-base text-ink">Embedding model</h3>
       <p className="mb-3 text-xs leading-relaxed text-ink-dim">
         Global default used when a module has no per-module embedding override. Per-module
-        selections in the Modules page take precedence.
+        selections in the Modules page take precedence. Hosted models come from your saved
+        list — pick an <em>embedding</em> model there; a chat model will fail at embed time.
+        A hosted choice sends the whole notes, knowledge, and memory corpus to that provider.
       </p>
       {llmPrefs.isLoading ? (
         <Spinner />
@@ -1487,11 +1505,23 @@ export function EmbedDefault() {
               onChange={(e) => setEmbedDefault.mutate(e.target.value || null)}
             >
               <option value="">System default</option>
-              {available.map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.name}
-                </option>
-              ))}
+              {orphan && <option value={orphan}>{orphan}</option>}
+              <optgroup label="Local (Ollama)">
+                {available.map((m) => (
+                  <option key={m.name} value={m.name}>
+                    {m.name}
+                  </option>
+                ))}
+              </optgroup>
+              {hosted.length > 0 && (
+                <optgroup label="Hosted (saved models)">
+                  {hosted.map((m) => (
+                    <option key={m.model} value={m.model}>
+                      {m.model}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </Select>
           </label>
           {current && (
@@ -1545,10 +1575,20 @@ export function EmbedDefault() {
         )}
       </div>
 
-      <ModelSettingsSheet
-        model={settingsOpen && current ? current : null}
-        onClose={() => setSettingsOpen(false)}
-      />
+      {/* A hosted embedding model has no Ollama runtime options — no keep-alive, no Run-on, no
+          num_ctx — so it gets the hosted sheet, exactly as a hosted chat model does (#865). */}
+      {isHostedModelId(current) ? (
+        <HostedModelSettingsSheet
+          model={settingsOpen && current ? current : null}
+          override={hosted.find((m) => m.model === current)?.override}
+          onClose={() => setSettingsOpen(false)}
+        />
+      ) : (
+        <ModelSettingsSheet
+          model={settingsOpen && current ? current : null}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
     </Card>
   );
 }

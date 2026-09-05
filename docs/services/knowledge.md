@@ -462,6 +462,30 @@ re-embeds from scratch. The runner reconciles **all** sources up front — befor
 recreates the shared `<tenant>__docs` collection — so the vault, platform docs, and module
 docs all rebuild after a reset.
 
+**Self-heal after an embedding-model change (#865).** A collection is created once, at
+whatever vector size the embedding model of the day produced — 768 for `nomic-embed-text`,
+typically 1536 or more for a hosted model. Switch the model and every later upsert carries
+vectors of a different width, which Qdrant rejects with an opaque `Vector dimension error` no
+retry can fix (the search query is rejected the same way). The cure is the Models page's
+**Re-embed everything** (#332), which drops the collections outright so no drift arises; this
+is the safety net for a switch made without it.
+
+`dimensions.CollectionDimensionGuard` owns each collection's width. A pass over an existing
+collection settles the question up front, with one short **probe embed** — necessary because a
+pass in which every file's hash is unchanged writes nothing and would otherwise never notice.
+On a mismatch the guard drops the collection, recreates it at the new width, clears **every**
+ledger that claims it, and raises; the indexer catches that and re-walks from the top, so the
+whole source is rebuilt from files in the same call. The bundled platform docs and the
+per-module docs share `<tenant>__docs` and therefore share one guard: a recreate driven by
+either clears both ledgers, since a source healing alone would leave the other claiming
+vectors that no longer exist. The single-file `index_path` (the editor-save path) retries once
+the same way.
+
+This never weakens the mass de-index fuse. The fuse is weighed before a single embedding is
+requested, so a stale mount is refused before any heal could run; and a recreate is not a
+de-index the fuse weighs — it clears the ledger itself, and the re-walk then sees an empty
+ledger, which has nothing to protect.
+
 **Stale-path GC on every reconcile pass (#470).** When the collection is intact, `reconcile`
 instead does a lighter check: any ledger row whose path the live vault no longer has is
 dropped (its vectors purged too), with no content read or re-embed. This is a cheap,
@@ -670,6 +694,7 @@ Package `epicurus_knowledge`:
 | `indexer.py` | Diff + batched embed + upsert + semantic search (`KnowledgeIndexer`, parameterised by source **and a `VaultReader`**); the walk + single-file read go through the reader (the file API by default — #346/ADR-0070), deriving `mtime_ns` from the entry mtime; accumulates chunks across files and flushes per `EMBED_BATCH_SIZE` (#230); `index_path` re-indexes a single file for the editor save; `move_path` re-keys the index after a move — a single file swaps its vectors directly, a folder move reconciles via a full run (#470); a run-lock serialises full passes so the watcher (#232) and startup index never overlap; `reconcile` self-heals a wiped Qdrant collection (#229) and, when the collection is intact, GCs ledger rows for paths the vault no longer has (#470). Both the walk's delete phase and that GC are weighed by the source's `IndexFuse` first (#848); `check_source_fuse` answers the same question for `POST /reindex`, *before* a reset erases the ledger it would protect. |
 | `runner.py` | `IndexRunner` (#230): runs every source indexer in the background with retry/backoff and exposes `IndexState` for `GET /status`; reconciles all sources up front to self-heal after a Qdrant reset (#229). Threads `force` (#848) to every source, and sums `fuse_tripped` alongside the index counts so a refusal shows up in `last_result`, not only in the logs. |
 | `fuse.py` | The mass de-index fuse (#848): `FusePolicy` (thresholds), `IndexFuse` (one per tenant + source — the verdict, the loud log, the Prometheus gauge/counter, and the tripped state `GET /status` reads), and `rebuild_refusals` (the `POST /reindex` pre-check across all three sources). |
+| `dimensions.py` | The vector-dimension guard (#865): `CollectionDimensionGuard` (one per Qdrant collection — confirms the width, recreates on a change, and clears every registered ledger; shared by the two sources on `<tenant>__docs`) and `EmbeddingDimensionChanged`, the restart signal the indexers catch to re-walk from scratch. |
 | `watcher.py` | The vault file-watcher (#232): `VaultWatcher` (`watchfiles.awatch` → debounced incremental re-index) + `VaultChangeFilter` (ignore `.obsidian/`/`.trash/`, `.md` only). The one path that still reads the disk directly — inotify has no file-API analogue — so it (and the reads it triggers) run only in **watch mode**, where the vault is a disk mount (#346/ADR-0070). Started by `app.py` when `VAULT_WATCH=true`. |
 | `service.py` | MCP tools — read-only navigation (`knowledge_search` → entity-ref chips, `knowledge_list_projects`, `knowledge_tree`, `knowledge_read_document`), `knowledge_reindex`, the write tools that stage suggestions (`knowledge_create_document` (create), `knowledge_propose_edit` update/delete, `knowledge_propose_move`, `knowledge_propose_rename` (rename-in-place → a `move` suggestion), `knowledge_propose_folder`, `knowledge_propose_project` — #KB-refactor / #220), and the suggestion-lifecycle tools (`knowledge_list_suggestions`, `knowledge_read_suggestion`, `knowledge_update_suggestion`, `knowledge_withdraw_suggestion` — #744, over `SuggestionReview.read`/`.update`/`.withdraw`) + manifest UI + the `editor` and `review` page specs. The shared `_finalize` helper (review-off auto-apply) reports a delete's already-gone target (`SuggestionTargetGone`, #761) as the honest not-found outcome, not the generic "review is off but applying failed" wrapper it uses for every other auto-apply failure — that wrapper assumes the suggestion is still staged, which isn't true once `approve` has resolved it. |
 | `pages.py` | The `editor` page surface (#130): the knowledge-base switcher + scopes (#KB-refactor), document/folder tree, read, save, folder CRUD (create, delete, move — #216), and `create_project` (new knowledge base) + the read-only `__docs__` platform-docs scope. `VaultPages` **reads** through a `VaultReader` (the file API by default — #346/ADR-0070; a `DiskVaultReader` for the bundled `__docs__` scope) and **writes** through the core file API (`PlatformClient.files_*`, core path `knowledge/<rel>` — #356/ADR-0064); `create_pages_router` registers the HTTP endpoints. `move_item` relocates the file then calls the indexer's `move_path` to keep the ledger + Qdrant in step (#470) — before this fix only the suggestion-approval path re-indexed a move. A `read_only` flag (watch mode, #232) makes the page view-only and 409s every write. Each save snapshots a version via the injected `VersionStore`, and `list_versions`/`get_version` back the version-history endpoints (#ADR-0046). |

@@ -3,6 +3,11 @@
 A model string is ``<provider>/<model>`` (e.g. ``claude/claude-3-5-sonnet-latest``); a
 bare name (no ``/``) targets the local Ollama runtime. Model IDs are the caller's
 choice (config, not code) — only the provider set is fixed here (ADR-0010).
+
+Only the **first** ``/`` separates the alias from the model part: an aggregator names its
+models with a slash of their own (``openrouter/openai/text-embedding-3-small`` →
+provider ``openrouter``, model ``openai/text-embedding-3-small``). Everything here splits
+with :meth:`str.partition`, never ``split("/")``, so a two-slash id survives intact.
 """
 
 from __future__ import annotations
@@ -34,6 +39,10 @@ PROVIDERS: dict[str, Provider] = {
     "grok": Provider("xai", "llm/xai"),
     "deepseek": Provider("deepseek", "llm/deepseek"),
     "gemini": Provider("gemini", "llm/google"),
+    # An aggregator: one key reaches many vendors' chat *and* embedding models. First-class
+    # rather than routed through ``custom`` so it keeps the generic OpenAI-compatible slot free
+    # and so LiteLLM's own ``openrouter`` provider (and its context/cost map) applies.
+    "openrouter": Provider("openrouter", "llm/openrouter"),
     "custom": Provider("openai", "llm/custom", needs_base_url=True),
 }
 

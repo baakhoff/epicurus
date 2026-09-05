@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from qdrant_client.models import Distance, VectorParams
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_knowledge.db import DocIndex, NoteIndex
@@ -82,9 +83,21 @@ def _query_response(points: list[Any]) -> Any:
     return SimpleNamespace(points=points)
 
 
-def _make_mock_qdrant() -> Any:
+def _collection_info(dim: int) -> Any:
+    """A ``get_collection`` response carrying one unnamed vector config of size *dim*."""
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            params=SimpleNamespace(vectors=VectorParams(size=dim, distance=Distance.COSINE))
+        )
+    )
+
+
+def _make_mock_qdrant(dim: int = EMBED_DIM) -> Any:
     qdrant = MagicMock()
     qdrant.collection_exists = AsyncMock(return_value=True)
+    # The live collection's vector size, which the dimension guard compares against every
+    # embedding it is handed (#865). Matching by default, so existing tests see no heal.
+    qdrant.get_collection = AsyncMock(return_value=_collection_info(dim))
     qdrant.create_collection = AsyncMock()
     qdrant.upsert = AsyncMock()
     qdrant.delete = AsyncMock()
@@ -703,8 +716,9 @@ async def test_run_batches_embeds_across_files(note_index: NoteIndex, tmp_path: 
     )
     result = await indexer.run()
     assert result["indexed"] == 5
-    # Five files, but one batched embed call — not one call per file.
-    assert platform.embed.call_count == 1
+    # Five files, but one batched embed call — not one call per file. The extra call is the
+    # per-pass dimension probe (#865), one short embed that confirms the collection's width.
+    assert platform.embed.call_count == 1 + 1
 
 
 async def test_run_one_flush_per_file_when_batch_size_one(
@@ -724,7 +738,7 @@ async def test_run_one_flush_per_file_when_batch_size_one(
     )
     result = await indexer.run()
     assert result["indexed"] == 5
-    assert platform.embed.call_count == 5
+    assert platform.embed.call_count == 5 + 1  # + the per-pass dimension probe (#865)
 
 
 async def test_run_persists_every_batched_file(note_index: NoteIndex, tmp_path: Path) -> None:

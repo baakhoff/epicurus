@@ -1,9 +1,11 @@
 """The LLM gateway — the core's single entry point to language models (ADR-0010).
 
 Targets the local Ollama runtime plus hosted providers (Claude, ChatGPT, Grok,
-DeepSeek, Gemini, and a generic OpenAI-compatible escape hatch) through the LiteLLM
-SDK. Provider keys are fetched from OpenBao at call time (tenant-scoped) and never
-logged.
+DeepSeek, Gemini, OpenRouter, and a generic OpenAI-compatible escape hatch) through the
+LiteLLM SDK. Provider keys are fetched from OpenBao at call time (tenant-scoped) and never
+logged. Both **chat and embeddings** route this way (#865) — an embedding model is
+classified by the same provider registry, so a hosted embedding model is reachable
+wherever a hosted chat model is.
 
 Routing (ADR-0010): a request tries the chosen model, then the configured fallback
 chain on failure. While the runtime is **paused** (ADR-0005), local models are
@@ -673,53 +675,97 @@ class LlmGateway:
         except Exception:  # usage accounting must never break inference
             log.warning("usage event publish failed", exc_info=True)
 
+    async def _embed_config(self, model: str, tenant_id: str | None) -> dict[str, Any]:
+        """The LiteLLM ``aembedding`` kwargs for ``model`` — local runtime or hosted provider.
+
+        Classified through the same registry as chat (:func:`providers.resolve`), so exactly
+        one rule decides what "hosted" means across the gateway.
+
+        **Local.** The model goes to LiteLLM's ``ollama`` embeddings route — *not* the
+        ``ollama_chat`` route ``resolve`` picks for completions, which has no embeddings
+        dispatch — so the resolved prefix is swapped for ``ollama/``. That also normalises an
+        explicit ``local/nomic-embed-text`` id, which used to be passed through verbatim and
+        reach the runtime as the nonexistent model ``local/nomic-embed-text``. The operator's
+        per-model settings sheet then supplies the Ollama runtime options (context window,
+        keep-alive, device); with nothing set, the call is unchanged — embeddings stay opt-in,
+        never silently retuned.
+
+        **Hosted.** The tenant-scoped API key is fetched from OpenBao at call time and never
+        logged, exactly as :meth:`_call_config` does for chat, and the generic
+        OpenAI-compatible provider also reads its ``api_base`` from the secret. No Ollama
+        runtime option is sent: ``num_ctx`` / ``keep_alive`` / ``num_gpu`` describe a local
+        allocation and mean nothing to a provider. A missing key raises the same
+        ``SecretNotFoundError`` the chat path raises, so both surfaces report an unconfigured
+        provider identically.
+        """
+        litellm_model, provider = registry.resolve(model)
+        if provider.is_local:
+            bare = litellm_model.partition("/")[2]
+            config: dict[str, Any] = {"model": f"ollama/{bare}", "api_base": self._ollama_url}
+            settings = await self._settings_for(model, tenant_id)
+            if settings.context_window is not None:
+                config["num_ctx"] = settings.context_window
+            if settings.keep_alive:
+                config["keep_alive"] = settings.keep_alive
+            if settings.device == "cpu":
+                config["num_gpu"] = 0
+            elif settings.device == "gpu":
+                config["num_gpu"] = 999
+            return config
+        config = {"model": litellm_model}
+        if provider.secret_path is not None:  # always true for a hosted provider
+            secret = await self._secrets.get(
+                provider.secret_path, tenant_id or self._default_tenant
+            )
+            config["api_key"] = secret["api_key"]
+            if provider.needs_base_url:
+                config["api_base"] = secret["api_base"]
+        return config
+
     async def embed(
         self, texts: list[str], *, model: str | None = None, tenant_id: str | None = None
     ) -> list[list[float]]:
-        """Embed ``texts`` with a local embedding model (e.g. ``nomic-embed-text``).
+        """Embed ``texts`` with the resolved embedding model — local or hosted (#865).
 
-        The embedding model gets the same per-model settings sheet as a chat model: when the
-        operator has set a context window or keep-alive for it, those are passed as Ollama
-        runtime options (LiteLLM drops them if the runtime doesn't take them). With nothing
-        set, the call is unchanged — embeddings stay opt-in, never silently retuned.
+        The model id is classified by the provider registry, exactly as a chat model is: a
+        bare name or ``local/…`` runs on the local Ollama runtime; a known hosted alias
+        (``gpt/text-embedding-3-small``, ``openrouter/openai/text-embedding-3-small``, …) goes
+        to that provider through LiteLLM with the tenant's key from OpenBao. See
+        :meth:`_embed_config` for what each class sends.
+
+        **Pause (ADR-0005) applies to local models only**, mirroring :meth:`_is_available` for
+        chat: a paused runtime refuses a local embed (running one would wake the GPU) while a
+        hosted embed still serves, so memory recall and module indexing keep working on a
+        paused box. ``mark_active`` is called either way — as the chat path does for a hosted
+        completion — and is a no-op while paused, so it can never wake anything.
+
+        Either way the call emits the same tenant-scoped usage event (constraint #1), naming
+        the model actually called.
 
         Time-boxed to the same ``LLM_TIMEOUT``-derived bound the chat/stream call sites carry
         (#453) — but enforced with :func:`asyncio.wait_for` rather than litellm's own
         ``timeout=`` kwarg. LiteLLM 1.89.3's ``ollama`` embeddings dispatch
         (``llms/ollama/completion/handler.py``'s ``ollama_aembeddings``) never threads
         ``timeout`` through to its HTTP call — unlike the chat path, where it reaches
-        aiohttp's ``sock_read`` — so passing it as a kwarg here would be silently inert.
+        aiohttp's ``sock_read`` — so passing it as a kwarg here would be silently inert. The
+        one bound covers hosted calls too rather than splitting the rule per provider.
         Cross-chat recall wraps its own, much shorter, gracefully-degrading budget on top of
         this (``agent._recall_within_budget``); this guard covers the direct/module paths
         that had no bound at all (#466).
         """
-        if self._power.paused:
-            raise GatewayPausedError("LLM gateway is paused; resume to run inference")
         resolved = model or await self.effective_embed_default(tenant_id)
-        embed_model = f"ollama/{resolved}"
-        settings = await self._settings_for(resolved, tenant_id)
-        options: dict[str, Any] = {}
-        if settings.context_window is not None:
-            options["num_ctx"] = settings.context_window
-        if settings.keep_alive:
-            options["keep_alive"] = settings.keep_alive
-        if settings.device == "cpu":
-            options["num_gpu"] = 0
-        elif settings.device == "gpu":
-            options["num_gpu"] = 999
+        _, provider = registry.resolve(resolved)
+        if provider.is_local and self._power.paused:
+            raise GatewayPausedError("LLM gateway is paused; resume to run inference")
+        config = await self._embed_config(resolved, tenant_id)
         start = time.monotonic()
         response = await asyncio.wait_for(
-            litellm.aembedding(
-                model=embed_model,
-                input=texts,
-                api_base=self._ollama_url,
-                **options,
-            ),
+            litellm.aembedding(input=texts, **config),
             timeout=self._timeout.read,
         )
         self._power.mark_active()
         await self._emit_usage(
-            model=embed_model,
+            model=str(config["model"]),
             prompt_tokens=None,
             completion_tokens=None,
             latency_ms=(time.monotonic() - start) * 1000,

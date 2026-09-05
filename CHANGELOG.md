@@ -40,6 +40,34 @@ images to GHCR.
   storage) are separate follow-up issues. `epicurus-core` 0.35.0→0.36.0 (MINOR) · `core-app`
   0.117.0→0.118.0 (MINOR) · `web` 0.139.0→0.140.0 (MINOR).
 
+- **OpenRouter, and embedding models that don't have to run on your box** (#865) — reaching
+  OpenRouter meant spending the single generic OpenAI-compatible slot on it, and hosted
+  *embedding* models were not reachable at all: `LlmGateway.embed` hardcoded `ollama/<model>`,
+  sent Ollama-only runtime options, and refused every call while the runtime was paused. Both
+  are fixed at the root rather than per-case. `openrouter` is now a first-class provider alias
+  (key at `llm/openrouter`), so LiteLLM's own OpenRouter dispatch and its context/cost map
+  apply — and because an OpenRouter model id carries a vendor segment of its own
+  (`openrouter/openai/text-embedding-3-small`), every place that classifies a model id now
+  splits on the *first* slash only, in Python and in TypeScript alike. `embed` classifies its
+  model through the same provider registry chat uses: a local id behaves exactly as before,
+  while a hosted one takes the provider path with the tenant's key fetched from OpenBao at call
+  time, no Ollama options, and — mirroring hosted chat — keeps serving while the runtime is
+  paused, so memory recall and module indexing survive a paused GPU. Both classes emit the same
+  tenant-scoped usage event naming the model actually called. The Models page's **Embedding
+  model** select now lists saved hosted models beside the local ones and opens the hosted
+  settings sheet for them (no keep-alive, no Run-on), saying plainly that the saved list can't
+  tell a chat model from an embedding one — and that a hosted choice sends the whole
+  notes/knowledge/memory corpus to that provider. Switching between a 768-d local model and a
+  1536-d hosted one is a *vector-size* change, which Qdrant used to answer with an opaque
+  dimension error on the next upsert and on every search; the knowledge and notes indexers now
+  recreate the collection at the new size and rebuild from source instead, with the two sources
+  sharing `<tenant>__docs` healing together so neither is left claiming vectors that are gone,
+  and the #848 mass de-index fuse still weighed first and untouched. "Re-embed everything"
+  remains the documented step after a model switch; this is the net for switching without it.
+  Fixed along the way: an explicit `local/<model>` embedding id reached the runtime verbatim as
+  the nonexistent model `local/<model>`. `core-app` 0.116.0→0.117.0 (MINOR) · `web`
+  0.138.0→0.139.0 (MINOR) · `knowledge` 0.28.1→0.29.0 (MINOR) · `notes` 0.12.3→0.13.0 (MINOR).
+
 - **Six module manifests were lying on screen** (#845) — the Modules page badge reads
   `manifest.version`, which every module hardcodes as a literal in `build_module()` rather than
   reading its own package's declared version. Six of them had drifted behind `pyproject.toml`

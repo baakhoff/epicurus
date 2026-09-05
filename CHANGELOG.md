@@ -12,6 +12,23 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Your notes move house with their words intact** (#872, part of #866) — `notes` now implements
+  the module half of tenant export/import (schema `notes/1`): every note, every folder you made,
+  the agent's pending suggestion queue and the decision trail behind it travel in the archive and
+  land in the new installation under its own tenant. **Bodies travel with the rows**, which is the
+  opposite of how it first looked: a note is already mirrored to `notes/<slug>.md` in the shared
+  file space, and the file space is in the archive — but that mirror is write-only derived output
+  that nothing ever reads back into the store, so carrying metadata alone would have handed the
+  operator a Files tree full of markdown and a Notes page full of empty documents. What stays
+  behind is what can be rebuilt or was never ours: per-save version history (already deduped and
+  pruned to 50 per note, and every row a whole body of text whose current state travels beside
+  it), the Qdrant vectors (rebuilt by the re-embed fan-out, since a vector belongs to the model
+  that made it), the `.md` mirror itself, and the review on/off toggle (a core preference).
+  Import upserts by the note's slug — never a surrogate key — in a single transaction, never
+  deletes, and a second apply of the same archive is a no-op; a record that omits a column leaves
+  that column alone, so nothing can blank a body it did not carry, and a note with no body at all
+  is refused rather than conjured into the editor as an empty document. `notes` 0.13.0→0.14.0
+  (MINOR).
 - **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
   an operator could stand up a second epicurus but had no way to *move into it*. The volume
   backups in `infra/backups` image one deployment for disaster recovery; nothing carried a

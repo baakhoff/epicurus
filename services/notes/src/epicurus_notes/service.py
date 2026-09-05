@@ -81,7 +81,7 @@ def build_module(
     turned review off for notes (#KB-refactor)."""
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.13.0",
+        version="0.14.0",
         description=(
             "Author Obsidian-style notes saved to a private collection and mirrored as .md"
             " in the shared file space. Private: the agent never reads a note's body — it"
@@ -109,6 +109,10 @@ def build_module(
         # Notes are embedded into <tenant>__notes: re-embed on demand when the embedding model
         # changes, via POST /reindex (the core's re-embed fan-out, #332).
         reindexable=True,
+        # The tenant export/import contract (#872, ADR-0133): notes, folders, the suggestion
+        # queue and its decision trail travel — bodies included, because Postgres (not the
+        # `.md` mirror) is their source of truth. See :mod:`epicurus_notes.portability`.
+        portable=True,
         ui=UiSection(
             icon="pencil",
             summary=(

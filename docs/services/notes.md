@@ -253,8 +253,10 @@ data flows through the core.
 | --- | --- |
 | `GET /health` | Liveness probe. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /manifest` | Module manifest (tools, the spine events (#665), `attachable: true`, `reindexable: true`, `pages`, UI). |
+| `GET /manifest` | Module manifest (tools, the spine events (#665), `attachable: true`, `reindexable: true`, `portable: true`, `pages`, UI). |
 | `GET /status` | Live stats `{note_count, last_updated_at}`. Proxied at `GET /platform/v1/modules/notes/status`. |
+| `GET /export?tenant_id=…` | **Tenant export** (#872, ADR-0133) — NDJSON: a header line `{"schema": "notes/1", "component_version": …}` then one record per note / folder / suggestion / decision. `tenant_id` is required. See [Portability](#portability-872) below. |
+| `POST /import?tenant_id=…&dry_run=…` | **Tenant import** — the same stream back, upserted by stable id; answers `{schema, counts: {<kind>: {created, updated, skipped}}, warnings}`. Never deletes; a second apply is a no-op. A stream from a newer `notes/<n>` is refused whole (409). |
 | `POST /reindex` | **Force a full re-embed** of every note with the current embedding model → `{status: "started"}` (#332, ADR-0054). Drops the `<tenant>__notes` collection and re-embeds each note (notes are otherwise indexed only on save), so vectors built with a previous model are rebuilt. Runs in the background. Called by the core's re-embed fan-out (the manifest sets `reindexable`). |
 | `GET /pages/{page_id}` | Editor document/folder tree `{title, docs:[{id, title, path, type}], can_manage_files: true}` (page id `notes`). Dir nodes (`type: "dir"`) come from `note_folders` ∪ slug prefixes, emitted parent-first before file nodes. |
 | `GET /pages/{page_id}/doc?path=<slug>` | One note's content `{path, title, content}`. |
@@ -370,6 +372,72 @@ note. The agent's view of `notes/` through the storage file tools is hidden by s
 Everything is tenant-scoped: the Postgres rows, the suggestion queue, the Qdrant collection
 name, and the NATS subject.
 
+## Portability (#872)
+
+Notes implements the module half of tenant export/import (ADR-0133): `portable: true` in the
+manifest, `GET /export` + `POST /import` served by `epicurus_core.add_portability_routes` over
+`NotesPortability` (`portability.py`). Schema **`notes/1`**.
+
+**The note body travels with the row.** That is the one decision worth stating twice, because
+the sketch this lane started from assumed the opposite: since every note is already mirrored to
+`notes/<slug>.md` in the shared file space, and the file space travels in the archive's `files/`
+member, it looks as though bodies are already carried. They are not carried *back*. Postgres is
+the source of truth; the mirror is **write-only derived output** — nothing in this module, the
+core, or the import ever reads a `.md` file into the `notes` table. A metadata-only export would
+have landed the operator in a new install with a Files tree full of markdown and a Notes page
+full of empty documents.
+
+| `kind` | Stable id | Columns that travel | Table |
+| --- | --- | --- | --- |
+| `note` | the tenant-unique `slug` | `title`, `content`, `created_at`, `updated_at` | `notes` |
+| `note_folder` | the folder `path` | `created_at` | `note_folders` |
+| `note_suggestion` | the suggestion's own `sid` (uuid4 hex) | `slug`, `operation`, `proposed_content`, `origin`, `note`, `created_at` | `notes_suggestions` |
+| `note_suggestion_decision` | `"<sid>:<decided_at>"` (ISO-8601 UTC) | `slug`, `operation`, `origin`, `note`, `proposed_content`, `applied_content`, `decision`, `proposed_at` | `notes_suggestion_decisions` |
+
+Never the surrogate `id` column and never `tenant`: the tenant is stripped on export and
+re-applied from the import's target tenant (constraint #1). Timestamps serialise as ISO-8601,
+always UTC, always offset-qualified — SQLite returns naive datetimes where Postgres returns
+aware ones, and normalising both is what makes "did this row change?" answerable and a second
+apply a genuine no-op. A decision row has no natural id of its own (`sid` names the *suggestion*
+it resolved), so its id is derived from the pair that does identify it — the suggestion and the
+moment it was resolved; `sid` is 32 hex characters, so the `:` splits back unambiguously.
+
+**Excluded, and why:**
+
+- **`note_versions`** — per-save history (ADR-0046). Derived from edits rather than authored,
+  already lossy (deduped, pruned to the newest 50 per note), and every row is a whole note body:
+  carrying it would multiply the archive to ship snapshots of text whose current state travels
+  in full beside it. The head of that history *is* the note.
+- **Qdrant `<tenant>__notes`** — derived vectors, specific to the embedding model that made
+  them; rebuilt after an import by the core's re-embed fan-out calling `POST /reindex` (#332).
+- **The `.md` mirror** — derived output, and the core's file space already carries it as a file.
+- **The review on/off toggle** — a *core* preference
+  (`/platform/v1/modules/notes/suggestions-enabled`), carried in the archive's core sets.
+- **`NotesSettings`** — deployment configuration (URLs, chunk size): the new operator's to set.
+- **Secrets** — there are none. Notes holds no credentials at all (ADR-0010/0020).
+
+**Import semantics.** Upsert by stable id, in a single transaction — a stream that fails halfway
+leaves the tenant exactly as it was. Nothing here deletes: a note the target already has and the
+archive does not is untouched. A key **absent** from a record's `data` leaves that column alone,
+so a partial record can never blank a body it did not carry; a *create* missing a column the
+table cannot default (a `note` with no `content`) is refused with a warning rather than written
+half-formed — this module does not conjure empty notes. An unknown `kind` and a malformed record
+(an unparseable id or timestamp) are each counted `skipped` with one de-duplicated warning, never
+fatal. `dry_run=true` counts exactly what an apply would do, writing nothing.
+
+**Ordering, and the not-yet-mirrored body.** The core applies an archive as core sets →
+**modules** → `files/` → forced rescan → re-embed fan-out, so notes' records land *before* the
+file tree does. Because the row carries its own body that costs nothing: the note is whole the
+moment the import returns, and the mirror is reconciled afterwards from two directions — the
+archive's own `files/notes/<slug>.md` during the file phase, and this module's startup
+`NotesMirror.backfill()` (only-if-missing) for anything the archive did not carry. The vectors
+come back with the re-embed fan-out, which reads bodies straight out of the store.
+
+One consequence worth knowing: the decision trail is capped at `MAX_DECISIONS` (200) per tenant,
+and an import *merges* rather than replaces, so importing into an install that already has a full
+trail can leave more than 200 rows until the next decision prunes it. Import never deletes, so it
+will not prune for you.
+
 ## Dependencies
 
 core-app (embeddings + **the file API for the `.md` mirror**, `PlatformClient.files_*` — plus
@@ -395,6 +463,7 @@ Package `epicurus_notes`:
 | `pages.py` | The `editor` page surface: tree list (folders + files), read, create/update (title derivation + slug safety + mirror write + version snapshot + re-index), `delete_doc`, the file-management ops (#KB-refactor): `create_folder` / `delete_folder` (empty-only) / `move_item` (slug re-key with vectors + mirror following), and `list_versions`/`get_version` (ADR-0046). |
 | `suggestions.py` | The `review` page surface (ADR-0033; edit-before-approve + audit, ADR-0090): the `notes_suggestions` store (`.update` revises a pending row in place, refreshing `created_at` — #744), `NoteSuggestionReview` (diff + apply on approve / discard on reject, across create/update/append/delete; approve takes optional edited `content`; `read`/`update`/`withdraw` — #744 — are the agent-facing pending-only lifecycle ops, 404ing via `_unresolved_reason` with the resolved verdict when a suggestion is no longer pending), the `notes_suggestion_decisions` audit store (`NoteSuggestionAuditStore`, capped at `MAX_DECISIONS`; `.get` looks up one decision by id — #744), and `create_note_review_router`. The shared wire contract is imported from `epicurus_core.review`, not locally redefined. Approve/reject are operator-only — never MCP tools. |
 | `attachments.py` | The chat-attachment picker + resolve (`NotesAttachments`) — the only path to a note's content. |
+| `portability.py` | The tenant export/import store (`NotesPortability`, schema `notes/1`, #872): notes (bodies included), folders, the suggestion queue and its decision trail, upserted by stable id. A table-driven spec (`TABLES`) maps each row to a record and back; version history and the Qdrant collection are excluded (see [Portability](#portability-872)). |
 | `service.py` | The manifest — `pages` (editor + review), `attachable`, the spine event declarations (#665), the agent's write-only tools (structure: `notes_list`/`notes_tree`; writes: `notes_create`/`notes_propose_edit`/`notes_append`/`notes_delete` — **no note-body read tool**), and the suggestion-lifecycle tools (`notes_list_suggestions`/`notes_read_suggestion`/`notes_update_suggestion`/`notes_withdraw_suggestion` — #744, over `NoteSuggestionReview.read`/`.update`/`.withdraw`). |
 | `app.py` | Lifespan (incl. the suggestion-store + folder-store init + mirror backfill), `GET /status`, the review router (registered first) + the `/pages/*` and `/attachments/*` routers, event publish. |
 | `settings.py` | `NotesSettings` (adds Qdrant, DB, platform URL, chunk size, `notes_root`). |

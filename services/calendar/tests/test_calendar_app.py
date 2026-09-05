@@ -18,6 +18,15 @@ def test_app_exposes_ops_status_and_page_routes() -> None:
     assert any(p.startswith("/mcp") for p in paths)
 
 
+def test_app_exposes_portability_routes() -> None:
+    # The tenant export/import contract (#870): the manifest flag alone is not enough — the
+    # core calls these two paths, so wiring them is what makes `portable=True` true.
+    app = create_app()
+    paths = route_paths(app)
+    assert "/export" in paths
+    assert "/import" in paths
+
+
 def test_app_exposes_resolver_and_attachment_routes() -> None:
     # The entity-ref resolver and chat-attachment source the core proxies (ADR-0019).
     app = create_app()

@@ -77,3 +77,40 @@ own secrets from OpenBao at runtime.
 > **AI access.** Modules do not hold model API keys. All AI/LLM access goes
 > through the core, which owns the model keys and routing — so there is one place
 > to configure and secure them.
+
+## Using a hosted model provider
+
+Everything below happens on the **Models** page in the web UI. Nothing goes in `.env`, and no
+key is ever written to git — the core stores it in OpenBao, scoped to your tenant.
+
+Providers are addressed by a short alias, and a model id is `<alias>/<model>`: `claude`, `gpt`,
+`grok`, `deepseek`, `gemini`, `openrouter`, and `custom` (any OpenAI-compatible endpoint, which
+also asks for a base URL). **OpenRouter** is worth calling out because one key reaches many
+vendors, for chat *and* embeddings.
+
+To connect OpenRouter:
+
+1. **Enter the key.** Models page → *Providers* → **OpenRouter** → paste your key. It is
+   write-only: the UI never shows it again.
+2. **Pick a chat model.** Type its full id in the model picker, e.g.
+   `openrouter/anthropic/claude-sonnet-4.6`. Note the **two** slashes — OpenRouter's model ids
+   carry a vendor segment of their own, and the whole thing after `openrouter/` is the model
+   name. Using a model saves it to your list, so it is a click next time.
+3. **Pick an embedding model** *(optional)*. Models page → **Embedding model**. Local models
+   and your saved hosted ones appear in separate groups; a hosted embedding id looks like
+   `openrouter/openai/text-embedding-3-small`. The saved list cannot tell a chat model from an
+   embedding model, so choosing a chat model here fails at embed time — pick an embedding one.
+4. **Re-embed.** Changing the embedding model does not rebuild existing vectors, and a hosted
+   model almost certainly has a different vector size than the local default. Click **Re-embed
+   everything** on the same card and let it finish. (Skip it and the indexers repair themselves
+   the next time they run, but search is degraded until they do.)
+
+> **What leaves the machine.** A hosted **chat** model sees the conversation you send it. A
+> hosted **embedding** model sees *everything you index* — every note, every knowledge
+> document, every remembered fact, and every search query — because each one is sent to the
+> provider to be turned into a vector. That is a real trade against the local-first default;
+> make it deliberately. A local embedding model keeps the corpus on the machine even while chat
+> runs hosted.
+
+> **Pausing.** Pausing the LLM runtime protects the local GPU, so it stops local models only.
+> Hosted chat and hosted embeddings keep working while paused.

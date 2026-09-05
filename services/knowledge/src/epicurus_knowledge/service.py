@@ -315,7 +315,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.28.1",
+        version="0.29.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."

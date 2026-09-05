@@ -23,13 +23,11 @@ from typing import Any
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
-    Distance,
     FieldCondition,
     Filter,
     FilterSelector,
     MatchValue,
     PointStruct,
-    VectorParams,
 )
 from sqlalchemy import DateTime, Integer, String, UniqueConstraint, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -38,6 +36,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from epicurus_core import PlatformClient, get_logger
 from epicurus_core.tenancy import scope_collection
 from epicurus_knowledge.chunker import chunk_note
+from epicurus_knowledge.dimensions import CollectionDimensionGuard, EmbeddingDimensionChanged
 from epicurus_knowledge.fuse import FusePolicy, FuseTrip, IndexFuse
 
 _log = get_logger("knowledge.module_docs")
@@ -215,6 +214,7 @@ class ModuleDocsIndexer:
         tenant: str,
         chunk_max_chars: int = 2000,
         fuse_policy: FusePolicy | None = None,
+        dimensions: CollectionDimensionGuard | None = None,
     ) -> None:
         self._ledger = ledger
         self._qdrant = qdrant
@@ -222,6 +222,11 @@ class ModuleDocsIndexer:
         self._tenant = tenant
         self._max_chars = chunk_max_chars
         self._collection = scope_collection("docs", tenant)
+        # ``<tenant>__docs`` is shared with the bundled-platform-docs indexer, so the app hands
+        # both sources the *same* dimension guard (#865): recreating the collection at a new
+        # embedding size clears both ledgers, never just the one that noticed.
+        self._dimensions = dimensions or CollectionDimensionGuard(qdrant, self._collection)
+        self._dimensions.register_reset(self._clear_ledger)
         # Same fuse as the file-backed sources (#848); here the "source" is the core's module
         # registry, and its wholesale-empty case is "no enabled module declares docs_url".
         self.fuse = IndexFuse(tenant=tenant, source="module_docs", policy=fuse_policy)
@@ -230,12 +235,31 @@ class ModuleDocsIndexer:
         """Resolve the knowledge module's chosen embedding model slot (#128)."""
         return await self._platform.get_module_model("embedding")
 
-    async def _ensure_collection(self, dim: int) -> None:
+    async def _clear_ledger(self) -> None:
+        """Drop every module-doc ledger row — the guard's recreate hook (#865)."""
+        await self._ledger.clear(tenant=self._tenant)
+
+    async def _verify_dimension(self, model: str | None) -> None:
+        """Confirm the shared collection's width against the current embedder (#865).
+
+        One short embed per sync, uncached across syncs — see the twin in
+        :class:`~epicurus_knowledge.indexer.KnowledgeIndexer` for why remembering the answer
+        would defeat the purpose. Module docs change rarely, so a sync where every hash matches
+        is the *common* case here, and without this the source that noticed a model switch
+        would never be this one.
+        """
         if not await self._qdrant.collection_exists(self._collection):
-            await self._qdrant.create_collection(
-                self._collection,
-                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
-            )
+            return
+        probe = await self._platform.embed(["dimension probe"], model=model)
+        await self._dimensions.ensure(len(probe[0]))
+
+    async def _ensure_collection(self, dim: int) -> None:
+        """Create the shared docs collection, or heal it when the embedder's size changed.
+
+        Raises :class:`EmbeddingDimensionChanged` after a heal; :meth:`run` catches it and
+        re-syncs from the top against the fresh collection.
+        """
+        await self._dimensions.ensure(dim)
 
     async def _delete_note_vectors(self, note_path: str) -> None:
         if not await self._qdrant.collection_exists(self._collection):
@@ -293,6 +317,7 @@ class ModuleDocsIndexer:
             ledger_rows=known,
         )
         await self._ledger.clear(tenant=self._tenant)
+        self._dimensions.forget()
         return True
 
     async def reset(self) -> None:
@@ -304,6 +329,7 @@ class ModuleDocsIndexer:
         if await self._qdrant.collection_exists(self._collection):
             await self._qdrant.delete_collection(self._collection)
         await self._ledger.clear(tenant=self._tenant)
+        self._dimensions.forget()
 
     async def _doc_module_names(self) -> set[str]:
         """Names of enabled modules that declare a ``docs_url`` — the live source set.
@@ -380,7 +406,23 @@ class ModuleDocsIndexer:
         (#848). Unlike the file-backed sources this refuses the *purge* alone: the adds have
         already landed by then and are not destructive, so keeping them costs nothing while
         dropping the deletes preserves the corpus. ``force=True`` purges regardless.
+
+        A sync that finds the embedding model's vector size changed (#865) heals the shared
+        ``<tenant>__docs`` collection — recreated at the new size, both ledgers on it cleared —
+        and then re-syncs from the top, so the whole module corpus is rebuilt in this one call.
         """
+        try:
+            return await self._sync(force=force)
+        except EmbeddingDimensionChanged as exc:
+            _log.warning(
+                "embedding dimension changed mid-sync; re-syncing module docs from scratch",
+                collection=self._collection,
+                detail=str(exc),
+            )
+            return await self._sync(force=force)
+
+    async def _sync(self, *, force: bool) -> dict[str, int]:
+        """One module-docs sync pass — see :meth:`run`, which adds the dimension-heal retry."""
         indexed = deleted = unchanged = 0
 
         # Collect enabled modules that declare docs_url.
@@ -408,6 +450,9 @@ class ModuleDocsIndexer:
             active[name] = docs
 
         model = await self._embedding_model()
+        # Settle the shared collection's vector width before syncing, so an all-unchanged pass
+        # still notices a switched embedding model (#865).
+        await self._verify_dimension(model)
 
         # Sync docs for currently-active modules.
         for name, docs in active.items():

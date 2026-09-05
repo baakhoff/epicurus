@@ -52,6 +52,7 @@ export const PROVIDER_LABELS: Record<string, string> = {
   grok: "xAI Grok",
   deepseek: "DeepSeek",
   gemini: "Google Gemini",
+  openrouter: "OpenRouter",
   custom: "Any OpenAI-compatible",
 };
 
@@ -62,6 +63,8 @@ export const PROVIDER_MODEL_HINTS: Record<string, string> = {
   grok: "grok/grok-4",
   deepseek: "deepseek/deepseek-chat",
   gemini: "gemini/gemini-3-pro",
+  // OpenRouter model ids carry a vendor segment of their own, so the full id has two slashes.
+  openrouter: "openrouter/anthropic/claude-sonnet-4.6",
   custom: "custom/your-model-id",
 };
 
@@ -76,6 +79,10 @@ export const HOSTED_PROVIDER_ALIASES: ReadonlySet<string> = new Set(
  * Mirrors the core's `providers.is_hosted`: `claude/…` is hosted, while a bare name, the
  * explicit `local/…` alias, and an unknown `hf.co/org/model:tag` prefix are all local. This
  * replaces the old `includes("/")` heuristic that mis-filed local `hf.co/…` models as hosted (#496).
+ *
+ * Only the **first** slash separates the alias from the model part, so an aggregator id whose
+ * model part has a slash of its own (`openrouter/openai/text-embedding-3-small`) classifies on
+ * `openrouter` and stays intact.
  */
 export function isHostedModelId(model: string): boolean {
   const slash = model.indexOf("/");

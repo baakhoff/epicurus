@@ -13,6 +13,16 @@ describe("isHostedModelId", () => {
     expect(isHostedModelId("custom/my-model")).toBe(true);
   });
 
+  it("classifies a two-slash aggregator id on its first segment (#865)", () => {
+    // An OpenRouter model id carries a vendor segment of its own, so only the first slash
+    // separates the provider alias — the id must not be split on every slash.
+    expect(isHostedModelId("openrouter/anthropic/claude-sonnet-4.6")).toBe(true);
+    expect(isHostedModelId("openrouter/openai/text-embedding-3-small")).toBe(true);
+    // The vendor segment alone is not a provider alias, so it stays local.
+    expect(isHostedModelId("anthropic/claude-sonnet-4.6")).toBe(false);
+    expect(isHostedModelId("openai/text-embedding-3-small")).toBe(false);
+  });
+
   it("treats bare names, the local alias, and unknown prefixes as local", () => {
     expect(isHostedModelId("llama3.2")).toBe(false);
     expect(isHostedModelId("qwen2.5:0.5b")).toBe(false);
@@ -32,6 +42,11 @@ describe("usePrefs.setModel recents classification", () => {
     usePrefs.getState().setModel("claude/sonnet");
     expect(usePrefs.getState().model).toBe("claude/sonnet");
     expect(usePrefs.getState().recentModels).toContain("claude/sonnet");
+  });
+
+  it("keeps a two-slash OpenRouter id intact in recents (#865)", () => {
+    usePrefs.getState().setModel("openrouter/anthropic/claude-sonnet-4.6");
+    expect(usePrefs.getState().recentModels).toContain("openrouter/anthropic/claude-sonnet-4.6");
   });
 
   it("never files a local model into recents (bare name or hf.co/ prefix)", () => {

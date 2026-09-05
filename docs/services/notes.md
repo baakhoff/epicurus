@@ -297,6 +297,17 @@ retrieval path queries it today** — and the agent has no read tool, so attach 
 note body straight from Postgres) is the only way a note's content reaches the assistant. The
 collection exists so a future, opt-in retrieval feature needs no re-index.
 
+**Changing the embedding model (#865).** The collection is created once, at whatever vector
+size the embedding model of the day produced — 768 for `nomic-embed-text`, typically 1536 or
+more for a hosted model. A later upsert of a different width is rejected by Qdrant outright, so
+`NotesIndexer` caches the width it last confirmed and, on a mismatch, **recreates** the
+collection at the new size and logs loudly; the save that noticed then lands normally. Postgres
+is the source of truth, so nothing is lost — but the other notes' vectors are, until they are
+written again. The documented step after switching models is therefore unchanged: run
+**Re-embed everything** on the Models page (`POST /reindex`, #332), which drops the collection
+and rebuilds every note from the database. Nothing queries this collection today, so the window
+in between degrades nothing.
+
 ## Configuration
 
 `NotesSettings` extends [`CoreSettings`](../reference/config.md):

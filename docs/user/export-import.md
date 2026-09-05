@@ -44,9 +44,12 @@ Everything inside is JSON, one record per line. Read it before you move it.
 
 ### What an export does not contain
 
-**Secrets never leave the vault.** Provider API keys and connected-account tokens live in
-OpenBao and are not in the archive at any strength. What the archive *does* carry is the
-list of their names, so the import can tell you exactly what to re-enter and reconnect.
+**Secrets never leave the vault.** Provider API keys, connected-account tokens and the bot
+tokens behind your **chat bridges** live in OpenBao and are not in the archive at any
+strength. What the archive *does* carry is the list of their names, so the import can tell
+you exactly what to re-enter, what to reconnect, and which bridges to set up again — a
+module like `messaging` stores nothing else at all, so its whole presence in an archive is
+that one line.
 
 **Derived data is not carried, because it is rebuilt.** Search indexes and every embedding
 vector are specific to the model that produced them, so copying them to a machine that may
@@ -103,16 +106,17 @@ import runs for you:
 2. the **re-embed** fan-out, asking each module to rebuild its vectors with *this*
    installation's embedding model.
 
-Then finish the move by hand: **re-enter the API keys** and **reconnect the accounts** the
-report names. Nothing else will do it for you — that is the point of keeping them out of the
-archive.
+Then finish the move by hand: **re-enter the API keys**, **reconnect the accounts**, and
+**reconnect the chat bridges** the report names (Settings → Chat bridges). Nothing else will
+do it for you — that is the point of keeping them out of the archive.
 
 ## Moving from one epicurus to another
 
 1. On the old machine: Settings → Export & import → **Export everything** → download.
 2. Stand the new one up ([Installation](installation.md)) and open its Settings.
 3. **Choose an archive**, read the preview, **Apply import**.
-4. Re-enter the API keys and reconnect the accounts the report lists.
+4. Re-enter the API keys, reconnect the accounts, and reconnect the chat bridges the report
+   lists.
 5. Give the re-embed a few minutes before judging search.
 
 ## Limits and knobs

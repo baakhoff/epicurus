@@ -679,7 +679,11 @@ Applies a staged import in the background. **202**. **409** if the job is not `s
   "files": {"written": 130, "skipped": 4, "conflicts": ["notes/edited.md"]},
   "rescan_entries": 134, "rescan_error": null, "rescan_forced": true,
   "reembed": [{"module": "knowledge", "status": "started"}], "reembed_error": null,
-  "reenter_secrets": {"provider_keys": ["openai"], "connected_accounts": ["google"]}
+  "reenter_secrets": {
+    "provider_keys": ["openai"],
+    "connected_accounts": ["google"],
+    "module_secrets": {"messaging": ["messaging/discord", "messaging/telegram"]}
+  }
 }
 ```
 
@@ -690,7 +694,13 @@ empty→populated flip) and then the re-embed fan-out (#332); both are reported,
 failing does not invalidate the data that already landed. `rescan_forced` says the fuse was
 waived, so a safety rule is never overridden without the report naming it.
 `reenter_secrets` repeats the source's secret inventory — **names only**, since no secret
-material is ever in an archive.
+material is ever in an archive. Its third part, **`module_secrets`** (#875), is
+`{module: [the OpenBao paths that module declares and this tenant actually held]}`: a module
+can persist nothing worth exporting and still need reconnecting on the far side —
+`messaging` is exactly that, no rows at all and a bot token per connected bridge — so the
+export probes each enabled module's manifest `secrets[]` for **presence** (never the value)
+and the report says which to re-enter. Best-effort like the rest of the inventory: a vault
+that cannot be reached yields an empty map, not a failed export.
 
 The archive layout and the core's own included/excluded table are in
 [`core-app`](../services/core-app.md#tenant-data-portability-867); the module half of the

@@ -42,7 +42,12 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
 }
 
-const SECRETS = { provider_keys: ["openai"], connected_accounts: ["google"] };
+const SECRETS = {
+  provider_keys: ["openai"],
+  connected_accounts: ["google"],
+  // #875: `messaging` exports no rows at all and still has to be reconnected by hand.
+  module_secrets: { messaging: ["messaging/discord", "messaging/telegram"] },
+};
 
 const MANIFEST = {
   format_version: 1,
@@ -265,6 +270,18 @@ describe("ExportImportCard (#867)", () => {
     expect(await screen.findByText(/exceeds the 4096-byte upload limit/)).toBeInTheDocument();
   });
 
+  it("names the module credentials the archive does not carry", async () => {
+    mockStartExport.mockResolvedValue(READY_EXPORT);
+    mockExport.mockResolvedValue(READY_EXPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    fireEvent.click(screen.getByRole("button", { name: /export everything/i }));
+
+    // The module is the subject of the line; the OpenBao path's prefix is noise.
+    expect(
+      await screen.findByText(/messaging — discord, telegram/i),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("ExportImportCard — re-attaching after a reload (#877)", () => {

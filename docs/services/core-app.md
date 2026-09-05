@@ -1076,6 +1076,17 @@ source's `core-app` / `epicurus-core` versions, one entry per component (state, 
 schema, module version, and the reason for anything skipped), the **exclusions** with their
 reasons, and the **secret inventory** — names only.
 
+**The secret inventory has three parts** (`portability/secrets.py` for the third): the
+provider aliases that hold an API key, the connected accounts, and — since #875 —
+`module_secrets`, `{module: [the OpenBao paths its manifest declares that this tenant
+actually holds]}`. That last part closes a blind spot the fan-out could not see: the fan-out
+walks `portable` modules, and a module can hold **no rows at all** and still hold a
+credential the core wrote for it. `messaging` is the pure case — nothing to export, and a
+bot token per connected bridge — so without the inventory the archive said "messaging: not
+portable" and the operator found out from the silence. Each declared path is **probed** for
+presence, never read, so no secret material can reach the manifest even by accident; a vault
+that will not answer yields an empty map rather than a failed export.
+
 **What travels: source of truth only.** Derived state is not exported; it is rebuilt after
 the import — the file rescan for **the tenant just imported into** (never the deployment
 default: the apply threads its tenant all the way down), run with the #848 mass de-index

@@ -39,6 +39,7 @@ from epicurus_core_app.portability.models import (
     ImportReportView,
     SecretsInventory,
 )
+from epicurus_core_app.portability.secrets import collect_module_secrets
 from epicurus_core_app.portability.service import PortabilityService
 
 TENANT = "local"
@@ -48,6 +49,7 @@ WHEN = datetime(2026, 9, 4, 9, 0, 0, tzinfo=UTC)
 # reaches it — as an inventory of names — and must never appear in the archive's bytes.
 PROVIDER_KEY_VALUE = "sk-fixture-3f9a-DO-NOT-EXPORT"
 OAUTH_TOKEN_VALUE = "ya29.fixture-refresh-DO-NOT-EXPORT"
+BRIDGE_TOKEN_VALUE = "bot-fixture-discord-DO-NOT-EXPORT"
 
 
 # ── stand-ins ─────────────────────────────────────────────────────────────────
@@ -96,12 +98,21 @@ class FakeRegistry:
 
 
 def _snapshot(
-    name: str, *, portable: bool = True, healthy: bool = True, enabled: bool = True
+    name: str,
+    *,
+    portable: bool = True,
+    healthy: bool = True,
+    enabled: bool = True,
+    removed: bool = False,
+    secrets: list[str] | None = None,
 ) -> ModuleSnapshot:
     return ModuleSnapshot(
-        manifest=ModuleManifest(name=name, version="1.2.3", portable=portable),
+        manifest=ModuleManifest(
+            name=name, version="1.2.3", portable=portable, secrets=secrets or []
+        ),
         status=ModuleStatus(healthy=healthy, version="1.2.3"),
         enabled=enabled,
+        removed=removed,
     )
 
 
@@ -184,7 +195,11 @@ async def _seed_core(engine: AsyncEngine) -> None:
 
 async def _secrets(_tenant: str) -> SecretsInventory:
     """Names only — the values above are deliberately not passed anywhere near the archive."""
-    return SecretsInventory(provider_keys=["openai"], connected_accounts=["google"])
+    return SecretsInventory(
+        provider_keys=["openai"],
+        connected_accounts=["google"],
+        module_secrets={"messaging": ["messaging/discord", "messaging/telegram"]},
+    )
 
 
 def _service(
@@ -380,8 +395,12 @@ async def test_no_secret_material_reaches_the_archive(tmp_path: Path) -> None:
 
     assert PROVIDER_KEY_VALUE.encode() not in raw
     assert OAUTH_TOKEN_VALUE.encode() not in raw
+    # A module's own credential is held to the same rule (#875): the OpenBao *path* travels
+    # in the inventory, the bot token behind it never does.
+    assert BRIDGE_TOKEN_VALUE.encode() not in raw
     # What *does* travel is the name, so the import can say what to re-enter.
     assert b"openai" in raw
+    assert b"messaging/discord" in raw
 
 
 async def test_a_multi_megabyte_module_stream_is_written_through_to_the_archive(
@@ -658,9 +677,13 @@ async def test_apply_restores_core_rows_files_and_facts_then_rebuilds(tmp_path: 
         assert report.rescan_entries == 7
         assert report.rescan_forced is True
         assert report.reembed == [{"module": "knowledge", "status": "started"}]
-        # And the operator is told what to re-enter, at the moment it matters.
+        # And the operator is told what to re-enter, at the moment it matters — including
+        # the credentials of modules that carried no rows at all (#875).
         assert report.reenter_secrets.provider_keys == ["openai"]
         assert report.reenter_secrets.connected_accounts == ["google"]
+        assert report.reenter_secrets.module_secrets == {
+            "messaging": ["messaging/discord", "messaging/telegram"]
+        }
         # The module received the source's own stream, header line and all.
         sent = service.calls.imports["http://calendar:8080"]
         assert json.loads(sent.splitlines()[0])["schema"] == "calendar/1"
@@ -803,3 +826,92 @@ async def test_the_sweep_drops_a_staged_archive_past_its_retention(tmp_path: Pat
         assert await service.job(tenant=TENANT, job_id=job.id) is None
     finally:
         await engine.dispose()
+
+
+# ── the modules' own credentials (#875) ───────────────────────────────────────
+
+
+class FakeVault:
+    """A secret store with only what the inventory needs: is there something at this path?
+
+    Records every probe so a test can assert the *tenant* was threaded (constraint #1) and
+    that nothing more than presence was ever asked for.
+    """
+
+    def __init__(self, present: dict[str, set[str]] | None = None, *, broken: bool = False) -> None:
+        self._present = present or {}
+        self._broken = broken
+        self.probes: list[tuple[str, str | None]] = []
+
+    async def get(self, path: str, tenant_id: str | None = None) -> dict[str, Any]:
+        self.probes.append((path, tenant_id))
+        if self._broken:
+            raise RuntimeError("openbao is unreachable")
+        if path not in self._present.get(tenant_id or "", set()):
+            raise KeyError(f"secret not found: {path}")
+        return {"token": BRIDGE_TOKEN_VALUE}
+
+
+class BrokenRegistry:
+    async def snapshot(self, *, force: bool = False) -> list[ModuleSnapshot]:
+        raise RuntimeError("the module registry is not up")
+
+
+async def test_module_secrets_name_only_the_paths_this_tenant_actually_holds() -> None:
+    """The point of #875: `messaging` carries no rows and still has to be reconnected."""
+    registry = FakeRegistry(
+        [
+            _snapshot(
+                "messaging",
+                portable=False,
+                secrets=["messaging/discord", "messaging/telegram"],
+            ),
+            _snapshot("calendar", secrets=[]),
+        ],
+        {},
+    )
+    vault = FakeVault({TENANT: {"messaging/discord"}})
+
+    found = await collect_module_secrets(registry, vault, tenant=TENANT)
+
+    # Only what is there — an unconnected bridge is not something to reconnect.
+    assert found == {"messaging": ["messaging/discord"]}
+    # Every probe was tenant-scoped, and the module that declares nothing was not probed.
+    assert vault.probes == [
+        ("messaging/discord", TENANT),
+        ("messaging/telegram", TENANT),
+    ]
+
+
+async def test_module_secrets_ignore_disabled_and_removed_modules() -> None:
+    """A module the operator turned off (or removed) is not a reconnect the move needs."""
+    registry = FakeRegistry(
+        [
+            _snapshot("messaging", enabled=False, secrets=["messaging/discord"]),
+            _snapshot("gone", removed=True, secrets=["gone/token"]),
+        ],
+        {},
+    )
+    vault = FakeVault({TENANT: {"messaging/discord", "gone/token"}})
+
+    assert await collect_module_secrets(registry, vault, tenant=TENANT) == {}
+    assert vault.probes == []
+
+
+async def test_module_secrets_are_scoped_to_the_tenant_being_exported() -> None:
+    """Another tenant's connected bridge is not this tenant's inventory."""
+    registry = FakeRegistry([_snapshot("messaging", secrets=["messaging/discord"])], {})
+    vault = FakeVault({"other": {"messaging/discord"}})
+
+    assert await collect_module_secrets(registry, vault, tenant=TENANT) == {}
+    assert await collect_module_secrets(registry, vault, tenant="other") == {
+        "messaging": ["messaging/discord"]
+    }
+
+
+async def test_an_inventory_that_cannot_be_taken_is_empty_not_fatal() -> None:
+    """Best-effort, like the rest of the inventory: an archive is worth having without it."""
+    registry = FakeRegistry([_snapshot("messaging", secrets=["messaging/discord"])], {})
+
+    assert await collect_module_secrets(registry, FakeVault(broken=True), tenant=TENANT) == {}
+    assert await collect_module_secrets(BrokenRegistry(), FakeVault(), tenant=TENANT) == {}

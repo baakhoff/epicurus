@@ -107,14 +107,22 @@ class SecretsInventory(BaseModel):
     these accounts were connected. The import report replays the list as "re-enter these,
     reconnect those" instead of leaving the operator to discover it one broken feature at
     a time.
+
+    ``module_secrets`` is the same idea one level out (#875): a module holds no rows worth
+    exporting and still holds *credentials* the core wrote for it — a chat bridge's bot
+    token, say. Keyed by module name, valued by the paths its manifest declares that are
+    actually **present** for this tenant, so the report can say "reconnect messaging's
+    Discord and Telegram bridges" rather than leaving the operator to notice the silence.
+    Names only, in every case: no value is ever read into this.
     """
 
     provider_keys: list[str] = Field(default_factory=list)
     connected_accounts: list[str] = Field(default_factory=list)
+    module_secrets: dict[str, list[str]] = Field(default_factory=dict)
 
     @property
     def empty(self) -> bool:
-        return not self.provider_keys and not self.connected_accounts
+        return not self.provider_keys and not self.connected_accounts and not self.module_secrets
 
 
 class ArchiveManifest(BaseModel):

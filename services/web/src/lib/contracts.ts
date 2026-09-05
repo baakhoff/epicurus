@@ -1720,12 +1720,26 @@ export const PortabilityComponent = z.object({
 });
 export type PortabilityComponent = z.infer<typeof PortabilityComponent>;
 
-/** What the source held that the archive deliberately does not carry — names only. */
+/** What the source held that the archive deliberately does not carry — names only.
+ *
+ * `module_secrets` is the same idea for a module's own credentials (#875): `{module: [the
+ * OpenBao paths it declares that this tenant actually had]}`. A module can hold no rows
+ * worth exporting and still need reconnecting on the far side — a chat bridge is exactly
+ * that — so the report names it rather than letting the operator find out from the silence. */
 export const PortabilitySecrets = z.object({
   provider_keys: z.array(z.string()).default([]),
   connected_accounts: z.array(z.string()).default([]),
+  module_secrets: z.record(z.string(), z.array(z.string())).default({}),
 });
 export type PortabilitySecrets = z.infer<typeof PortabilitySecrets>;
+
+/** The empty inventory, as a factory: `.default()` hands the *same* object to every parse,
+ *  and a shared mutable literal is a bug waiting for the first consumer that sorts it. */
+const noSecrets = (): PortabilitySecrets => ({
+  provider_keys: [],
+  connected_accounts: [],
+  module_secrets: {},
+});
 
 /** The archive's `manifest.json`: what it is, what it carries, what it leaves behind. */
 export const PortabilityManifest = z.object({
@@ -1736,7 +1750,7 @@ export const PortabilityManifest = z.object({
   epicurus_core_version: z.string(),
   components: z.array(PortabilityComponent).default([]),
   exclusions: z.array(z.object({ component: z.string(), reason: z.string() })).default([]),
-  secrets: PortabilitySecrets.default({ provider_keys: [], connected_accounts: [] }),
+  secrets: PortabilitySecrets.default(noSecrets),
 });
 export type PortabilityManifest = z.infer<typeof PortabilityManifest>;
 
@@ -1805,7 +1819,7 @@ export const PortabilityReport = z.object({
   rescan_forced: z.boolean().default(false),
   reembed: z.array(z.record(z.string(), z.string())).default([]),
   reembed_error: z.string().nullish(),
-  reenter_secrets: PortabilitySecrets.default({ provider_keys: [], connected_accounts: [] }),
+  reenter_secrets: PortabilitySecrets.default(noSecrets),
 });
 export type PortabilityReport = z.infer<typeof PortabilityReport>;
 

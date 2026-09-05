@@ -78,9 +78,17 @@ function ComponentRows({ components }: { components: PortabilityComponent[] }) {
   );
 }
 
+/** `messaging/discord` → `discord`: the module's name is already the line's subject, so
+ *  repeating it in every path turns "messaging — discord, telegram" into noise. */
+function secretLabel(module: string, path: string): string {
+  return path.startsWith(`${module}/`) ? path.slice(module.length + 1) : path;
+}
+
 /** "Re-enter these" — secrets are never in the archive, so the list is all we can carry. */
 function SecretsNotice({ secrets }: { secrets: PortabilitySecrets }) {
-  if (!secrets.provider_keys.length && !secrets.connected_accounts.length) return null;
+  const modules = Object.entries(secrets.module_secrets ?? {});
+  if (!secrets.provider_keys.length && !secrets.connected_accounts.length && !modules.length)
+    return null;
   return (
     <p className="text-[11px] text-warn">
       Not carried (secrets never leave the vault):
@@ -89,6 +97,16 @@ function SecretsNotice({ secrets }: { secrets: PortabilitySecrets }) {
       )}
       {secrets.connected_accounts.length > 0 && (
         <> reconnect {secrets.connected_accounts.join(", ")}.</>
+      )}
+      {modules.length > 0 && (
+        <>
+          {" "}
+          Re-enter in module settings:{" "}
+          {modules
+            .map(([module, paths]) => `${module} — ${paths.map((p) => secretLabel(module, p)).join(", ")}`)
+            .join("; ")}
+          .
+        </>
       )}
     </p>
   );

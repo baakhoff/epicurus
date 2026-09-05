@@ -379,7 +379,9 @@ multi-gigabyte blob is ever held in the tab.
 **preview**: where the archive came from, a table of components with record counts and a
 `Badge` verdict (`ok` / `warning` / `refused`, each with the core's own explanation), a
 collapsed list of what the archive deliberately leaves behind, and the "not carried" line
-naming the API keys to re-enter and the accounts to reconnect. **Apply** is a second,
+naming the API keys to re-enter, the accounts to reconnect, and the module credentials to
+re-enter in module settings (#875 — `messaging — discord, telegram`, the OpenBao path's
+module prefix trimmed because the module already names the line). **Apply** is a second,
 deliberate press — disabled outright when the preview says the archive is incompatible. The
 final report shows per-component created/updated/unchanged counts, files written vs. left
 alone (conflicts named), and the two rebuilds the import triggers.

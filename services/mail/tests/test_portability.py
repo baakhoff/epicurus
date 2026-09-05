@@ -6,6 +6,14 @@ the module persists (``mail_thread``, ``mail_label``, ``mail_sync``, ``mail_land
 source-of-truth record kind to carry — export always yields nothing, and import treats
 every record it is handed as an unrecognized kind. No database is involved anywhere in this
 file; the store never touches one.
+
+The real module declares ``portable=False`` (see ``build_module`` in ``service.py`` and
+``test_manifest_declares_not_portable`` in ``test_service.py``) — the documented convention
+for "nothing worth carrying" — so the core's orchestrator never actually calls these routes
+today. They are tested here anyway, wired on a locally-built ``portable=True`` module exactly
+like the generic contract's own tests (``epicurus_core``'s ``test_portability.py``): this file
+exercises the *transport and the store*, independent of whether mail's manifest currently
+advertises it, so flipping the real flag on later needs no new test coverage.
 """
 
 from __future__ import annotations

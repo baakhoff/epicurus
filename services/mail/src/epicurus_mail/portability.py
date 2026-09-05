@@ -12,13 +12,15 @@ installations: :class:`MailPortability` reports the schema and a live route pair
 export stream is a header with zero records, and its import treats any record it is handed
 as a kind it has never heard of.
 
-The store still implements the full :class:`~epicurus_core.PortabilityStore` protocol
-(rather than the module leaving ``portable=False``, which the contract also supports for a
-module with nothing to carry) so mail behaves identically to every other module in an
-export/import run: an operator sees it listed with an honest zero count instead of silently
-missing, and the plumbing is ready the day mail gains a genuine per-tenant setting (a
-signature, a muted-sender list, a per-label triage rule — none of which exist today) worth
-carrying.
+This store still implements the full :class:`~epicurus_core.PortabilityStore` protocol and its
+routes are served (:func:`~epicurus_core.add_portability_routes` in ``app.py``), but the module
+declares ``portable=False`` (``build_module`` in ``service.py``) — the contract's documented
+convention for a module with nothing worth carrying: the core's orchestrator records mail as
+excluded rather than listing an always-empty component in every tenant export. This is
+deliberately the "serving the routes while still saying not yet" state the contract describes:
+the plumbing is ready the day mail gains a genuine per-tenant setting (a signature, a
+muted-sender list, a per-label triage rule — none of which exist today), and turning it on then
+is a one-line flip of that flag.
 """
 
 from __future__ import annotations

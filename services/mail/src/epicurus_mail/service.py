@@ -251,10 +251,14 @@ def build_module(provider: MailProvider) -> EpicurusModule:
             " provider."
         ),
         # Tenant data portability (#867/#874): every table this module persists is a
-        # Gmail-derived cache (see epicurus_mail.portability), so the store's export is
-        # always empty — but declaring the flag puts mail in the archive with an honest
-        # zero count instead of a silent, unexplained absence.
-        portable=True,
+        # Gmail-derived cache (see epicurus_mail.portability), so there is nothing here
+        # worth carrying — deliberately `False`, per the documented convention
+        # (docs/reference/modules.md: a module with nothing to carry leaves the flag off
+        # and the archive records it as excluded) rather than listing an always-empty
+        # component the operator has to read past on every export. The routes are still
+        # wired below ("serving the routes while saying not yet" is the documented
+        # in-between state), so a future genuine preference is a one-line flip.
+        portable=False,
         ui=UiSection(
             icon="mail",
             summary=(

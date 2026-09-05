@@ -177,8 +177,9 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
     # Tenant data portability (#867/#874): every mail table is a Gmail-derived cache (see
-    # epicurus_mail.portability), so this always exports zero records — the routes exist so
-    # mail appears in the archive with an honest count rather than a silent absence.
+    # epicurus_mail.portability), so there is nothing to carry — the module deliberately
+    # leaves `portable=False` (the core never fans out to these routes today), but they are
+    # still served so a future genuine preference is a one-line flip of that flag.
     add_portability_routes(app, module, MailPortability())
 
     @app.get("/status")

@@ -242,10 +242,11 @@ class ModuleDocsIndexer:
     async def _verify_dimension(self, model: str | None) -> None:
         """Confirm the shared collection's width against the current embedder (#865).
 
-        One short embed, at most once per process per collection — see the twin in
-        :class:`~epicurus_knowledge.indexer.KnowledgeIndexer`. Module docs change rarely, so a
-        sync where every hash matches is the *common* case here, and without this the source
-        that noticed a model switch would never be this one.
+        One short embed per sync, uncached across syncs — see the twin in
+        :class:`~epicurus_knowledge.indexer.KnowledgeIndexer` for why remembering the answer
+        would defeat the purpose. Module docs change rarely, so a sync where every hash matches
+        is the *common* case here, and without this the source that noticed a model switch
+        would never be this one.
         """
         if not await self._qdrant.collection_exists(self._collection):
             return

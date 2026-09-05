@@ -168,12 +168,14 @@ class KnowledgeIndexer:
     async def _verify_dimension(self, model: str | None) -> None:
         """Confirm the existing collection's width against the current embedder (#865).
 
-        One short embed, paid at most once per process per collection: a pass in which every
-        file reads unchanged writes nothing, so it would otherwise sail straight past a model
-        switch that has already broken search. Skipped entirely on a fresh install (no
-        collection yet — the first upsert creates it at the right size) and once any source has
-        confirmed the width. Raises :class:`EmbeddingDimensionChanged` on a mismatch, which the
-        caller turns into a full rebuild.
+        One short embed per pass, deliberately **not** cached across passes: a pass in which
+        every file reads unchanged writes nothing, so it would otherwise sail straight past a
+        model switch that has already broken search — and the switch this exists to catch
+        happens *while the process is running*, so an answer remembered from an earlier pass
+        would be blind to exactly the case it is for. Skipped entirely on a fresh install (no
+        collection yet — the first upsert creates it at the right size), which is the only
+        state in which it costs nothing. Raises :class:`EmbeddingDimensionChanged` on a
+        mismatch, which the caller turns into a full rebuild.
         """
         if not await self._qdrant.collection_exists(self._collection):
             return

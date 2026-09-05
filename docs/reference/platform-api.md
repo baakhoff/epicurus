@@ -560,6 +560,122 @@ hardcodes them.
 
 ---
 
+## Portability (#867)
+
+Tenant data portability, under `/platform/v1/portability` — export one epicurus, import it
+into another. Operator-facing (the Settings card drives it); every endpoint is tenant-scoped
+via `?tenant_id=` (default: the deployment's tenant), and a job id belonging to another
+tenant reads as **404**, not 403.
+
+Both halves run as **durable background jobs**: the request returns immediately, the work
+continues server-side whatever the browser does, and the shell polls until it settles. The
+job row outlives the request, so it can be re-read by id at any time — the Settings card
+holds the id only for the life of the page, so a reload today starts the operator over
+rather than re-attaching (there is no list endpoint yet). The archive itself lives in a
+**disposable staging directory** (`PORTABILITY_STAGING_DIR`), swept after
+`PORTABILITY_RETENTION_HOURS` — a download of a swept archive is a **410**, and the answer
+is to export again.
+
+### `POST /platform/v1/portability/exports`
+
+Starts an export. **202** with the job, whose `progress` already lists every component it
+will attempt (a progress display needs its denominator up front).
+
+### `GET /platform/v1/portability/exports/{id}`
+
+```jsonc
+{
+  "id": "…", "status": "running" | "ready" | "failed",
+  "created_at": "…", "updated_at": "…",
+  "progress": [
+    {"name": "conversations", "kind": "core", "state": "included", "count": 4812,
+     "schema": "core/1", "version": "0.118.0", "member": "core/conversations.ndjson"},
+    {"name": "mail", "kind": "module", "state": "skipped", "reason": "module is unreachable"},
+    {"name": "files", "kind": "files", "state": "included", "count": 130}
+  ],
+  "manifest": { /* the archive's manifest.json, once ready */ },
+  "size_bytes": 20971520,
+  "error": null
+}
+```
+
+`state` is `pending` · `running` · `included` · `skipped` · `failed`. **`skipped` is a
+fact, not a failure** — a module that is disabled, unreachable, or simply not `portable` is
+recorded with its reason and the job carries on.
+
+### `GET /platform/v1/portability/exports/{id}/archive`
+
+The finished `.tar.gz` (`application/gzip`, `content-disposition: attachment`). **409**
+while the job is still running or if it failed; **410** if staging has been swept.
+
+### `POST /platform/v1/portability/imports`
+
+Multipart upload (`file=`). **Reads** the archive and answers the **preview** — nothing is
+applied. **413** over `PORTABILITY_MAX_ARCHIVE_MB`, **400** if it is not a readable archive.
+
+```jsonc
+{
+  "id": "…", "status": "staged",
+  "preview": {
+    "manifest": { /* the source's manifest.json, exclusions and secret names included */ },
+    "components": [
+      {"name": "conversations", "kind": "core", "records": 4812, "verdict": "ok",
+       "schema": "core/1"},
+      {"name": "calendar", "kind": "module", "records": 220, "verdict": "warning",
+       "detail": "written by an older schema (calendar/1); the module will upgrade it"},
+      {"name": "tasks", "kind": "module", "records": 40, "verdict": "refused",
+       "detail": "module is not installed, not enabled, or not reachable"}
+    ],
+    "compatible": true,
+    "refusal": null
+  },
+  "report": null
+}
+```
+
+`verdict` is `ok` · `warning` (an older schema) · `refused` (a newer schema, or a module
+this install cannot reach). A refused component is isolated — the rest still apply.
+`compatible: false` is reserved for the whole-archive refusal: a **format version** this
+core cannot read, which nothing useful can be salvaged from.
+
+### `POST /platform/v1/portability/imports/{id}/apply`
+
+Applies a staged import in the background. **202**. **409** if the job is not `staged`
+(including a second apply of the same job — upload it again), or if the preview said
+`compatible: false`; **410** if staging has been swept.
+
+### `GET /platform/v1/portability/imports/{id}`
+
+`status` is `staged` · `running` · `done` · `failed`; once done it also carries the report:
+
+```jsonc
+{
+  "components": [
+    {"name": "conversations", "kind": "core", "state": "included",
+     "created": 4812, "updated": 0, "skipped": 0, "warnings": []}
+  ],
+  "files": {"written": 130, "skipped": 4, "conflicts": ["notes/edited.md"]},
+  "rescan_entries": 134, "rescan_error": null, "rescan_forced": true,
+  "reembed": [{"module": "knowledge", "status": "started"}], "reembed_error": null,
+  "reenter_secrets": {"provider_keys": ["openai"], "connected_accounts": ["google"]}
+}
+```
+
+`conflicts` names files that exist here with **different bytes** — never overwritten. After
+the components land, the core runs the file rescan for **this import's tenant** with the
+#848 mass de-index fuse bypassed (it would otherwise rightly refuse a fresh install's
+empty→populated flip) and then the re-embed fan-out (#332); both are reported, and either
+failing does not invalidate the data that already landed. `rescan_forced` says the fuse was
+waived, so a safety rule is never overridden without the report naming it.
+`reenter_secrets` repeats the source's secret inventory — **names only**, since no secret
+material is ever in an archive.
+
+The archive layout and the core's own included/excluded table are in
+[`core-app`](../services/core-app.md#tenant-data-portability-867); the module half of the
+contract is in [`modules`](modules.md#portability--get-export--post-import-867).
+
+---
+
 ## Knowledge-base / notes / suggestions endpoints (shell-facing)
 
 These are consumed by the web shell, not the `PlatformClient`. The full module-registry

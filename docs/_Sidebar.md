@@ -7,6 +7,7 @@
 - [Installation](user/installation.md)
 - [Configuration](user/configuration.md)
 - [Running without Google](user/running-without-google.md)
+- [Export & import](user/export-import.md)
 
 **Services & Modules**
 

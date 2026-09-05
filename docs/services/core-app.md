@@ -1051,6 +1051,87 @@ that to the **502** above; a tool that *ran* and reported failure stays a **400*
 own message (`ToolCallError`, #435). The two are kept distinct on purpose — "the module
 never answered" vs. "the tool rejected the request".
 
+### Tenant data portability (#867)
+
+Export one tenant to a `.tar.gz` and import it into another installation — the operator's
+own data, moved through the UI. Distinct from [backup & restore](../infrastructure/backup-and-restore.md),
+which images *this deployment's* volumes for disaster recovery; this is the path when a
+person moves house. The endpoints are in the
+[platform API](../reference/platform-api.md#portability-867); the module half of the
+contract is in [`modules`](../reference/modules.md#portability--get-export--post-import-867);
+the operator's guide is [Export & import](../user/export-import.md).
+
+**The archive.** A plain gzipped tar with a documented layout, deliberately boring so an
+operator can open it with tools they already have:
+
+```
+manifest.json                 what this archive is, and what it deliberately omits
+core/<set>.ndjson             the core's own data, one set per member
+modules/<name>.ndjson         each portable module's stream, verbatim
+files/<path>                  the tenant file space, relative to the tenant root
+```
+
+`manifest.json` carries the archive **format version**, the tenant, the timestamp, the
+source's `core-app` / `epicurus-core` versions, one entry per component (state, count,
+schema, module version, and the reason for anything skipped), the **exclusions** with their
+reasons, and the **secret inventory** — names only.
+
+**What travels: source of truth only.** Derived state is not exported; it is rebuilt after
+the import — the file rescan for **the tenant just imported into** (never the deployment
+default: the apply threads its tenant all the way down), run with the #848 mass de-index
+fuse bypassed and `rescan_forced: true` on the report to say so, then the #332 re-embed
+fan-out. Operational state is not exported either: it is about *this* installation and
+means nothing in another one.
+
+| Set (`core/<set>.ndjson`) | Tables |
+| --- | --- |
+| `conversations` | `agent_messages` · `agent_attachments` · `session_models` · `automation_sessions` |
+| `agent` | `agent_instructions` (+ `_versions`) · `agent_playbooks` (+ `_versions`, `_proposals`, `_decisions`) · `standing_profiles` |
+| `memory` | durable facts, read through the memory store's own API — the fact text and metadata, **never** the Qdrant points (a vector is specific to the embedding model that produced it) |
+| `automations` | `automations` · `event_subscriptions` · `scheduled_turns` |
+| `notifications` | `notifications` |
+| `prefs` | `llm_prefs` · `saved_models` · `model_settings` · `module_prefs` · `timezone_prefs` · `page_order_prefs` · `push_prefs` · `maintenance_schedule_prefs` |
+
+| Excluded | Why |
+| --- | --- |
+| `core_files` | derived — rebuilt by the forced rescan after import |
+| every Qdrant collection | derived — vectors are model-specific; the re-embed fan-out rebuilds them |
+| `module_events` | operational — this installation's record of what it saw |
+| `automation_queue` · `automation_runs` · `automation_kill_switch` | operational — pending work, a run ledger, and a switch about this deployment |
+| `automation_proposals` · `automation_review_decisions` | operational — a review queue awaiting a decision on the source |
+| `agent_suspended_runs` · `agent_pending_drafts` · `agent_pending_approvals` | operational — turns paused mid-flight; there is nothing to resume here |
+| `ephemeral_sessions` | operational — invisible chats are deleted on exit by design (#772) |
+| `push_subscriptions` · `push_queue` | operational — device endpoints of the source's browsers |
+| `memory_extraction_queue` · `agent_reflection_state` · `maintenance_runs` | operational — background-job cursors and history |
+| **secrets** (provider API keys, OAuth tokens) | never exported — held in OpenBao; the report names what to re-enter |
+
+The travelling tables are read and written **generically**, over SQLAlchemy's own column
+metadata rather than each store's Python API — so a column added tomorrow travels tomorrow,
+with no edit to the exporter. Two rules make that safe: `tenant` never travels (it is
+stripped on export and re-applied from the *target* tenant on import), and a **surrogate**
+key never travels (an autoincrement `id`/`pk` means nothing in another database; each set
+names the natural key the upsert matches on).
+
+**Import is additive and idempotent.** Every write is an upsert by stable id; nothing
+deletes. A row that is absent is created, one that is identical is skipped, one that differs
+is updated — so applying the same archive twice is a no-op, and applying one into a
+populated install merges rather than replaces. A file that already exists with different
+bytes is **never overwritten**: it is named as a conflict for the operator to reconcile. A
+handful of core ids (`agent_attachments.att_id`, `automations.id`, `session_models.session_id`)
+are unique table-wide rather than per tenant; importing another tenant's copy of one is
+skipped with a reason, never stolen and never an `IntegrityError`.
+
+**Failure is per component.** A module that is disabled, unreachable, not `portable`, or
+speaking a schema this install cannot read is recorded as `skipped` with its reason and the
+job carries on — moving house does not cost the operator their conversations because the
+mail container is restarting.
+
+**Staging.** Jobs are durable rows (`portability_jobs`), so an export survives the request
+that started it and stays readable by id; the
+archive itself lives in `PORTABILITY_STAGING_DIR`, a **disposable cache** (constraint #2)
+swept after `PORTABILITY_RETENTION_HOURS`. A download of a swept archive is a `410`, and the
+answer is to export again.
+
 ### Chat bridges (ADR-0062)
 
 The connect/manage surface behind the web shell's **Settings → Chat bridges** (#369). The core
@@ -1441,6 +1522,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `EVENTS_PRUNE_INTERVAL_S` | `3600` | How often the event-log pruner sweeps. |
 | `AUTOMATIONS_POLL_INTERVAL_S` | `60` | How often the automations loop drains the trigger queue and checks schedules (ADR-0105). |
 | `FILES_SCAN_FUSE_ENABLED` | `true` | **Mass de-index fuse** (#848): refuse a file-space scan's purge when the rows it would delete look wholesale — a stale or empty mount must not reconcile `core_files` to zero. `FILES_SCAN_FUSE_MAX_DELETE_RATIO` (`0.5`) and `FILES_SCAN_FUSE_MIN_DELETIONS` (`5`) set the thresholds. See [file space](../reference/files.md#configuration-core-app). |
+| `PORTABILITY_STAGING_DIR` | `/tmp/epicurus-portability` | Where a tenant export is assembled and an uploaded archive is staged (#867) — a **disposable cache** (constraint #2), swept after `PORTABILITY_RETENTION_HOURS` (`24`). `PORTABILITY_MAX_FILE_MB` (`512`) caps a single exported file; `PORTABILITY_MAX_ARCHIVE_MB` (`4096`) caps an upload. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |
@@ -1692,6 +1774,13 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `MEMORY_EXTRACTION_HOUR` in the operator's timezone), serially, so extraction never competes
   with a live turn for the GPU. Drained rows are deleted; because the queue is durable, a
   restart never loses a pending exchange.
+- **Postgres `portability_jobs`** — one row per tenant export/import (#867): `id` (an opaque
+  uuid — it appears in the archive download URL, so never a guessable sequential id),
+  `tenant`, `kind` (`export`/`import`), `status`, timestamps, JSON `progress` / `manifest` /
+  `preview` / `report`, `archive_path`, `size_bytes` (**`BigInteger`** — an archive is a
+  file, and files exceed 2 GB), `error`. The row is the durable half; the archive it points
+  at is a disposable staging artefact, so a job whose file has been swept reports honestly
+  instead of silently resurrecting.
 - **Postgres `standing_profiles`** — the compact per-tenant **standing profile** the agent injects
   each turn (#527, ADR-0094): `id`, `tenant`, `content`, `source` (`auto` | `edited`), `created_at`.
   Append-only and **versioned** — each write keeps the last `MEMORY_PROFILE_MAX_VERSIONS` (5) per
@@ -1726,6 +1815,7 @@ docker compose up -d core-app      # comes up with the full stack
 
 Source is one package, `epicurus_core_app`, split by responsibility: `agent/`
 (loop + MCP host + routes), `llm/` (gateway, providers, power, models), `memory/`
-(store + facts + extraction + facade), `modules.py` (registry), `platform_api.py` (inference
+(store + facts + extraction + facade), `modules.py` (registry), `portability/` (tenant export/import — archive,
+core data sets, jobs, orchestrator, routes), `platform_api.py` (inference
 endpoints), `app.py` (wiring). The agent targets only the gateway's interface and
 modules only through MCP — never a provider SDK.

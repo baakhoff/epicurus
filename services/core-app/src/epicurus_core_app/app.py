@@ -152,12 +152,19 @@ from epicurus_core_app.modules import (
 from epicurus_core_app.mounts import MOUNT_PREFIX, Mount, build_mounts, parse_mount_specs
 from epicurus_core_app.notifications import NotificationStore
 from epicurus_core_app.notifications_routes import create_notifications_router
+from epicurus_core_app.oauth.models import SUPPORTED_PROVIDERS
 from epicurus_core_app.oauth.routes import create_oauth_router
 from epicurus_core_app.oauth.service import OAuthService
 from epicurus_core_app.object_backend import StorageObjectBackend
 from epicurus_core_app.page_order_prefs import PageOrderStore
 from epicurus_core_app.page_order_routes import create_page_order_router
 from epicurus_core_app.platform_api import create_platform_router
+from epicurus_core_app.portability import (
+    PortabilityJobStore,
+    PortabilityService,
+    SecretsInventory,
+    create_portability_router,
+)
 from epicurus_core_app.push import (
     EventAlertListener,
     EventSubscriptionStore,
@@ -839,6 +846,50 @@ def create_app() -> FastAPI:
             return await _rescan_files(force, tenant)
         return await mount_rescans[namespace](force, tenant)
 
+    # Tenant data portability (#867): export one tenant to a .tar.gz and import it into
+    # another installation. The service is handed read-only lookups rather than the stores
+    # themselves wherever it can be — the secret *inventory* (names, never material), the
+    # forced rescan, the re-embed fan-out — so it can assemble and rebuild without owning
+    # anything it does not export.
+    portability_jobs = PortabilityJobStore(engine)
+
+    async def _portability_secrets(tenant: str) -> SecretsInventory:
+        """Which provider keys and connected accounts the source holds — names only.
+
+        Secrets never enter the archive (they live in OpenBao). Naming them is the whole
+        service this can render: the import report replays the list as "re-enter these,
+        reconnect those" instead of leaving the operator to discover it one broken feature
+        at a time. Best-effort on both halves — an inventory we could not take must not fail
+        an otherwise good export.
+        """
+        keys: list[str] = []
+        with suppress(Exception):
+            keys = [p.alias for p in await gateway.providers(tenant) if p.key_state == "present"]
+        accounts: list[str] = []
+        for provider in sorted(SUPPORTED_PROVIDERS):
+            with suppress(Exception):
+                if (await oauth.get_status(provider, tenant)).connected:
+                    accounts.append(provider)
+        return SecretsInventory(provider_keys=sorted(keys), connected_accounts=accounts)
+
+    portability = PortabilityService(
+        jobs=portability_jobs,
+        engine=engine,
+        file_store=file_store,
+        registry=registry,
+        staging_dir=settings.portability_staging_dir,
+        core_app_version=_service_version(),
+        facts=facts,
+        secrets_inventory=_portability_secrets,
+        # The post-import rebuilds. The rescan is the tenant tree's, forced — #848 would
+        # otherwise rightly refuse a fresh install's empty->populated flip; the re-embed is
+        # the existing #332 fan-out, called rather than reimplemented.
+        rescan=_rescan_files,
+        reembed=registry.reembed,
+        max_file_bytes=settings.portability_max_file_mb * 1024 * 1024,
+        retention_hours=settings.portability_retention_hours,
+    )
+
     # Maintenance orchestrator (ADR-0060): one coordinated batch over the background jobs — the
     # deferred fact-extraction drain (light, nightly-eligible) and the module re-index fan-out
     # (heavy, manual-only). The manual "run everything" trigger is always available; the nightly
@@ -1022,6 +1073,10 @@ def create_app() -> FastAPI:
             await file_index.init()
         except Exception as exc:
             log.error("file index init failed; Files search disabled", error=str(exc))
+        try:
+            await portability_jobs.init()
+        except Exception as exc:  # portability degrades; nothing else depends on this table
+            log.error("portability job store init failed; export/import disabled", error=str(exc))
         if settings.files_backend != "local" or settings.files_root.exists():
             try:
                 await file_store.ensure_tenant_root(tenant=settings.default_tenant_id)
@@ -1211,6 +1266,13 @@ def create_app() -> FastAPI:
             # scan the fuse refused (optionally forcing the purge).
             scan_fuse=file_scan_fuse,
             rescan=_rescan_namespace,
+        )
+    )
+    app.include_router(
+        create_portability_router(
+            portability,
+            default_tenant=settings.default_tenant_id,
+            max_archive_bytes=settings.portability_max_archive_mb * 1024 * 1024,
         )
     )
     app.include_router(

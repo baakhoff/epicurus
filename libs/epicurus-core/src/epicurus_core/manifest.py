@@ -334,6 +334,13 @@ class ModuleManifest(BaseModel):
     # (#332) calls it when the operator changes the embedding model. Modules that hold no
     # embeddings leave this ``False``.
     reindexable: bool = False
+    # The module exports and imports its own tenant data (#867): it serves ``GET /export``
+    # (NDJSON of its source-of-truth records) and ``POST /import`` (the same stream back,
+    # upserted additively), both wired by ``add_portability_routes``. The core's export
+    # fans out to every module that declares this and writes each answer straight into the
+    # tenant archive; a module that declares nothing worth carrying — or has not implemented
+    # the store yet — leaves it ``False`` and is recorded in the archive as excluded.
+    portable: bool = False
     # Preset automations this module suggests (ADR-0105). Offered on the shell's Templates tab
     # as starting points the operator instantiates — **never auto-instantiated**, so installing
     # a module cannot make the assistant start acting on its own.

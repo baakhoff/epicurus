@@ -4,6 +4,23 @@ Minimal backup posture for epicurus: snapshot the stateful volumes and keep the
 OpenBao unseal key off-box. Full automated backup with Restic is a Phase 6 goal;
 this runbook covers what is needed to not lose data unattended.
 
+## This is not data portability
+
+Two different jobs, deliberately kept apart:
+
+| | **Backup & restore** (this page) | **[Export & import](../user/export-import.md)** (#867) |
+| --- | --- | --- |
+| Unit | this deployment's **volumes** | one **tenant's** logical data |
+| Restores | the same machine, byte for byte | *another* installation, merged in |
+| Carries secrets | yes (the OpenBao volume) | **no** — names only, re-entered by hand |
+| Carries derived state | yes (Qdrant vectors, indexes) | no — rebuilt on import |
+| Driven from | a shell, on the host | the web UI, Settings → Export & import |
+| Answers | "the disk died" | "I am moving to a new box" |
+
+Use both. A tenant export is not a backup — it deliberately omits secrets and every derived
+index, so it cannot put a dead machine back. And a volume backup is not portable — it
+assumes the same volume layout, the same secrets, and the same embedding model.
+
 ## What is backed up
 
 | Data | Storage | Backup method |

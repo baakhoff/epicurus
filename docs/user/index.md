@@ -19,6 +19,8 @@ expose your own server).
   secrets live.
 - **[Running without Google](running-without-google.md)** — the two switches (per
   module, and platform-wide), what stops working, and what carries on.
+- **[Export & import](export-import.md)** — take your whole tenant to another
+  epicurus, and bring one in.
 
 ## How it's meant to run
 

@@ -6,6 +6,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { ChatBridgesCard } from "@/components/ChatBridgesCard";
 import { EventAlertsCard } from "@/components/EventAlertsCard";
+import { ExportImportCard } from "@/components/ExportImportCard";
 import { EpsilonMark } from "@/components/Logo";
 import { MemorySection } from "@/components/MemorySection";
 import { PushNotificationsCard } from "@/components/PushNotificationsCard";
@@ -923,6 +924,8 @@ export function SettingsScreen() {
         <EventAlertsCard />
 
         <MaintenanceCard />
+
+        <ExportImportCard />
 
         <Card>
           <h3 className="mb-2 font-serif text-base text-ink">Platform</h3>

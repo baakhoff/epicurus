@@ -1698,3 +1698,125 @@ export const MaintenanceScheduleUpdate = z.object({
   weekday: z.number().nullish(),
 });
 export type MaintenanceScheduleUpdate = z.infer<typeof MaintenanceScheduleUpdate>;
+
+/* ── Tenant data portability (#867) ──────────────────────────────────────── */
+
+/** One component of a tenant archive — a core data set, a module, or the file space.
+ *
+ * The same shape backs three surfaces (export progress, the archive's manifest, and what
+ * an import preview grades), which is exactly why the Settings card can render all three
+ * with one table. Unknown `state`/`kind` values are kept as plain strings so a newer core
+ * never fails the parse over a state this build has no opinion about. */
+export const PortabilityComponent = z.object({
+  name: z.string(),
+  kind: z.string(), // "core" | "module" | "files"
+  state: z.string(), // "pending" | "running" | "included" | "skipped" | "failed"
+  count: z.number().default(0),
+  schema: z.string().nullish(),
+  version: z.string().nullish(),
+  member: z.string().nullish(),
+  reason: z.string().nullish(),
+  error: z.string().nullish(),
+});
+export type PortabilityComponent = z.infer<typeof PortabilityComponent>;
+
+/** What the source held that the archive deliberately does not carry — names only. */
+export const PortabilitySecrets = z.object({
+  provider_keys: z.array(z.string()).default([]),
+  connected_accounts: z.array(z.string()).default([]),
+});
+export type PortabilitySecrets = z.infer<typeof PortabilitySecrets>;
+
+/** The archive's `manifest.json`: what it is, what it carries, what it leaves behind. */
+export const PortabilityManifest = z.object({
+  format_version: z.number(),
+  tenant: z.string(),
+  created_at: z.string(),
+  core_app_version: z.string(),
+  epicurus_core_version: z.string(),
+  components: z.array(PortabilityComponent).default([]),
+  exclusions: z.array(z.object({ component: z.string(), reason: z.string() })).default([]),
+  secrets: PortabilitySecrets.default({ provider_keys: [], connected_accounts: [] }),
+});
+export type PortabilityManifest = z.infer<typeof PortabilityManifest>;
+
+/** An export job: polled while running, then downloadable. */
+export const PortabilityExportJob = z.object({
+  id: z.string(),
+  status: z.enum(["running", "ready", "failed"]),
+  created_at: z.string(),
+  updated_at: z.string(),
+  progress: z.array(PortabilityComponent).default([]),
+  manifest: PortabilityManifest.nullish(),
+  size_bytes: z.number().default(0),
+  error: z.string().nullish(),
+});
+export type PortabilityExportJob = z.infer<typeof PortabilityExportJob>;
+
+/** One component of an uploaded archive, graded against this installation. */
+export const PortabilityPreviewComponent = z.object({
+  name: z.string(),
+  kind: z.string(),
+  records: z.number().default(0),
+  verdict: z.string(), // "ok" | "warning" | "refused"
+  detail: z.string().nullish(),
+  schema: z.string().nullish(),
+});
+export type PortabilityPreviewComponent = z.infer<typeof PortabilityPreviewComponent>;
+
+/** What an upload answers: the archive read, nothing applied. */
+export const PortabilityPreview = z.object({
+  manifest: PortabilityManifest,
+  components: z.array(PortabilityPreviewComponent).default([]),
+  compatible: z.boolean().default(true),
+  refusal: z.string().nullish(),
+});
+export type PortabilityPreview = z.infer<typeof PortabilityPreview>;
+
+/** What one component did on apply. */
+export const PortabilityComponentResult = z.object({
+  name: z.string(),
+  kind: z.string(),
+  state: z.string(),
+  created: z.number().default(0),
+  updated: z.number().default(0),
+  skipped: z.number().default(0),
+  warnings: z.array(z.string()).default([]),
+  reason: z.string().nullish(),
+  error: z.string().nullish(),
+});
+export type PortabilityComponentResult = z.infer<typeof PortabilityComponentResult>;
+
+/** The final answer of an apply, including the two rebuilds it triggers. */
+export const PortabilityReport = z.object({
+  components: z.array(PortabilityComponentResult).default([]),
+  files: z
+    .object({
+      written: z.number().default(0),
+      skipped: z.number().default(0),
+      conflicts: z.array(z.string()).default([]),
+    })
+    .default({ written: 0, skipped: 0, conflicts: [] }),
+  rescan_entries: z.number().nullish(),
+  rescan_error: z.string().nullish(),
+  // The rescan runs with the #848 mass de-index fuse bypassed — a fresh install's
+  // empty→populated flip is exactly what that fuse refuses. The card says so out loud
+  // rather than letting a waived safety rule go unmentioned.
+  rescan_forced: z.boolean().default(false),
+  reembed: z.array(z.record(z.string(), z.string())).default([]),
+  reembed_error: z.string().nullish(),
+  reenter_secrets: PortabilitySecrets.default({ provider_keys: [], connected_accounts: [] }),
+});
+export type PortabilityReport = z.infer<typeof PortabilityReport>;
+
+/** An import job: staged (previewed) → running → done. */
+export const PortabilityImportJob = z.object({
+  id: z.string(),
+  status: z.enum(["staged", "running", "done", "failed"]),
+  created_at: z.string(),
+  updated_at: z.string(),
+  preview: PortabilityPreview.nullish(),
+  report: PortabilityReport.nullish(),
+  error: z.string().nullish(),
+});
+export type PortabilityImportJob = z.infer<typeof PortabilityImportJob>;

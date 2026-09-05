@@ -263,6 +263,26 @@ class CoreAppSettings(CoreSettings):
     # Absolute floor for the ratio rule: fewer stale rows than this never trip it, so a small
     # tree stays prunable. A store that lists nothing at all trips at any size.
     files_scan_fuse_min_deletions: int = 5
+
+    # ── Tenant data portability (#867) ──────────────────────────────────────────
+    # Where an export is assembled and an uploaded archive is staged. A **disposable cache**
+    # (constraint #2): the durable state is the job row that points here, and pressing Export
+    # again reproduces the artefact — so a container restart may empty it, and the download
+    # route answers 410 rather than pretending otherwise. Defaults under the container's own
+    # tmp: never a named volume (this is not state to preserve) and never the host home
+    # directory (non-portable, and it would expose ~/.ssh & friends).
+    portability_staging_dir: Path = Path("/tmp/epicurus-portability")
+    # Per-file ceiling for the file-space half of an export. A file is read whole to be added
+    # to the archive, so an unbounded default would let one large video decide whether the
+    # core survives an export on a small box. A file above this is omitted and *named* in the
+    # job's reason rather than silently dropped; 0 removes the limit.
+    portability_max_file_mb: int = 512
+    # Ceiling on an uploaded archive: over it the upload is refused with 413 rather than
+    # filling the staging disk. 0 removes the limit.
+    portability_max_archive_mb: int = 4096
+    # How long a staged export/import survives before the next job sweeps it (and its row).
+    portability_retention_hours: int = 24
+
     # ── External file mounts (#731) ─────────────────────────────────────────────
     # Operator-declared drive-style mounts: additional roots beside the tenant file space,
     # each backed by a host directory bound into the container (never a default — the operator

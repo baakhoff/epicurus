@@ -20,6 +20,7 @@ __all__ = [
     "MODULE_MEMBER_PREFIX",
     "PORTABILITY_FORMAT_VERSION",
     "ArchiveManifest",
+    "BlobTransfer",
     "ComponentEntry",
     "ComponentKind",
     "ComponentState",
@@ -73,6 +74,11 @@ class ComponentEntry(BaseModel):
     state: ComponentState = "pending"
     # Records written (core sets, module streams) or files copied (the file space).
     count: int = 0
+    # Blobs carried for a module that has bytes as well as rows (#876), and their total size.
+    # Counted separately from ``count`` because they are a different kind of thing entirely:
+    # a hundred records and a hundred blobs are the same number and wildly different archives.
+    blobs: int = 0
+    blob_bytes: int = 0
     # ``"<module>/<n>"`` for a module, ``"core/<n>"`` for a core set; absent for files.
     schema_name: str | None = Field(
         default=None, validation_alias="schema", serialization_alias="schema"
@@ -160,6 +166,8 @@ class ImportComponentPreview(BaseModel):
     name: str
     kind: ComponentKind
     records: int = 0
+    # How many blobs the archive carries for this component (#876); 0 for one without bytes.
+    blobs: int = 0
     verdict: ImportVerdict = "ok"
     detail: str | None = None
     schema_name: str | None = Field(
@@ -178,6 +186,26 @@ class ImportPreview(BaseModel):
     refusal: str | None = None
 
 
+class BlobTransfer(BaseModel):
+    """A module's byte half of an import: what landed, what was already there, what was not.
+
+    The same shape of answer as :class:`FileTransfer`, kept separate because a blob can also
+    be *missing*: an object above the per-blob export ceiling has its catalogue record in the
+    archive but not its bytes, and the operator needs that said out loud rather than inferred
+    from a count that does not add up.
+    """
+
+    written: int = 0
+    skipped: int = 0
+    bytes_written: int = 0
+    # Ids that already held **different** bytes here. Left exactly as they are, never
+    # overwritten — the file space's rule, applied to objects.
+    conflicts: list[str] = Field(default_factory=list)
+    # Ids the archive listed but whose bytes it does not carry (omitted at export by the
+    # per-blob ceiling). The record still landed, so the entry is listed and its download 404s.
+    missing: list[str] = Field(default_factory=list)
+
+
 class ImportComponentResult(BaseModel):
     """What one component actually did on apply."""
 
@@ -187,6 +215,8 @@ class ImportComponentResult(BaseModel):
     created: int = 0
     updated: int = 0
     skipped: int = 0
+    # Present only for a module that carried bytes (#876); ``None`` says "this one had none".
+    blobs: BlobTransfer | None = None
     warnings: list[str] = Field(default_factory=list)
     reason: str | None = None
     error: str | None = None

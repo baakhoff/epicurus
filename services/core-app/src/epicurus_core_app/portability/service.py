@@ -31,16 +31,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import shutil
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 
 import httpx
 
 from epicurus_core import (
+    BlobOutcome,
+    BlobRef,
     FileStore,
     ImportReport,
     ModuleManifest,
@@ -56,7 +60,10 @@ from epicurus_core_app.portability.archive import (
     ArchiveWriter,
     core_member,
     files_member,
+    module_blob_member,
+    module_blobs_member,
     module_member,
+    sanitize_member,
 )
 from epicurus_core_app.portability.core_data import CORE_SCHEMA, CORE_SETS, EXCLUSIONS, MEMORY_SET
 from epicurus_core_app.portability.jobs import PortabilityJob, PortabilityJobStore
@@ -66,6 +73,7 @@ from epicurus_core_app.portability.models import (
     MODULE_MEMBER_PREFIX,
     PORTABILITY_FORMAT_VERSION,
     ArchiveManifest,
+    BlobTransfer,
     ComponentEntry,
     FileTransfer,
     ImportComponentPreview,
@@ -270,6 +278,26 @@ class PortabilityService:
                         base = await self._registry.base_url(entry.name)
                         entry.count = await self._stream_module_export(base, tenant, part)
                         staged[entry.member or module_member(entry.name)] = part
+                        try:
+                            await self._stage_module_blobs(base, tenant, entry, parts, staged)
+                        except Exception as blob_exc:
+                            # The records are already staged. Losing them because the byte half
+                            # of the same module misbehaved would be the per-component rule
+                            # applied at the wrong granularity — so this is recorded on the
+                            # component and the archive is still written.
+                            entry.reason = "; ".join(
+                                x
+                                for x in (
+                                    entry.reason,
+                                    f"blobs were not exported: {type(blob_exc).__name__}",
+                                )
+                                if x
+                            )
+                            log.warning(
+                                "portability blob export failed",
+                                component=entry.name,
+                                error=str(blob_exc),
+                            )
                         entry.state = "included"
                     else:
                         entry.state = "included"  # the file space is copied during assembly
@@ -560,10 +588,12 @@ class PortabilityService:
         name = member[len(MODULE_MEMBER_PREFIX) : -len(".ndjson")]
         header = await reader.header(member)
         incoming = header.schema_name if header else f"{name}/1"
+        listing = module_blobs_member(name)
         entry = ImportComponentPreview(
             name=name,
             kind="module",
             records=await reader.count_records(member),
+            blobs=await reader.count_lines(listing) if reader.has(listing) else 0,
             schema_name=incoming,
         )
         target = await self._module_target(name)
@@ -624,9 +654,12 @@ class PortabilityService:
                 for member in sorted(reader.ndjson_members(CORE_MEMBER_PREFIX)):
                     name = member[len(CORE_MEMBER_PREFIX) : -len(".ndjson")]
                     report.components.append(await self._apply_core(reader, member, name, tenant))
+                parts = archive_path.parent / "parts"
                 for member in sorted(reader.ndjson_members(MODULE_MEMBER_PREFIX)):
                     name = member[len(MODULE_MEMBER_PREFIX) : -len(".ndjson")]
-                    report.components.append(await self._apply_module(reader, member, name, tenant))
+                    report.components.append(
+                        await self._apply_module(reader, member, name, tenant, parts)
+                    )
                 report.files = await self._apply_files(reader, tenant)
             await self._rebuild(report, tenant)
             await self._jobs.update(
@@ -699,7 +732,7 @@ class PortabilityService:
         return report
 
     async def _apply_module(
-        self, reader: ArchiveReader, member: str, name: str, tenant: str
+        self, reader: ArchiveReader, member: str, name: str, tenant: str, parts: Path
     ) -> ImportComponentResult:
         result = ImportComponentResult(name=name, kind="module", state="included")
         target = await self._module_target(name)
@@ -721,6 +754,26 @@ class PortabilityService:
             result.error = f"{type(exc).__name__}: {exc}"
             return result
         _fold(result, report)
+        # Bytes after rows, always: the catalogue entry an object belongs to has to exist
+        # before its bytes arrive, or a module that keys blobs off its own index has nothing
+        # to attach them to.
+        try:
+            result.blobs = await self._apply_module_blobs(reader, name, tenant, base, parts)
+        except Exception as exc:
+            # The records already landed. A blob half that failed is a warning on a component
+            # that otherwise succeeded, never a retroactive failure of the rows.
+            result.warnings.append(f"blobs could not be imported: {type(exc).__name__}: {exc}")
+            log.warning("portability module blobs failed", component=name, error=str(exc))
+        if result.blobs and result.blobs.missing:
+            result.warnings.append(
+                f"{len(result.blobs.missing)} object(s) travelled as catalogue entries without "
+                "their bytes: " + ", ".join(result.blobs.missing[:5])
+            )
+        if result.blobs and result.blobs.conflicts:
+            result.warnings.append(
+                f"{len(result.blobs.conflicts)} object(s) already held different bytes here and "
+                "were left untouched: " + ", ".join(result.blobs.conflicts[:5])
+            )
         return result
 
     async def _apply_files(self, reader: ArchiveReader, tenant: str) -> FileTransfer:
@@ -819,6 +872,196 @@ class PortabilityService:
         # Every line is terminated by the helper, and the first is the header.
         return max(newlines - 1, 0)
 
+    # ── module blobs (#876) ───────────────────────────────────────────────────
+
+    async def _stage_module_blobs(
+        self,
+        base: str,
+        tenant: str,
+        entry: ComponentEntry,
+        parts: Path,
+        staged: dict[str, Path],
+    ) -> None:
+        """Stage this module's blob listing and every blob it is willing to carry.
+
+        Nothing here is module-specific: a module has bytes if ``GET /export/blobs`` answers,
+        and has none if it 404s — which is what keeps the object store out of the core's
+        vocabulary. Each blob is streamed to its own staged part and handed to tar from
+        there, so a gigabyte object costs a gigabyte of disposable cache and never a
+        gigabyte of core memory.
+
+        The listing travels **verbatim**, including blobs the ceiling omitted: an archive that
+        quietly listed only what it carried would leave the operator no way to learn which
+        files came across as names alone.
+        """
+        listing = parts / f"module-{entry.name}-blobs.ndjson"
+        if not await self._stream_module_blob_listing(base, tenant, listing):
+            return
+        staged[module_blobs_member(entry.name)] = listing
+        oversized: list[str] = []
+        unsafe: list[str] = []
+        index = 0
+        for ref in await self._read_blob_listing(listing):
+            member = module_blob_member(entry.name, ref.id)
+            if sanitize_member(member) != member:
+                # A blob id that would name a member we refuse to read back. Named, not
+                # carried — the same treatment an over-cap blob gets, for the same reason.
+                unsafe.append(ref.id)
+                continue
+            if self._max_file_bytes and ref.size > self._max_file_bytes:
+                oversized.append(ref.id)
+                continue
+            index += 1
+            part = parts / f"module-{entry.name}-blob-{index}"
+            await self._stream_module_blob(base, tenant, ref.id, part)
+            staged[member] = part
+            entry.blobs += 1
+            entry.blob_bytes += ref.size
+        notes = []
+        if oversized:
+            notes.append(
+                f"{len(oversized)} object(s) above the per-file export limit were omitted "
+                "(their catalogue entries still travel): " + ", ".join(oversized[:5])
+            )
+        if unsafe:
+            notes.append(
+                f"{len(unsafe)} object(s) had ids that cannot be archived safely: "
+                + ", ".join(unsafe[:5])
+            )
+        if notes:
+            entry.reason = "; ".join([n for n in (entry.reason, *notes) if n])
+
+    async def _stream_module_blob_listing(self, base: str, tenant: str, target: Path) -> bool:
+        """Stream ``GET {base}/export/blobs`` to *target*; ``False`` if the module has none.
+
+        A 404 is the *answer* "this module holds no bytes", not a failure — the blob half of
+        the contract is discovered, never declared, so a module that never grows one is never
+        asked to say so.
+        """
+        async with (
+            httpx.AsyncClient(timeout=self._timeout) as client,
+            client.stream("GET", f"{base}/export/blobs", params={"tenant_id": tenant}) as response,
+        ):
+            if response.status_code == 404:
+                return False
+            response.raise_for_status()
+            handle = await asyncio.to_thread(target.open, "wb")
+            try:
+                async for chunk in response.aiter_bytes():
+                    await asyncio.to_thread(handle.write, chunk)
+            finally:
+                await asyncio.to_thread(handle.close)
+        return True
+
+    @staticmethod
+    async def _read_blob_listing(path: Path) -> list[BlobRef]:
+        """Parse a staged blob listing. Bounded by the *count* of blobs, never their bytes."""
+
+        def _parse() -> list[BlobRef]:
+            refs: list[BlobRef] = []
+            with path.open("rb") as handle:
+                for raw in handle:
+                    line = raw.strip()
+                    if line:
+                        refs.append(BlobRef.model_validate_json(line))
+            return refs
+
+        return await asyncio.to_thread(_parse)
+
+    async def _stream_module_blob(self, base: str, tenant: str, blob_id: str, target: Path) -> int:
+        """Stream one blob from the module straight to its staged part; returns its size."""
+        handle = await asyncio.to_thread(target.open, "wb")
+        written = 0
+        try:
+            async with (
+                httpx.AsyncClient(timeout=self._timeout) as client,
+                client.stream(
+                    "GET",
+                    f"{base}/export/blobs/{quote(blob_id)}",
+                    params={"tenant_id": tenant},
+                ) as response,
+            ):
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes():
+                    written += len(chunk)
+                    await asyncio.to_thread(handle.write, chunk)
+        finally:
+            await asyncio.to_thread(handle.close)
+        return written
+
+    async def _apply_module_blobs(
+        self, reader: ArchiveReader, name: str, tenant: str, base: str, parts: Path
+    ) -> BlobTransfer | None:
+        """Send every archived blob of *name* back to the module; ``None`` if it has none.
+
+        Each member is staged out of the tar **once**, hashed on the way, and then streamed to
+        the module with its digest and length declared. Staging is what makes that one pass:
+        the ``PUT`` needs the SHA-256 up front, and re-reading a member out of a gzip stream
+        to compute it would cost a second decompression of everything before it.
+        """
+        listing = module_blobs_member(name)
+        if not reader.has(listing):
+            return None
+        transfer = BlobTransfer()
+        await asyncio.to_thread(parts.mkdir, parents=True, exist_ok=True)
+        index = 0
+        async for ref in reader.blob_refs(listing):
+            member = module_blob_member(name, ref.id)
+            if not reader.has(member):
+                transfer.missing.append(ref.id)
+                transfer.skipped += 1
+                continue
+            index += 1
+            staged = parts / f"blob-{name}-{index}"
+            try:
+                digest, size = await self._stage_archive_member(reader, member, staged)
+                outcome = await self._put_module_blob(base, tenant, ref, staged, digest, size)
+            finally:
+                await asyncio.to_thread(staged.unlink, True)
+            if outcome.warning:
+                transfer.conflicts.append(ref.id)
+            if outcome.outcome == "skipped":
+                transfer.skipped += 1
+            else:
+                transfer.written += 1
+                transfer.bytes_written += size
+        return transfer
+
+    @staticmethod
+    async def _stage_archive_member(
+        reader: ArchiveReader, member: str, target: Path
+    ) -> tuple[str, int]:
+        """Copy one archive member to *target*, returning its SHA-256 and its size."""
+        digest = hashlib.sha256()
+        size = 0
+        handle = await asyncio.to_thread(target.open, "wb")
+        try:
+            async for chunk in reader.raw_lines(member):
+                digest.update(chunk)
+                size += len(chunk)
+                await asyncio.to_thread(handle.write, chunk)
+        finally:
+            await asyncio.to_thread(handle.close)
+        return digest.hexdigest(), size
+
+    async def _put_module_blob(
+        self, base: str, tenant: str, ref: BlobRef, path: Path, sha256: str, size: int
+    ) -> BlobOutcome:
+        """``PUT {base}/import/blobs/{id}`` with the staged bytes streamed from disk."""
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.put(
+                f"{base}/import/blobs/{quote(ref.id)}",
+                params={
+                    "tenant_id": tenant,
+                    "sha256": sha256,
+                    "size": size,
+                    "content_type": ref.content_type,
+                },
+                content=_file_chunks(path),
+            )
+            response.raise_for_status()
+            return BlobOutcome.model_validate(response.json())
+
     async def _post_module_import(
         self, base: str, tenant: str, body: AsyncIterator[bytes]
     ) -> ImportReport:
@@ -838,6 +1081,19 @@ class PortabilityService:
 
 def _line(payload: dict[str, Any]) -> bytes:
     return (json.dumps(payload, separators=(",", ":"), default=str) + "\n").encode("utf-8")
+
+
+async def _file_chunks(path: Path, chunk: int = 1024 * 1024) -> AsyncIterator[bytes]:
+    """A staged file as a request body — read off the event loop, a chunk at a time."""
+    handle = await asyncio.to_thread(path.open, "rb")
+    try:
+        while True:
+            data = await asyncio.to_thread(handle.read, chunk)
+            if not data:
+                break
+            yield data
+    finally:
+        await asyncio.to_thread(handle.close)
 
 
 def _skipped(result: ImportComponentResult, reason: str) -> ImportComponentResult:

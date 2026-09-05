@@ -1068,13 +1068,32 @@ operator can open it with tools they already have:
 manifest.json                 what this archive is, and what it deliberately omits
 core/<set>.ndjson             the core's own data, one set per member
 modules/<name>.ndjson         each portable module's stream, verbatim
+modules/<name>/blobs.ndjson   that module's blob listing, verbatim (#876)
+modules/<name>/blobs/<id>     one member per blob — the bytes themselves
 files/<path>                  the tenant file space, relative to the tenant root
 ```
 
 `manifest.json` carries the archive **format version**, the tenant, the timestamp, the
 source's `core-app` / `epicurus-core` versions, one entry per component (state, count,
-schema, module version, and the reason for anything skipped), the **exclusions** with their
-reasons, and the **secret inventory** — names only.
+`blobs` / `blob_bytes`, schema, module version, and the reason for anything skipped), the
+**exclusions** with their reasons, and the **secret inventory** — names only.
+
+**Bytes as well as rows (#876).** Most modules export rows; [`storage`](storage.md) also owns
+**objects**, in a per-tenant bucket that is not part of the file space the core carries itself.
+So the module contract has an optional byte half (`BlobPortabilityStore` — see
+[`modules`](../reference/modules.md#blobs--a-module-whose-data-is-bytes-876)) and the core
+discovers it per module rather than being told: after a module's NDJSON it calls
+`GET /export/blobs`, and a **404** is the answer "this one has no bytes". Where there are bytes,
+each object becomes its own archive member, streamed through the staging directory in both
+directions — an archive of objects must never be an archive-sized allocation — and
+`PORTABILITY_MAX_FILE_MB` caps each one, naming what it omitted. A component member is matched
+as *exactly one path segment* after its prefix, so a stored file genuinely called
+`notes.ndjson` cannot be mistaken for a module's export stream. On apply, bytes go after rows
+(the catalogue entry an object belongs to has to exist first), each member is staged out of the
+tar **once** and hashed on the way, and that digest is declared on the `PUT` — which is what
+lets the module refuse a corrupt transfer and skip an object it already holds byte-identically.
+A blob half that fails is a warning on a component whose rows still landed, never a retroactive
+failure of the rows.
 
 **What travels: source of truth only.** Derived state is not exported; it is rebuilt after
 the import — the file rescan for **the tenant just imported into** (never the deployment

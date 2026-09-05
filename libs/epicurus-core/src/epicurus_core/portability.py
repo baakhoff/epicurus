@@ -19,6 +19,19 @@ which serves:
 * ``POST /import?tenant_id=…&dry_run=…`` — the same stream back, answering with an
   :class:`ImportReport` (per-kind ``created``/``updated``/``skipped`` counts + warnings).
 
+A module whose data is **bytes** rather than rows (``storage``'s object bucket — #876) also
+implements :class:`BlobPortabilityStore`, and the same call serves three more routes for it:
+
+* ``GET /export/blobs?tenant_id=…`` — NDJSON, one :class:`BlobRef` per line, no header.
+* ``GET /export/blobs/{id}?tenant_id=…`` — that blob's bytes, streamed.
+* ``PUT /import/blobs/{id}?tenant_id=…&sha256=…&size=…&content_type=…`` — the bytes back,
+  answering with a :class:`BlobOutcome`.
+
+The blob half is **optional and discovered, not declared**: the manifest flag stays ``portable``
+and the core learns a module has bytes from ``GET /export/blobs`` answering 200 rather than 404.
+So a store that has no bytes is untouched by any of this, and a store that does is not asked to
+restate the fact in its manifest.
+
 Three rules the helper enforces so every module behaves the same way, whoever wrote it:
 
 * **Additive, never destructive.** A store upserts by stable id; nothing in this contract
@@ -37,11 +50,12 @@ don't: the core reports what to re-enter instead.
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -50,7 +64,11 @@ from epicurus_core.module import EpicurusModule
 from epicurus_core.tenancy import TenantError, validate_tenant_id
 
 __all__ = [
+    "BLOB_CHUNK_BYTES",
     "NDJSON_MEDIA_TYPE",
+    "BlobOutcome",
+    "BlobPortabilityStore",
+    "BlobRef",
     "ImportCounts",
     "ImportOutcome",
     "ImportReport",
@@ -61,6 +79,7 @@ __all__ = [
     "iter_ndjson_lines",
     "parse_schema",
     "schema_verdict",
+    "verified_chunks",
 ]
 
 log = get_logger("epicurus_core.portability")
@@ -79,6 +98,13 @@ SchemaVerdict = Literal["ok", "older", "newer", "foreign"]
 # legitimate record — a module that needs more than that per row is modelling a file, and
 # files travel in the archive's ``files/`` tree, not in a record's ``data``.
 MAX_LINE_BYTES = 8 * 1024 * 1024
+
+BLOB_CHUNK_BYTES = 1024 * 1024
+"""How much of a blob a store should hand over per chunk — a hint, not a rule.
+
+Big enough that a gigabyte does not cost a thousand hops through the event loop, small
+enough that neither side ever holds a meaningful fraction of an object in memory.
+"""
 
 
 class PortabilityRecord(BaseModel):
@@ -187,6 +213,103 @@ class PortabilityStore(Protocol):
         this version does not understand is a fact to report, not an error to fail on.
         """
         ...
+
+
+class BlobRef(BaseModel):
+    """One exported blob: what to ask for, how big it is, and what it is.
+
+    Deliberately carries **no digest**. A store that had to declare one would have to read
+    its entire corpus to produce the listing, and read it again to serve the bytes; the core
+    hashes the archived member on its way back in, which is the digest that actually protects
+    the transfer. ``id`` obeys the same stable-id rule as a record's — and where a module has
+    both, using the *same* id for a record and its blob is what pairs them up.
+    """
+
+    id: str = Field(min_length=1)
+    size: int = 0
+    content_type: str = "application/octet-stream"
+
+
+class BlobOutcome(BaseModel):
+    """What one blob did to the target — the byte half of :class:`ImportReport`."""
+
+    id: str = ""
+    outcome: ImportOutcome = "skipped"
+    # Set when the id already held *different* bytes: they are left exactly as they are and
+    # named, never overwritten (the file space's rule, applied to objects).
+    warning: str | None = None
+
+
+@runtime_checkable
+class BlobPortabilityStore(Protocol):
+    """The optional byte half of the contract, for a module whose data is not only rows.
+
+    Separate from :class:`PortabilityStore` on purpose: the three-member store stays exactly
+    as it was for every module that has no bytes, and :func:`add_portability_routes` serves
+    the blob routes only for a store that also satisfies this. ``isinstance`` against this
+    protocol is the whole of the discovery.
+    """
+
+    def blobs(self, *, tenant_id: str) -> AsyncIterator[BlobRef]:
+        """Stream a :class:`BlobRef` for every blob this tenant owns (an async generator)."""
+        ...
+
+    def open_blob(self, *, tenant_id: str, blob_id: str) -> AsyncIterator[bytes]:
+        """Stream one blob's bytes (an async generator).
+
+        Raise :class:`FileNotFoundError` if the id has no bytes — the route turns that into a
+        404 *before* it starts a response, so a missing blob is never a truncated download.
+        """
+        ...
+
+    async def put_blob(
+        self,
+        *,
+        tenant_id: str,
+        blob_id: str,
+        sha256: str,
+        size: int,
+        content_type: str,
+        chunks: AsyncIterator[bytes],
+    ) -> BlobOutcome:
+        """Write one blob — additively, by content.
+
+        *chunks* arrives already wrapped in :func:`verified_chunks`, so a store never hashes
+        the incoming stream itself; it must, however, **consume the whole stream before
+        publishing anything**, because that is when a corrupt transfer raises.
+
+        The idempotency rule is by content, not by presence: if the id already holds bytes
+        whose digest equals *sha256* the write is ``skipped``, and if it holds *different*
+        bytes the incoming ones are discarded and the id is named in
+        :attr:`BlobOutcome.warning` as a conflict. Nothing here ever overwrites.
+        """
+        ...
+
+
+async def verified_chunks(
+    chunks: AsyncIterator[bytes], *, sha256: str, size: int = 0
+) -> AsyncIterator[bytes]:
+    """Pass *chunks* through, raising ``ValueError`` at end of stream if they do not match.
+
+    The check lands here rather than in each store so that every blob-capable module gets the
+    same guarantee from the same code — and it is a *streaming* check, so the bytes are never
+    accumulated to be hashed. It fires only once the last chunk has been yielded, which is why
+    the contract asks a store to publish nothing until the stream is exhausted: an abort at
+    that point is the difference between a refused transfer and a half-written object.
+
+    An empty *sha256* disables the digest check (the size check still runs) — for a caller
+    that genuinely cannot know it.
+    """
+    digest = hashlib.sha256()
+    total = 0
+    async for chunk in chunks:
+        digest.update(chunk)
+        total += len(chunk)
+        yield chunk
+    if size and total != size:
+        raise ValueError(f"blob size mismatch: declared {size} bytes, received {total}")
+    if sha256 and digest.hexdigest() != sha256:
+        raise ValueError(f"blob digest mismatch: declared {sha256}, received {digest.hexdigest()}")
 
 
 def parse_schema(schema: str) -> tuple[str, int]:
@@ -344,6 +467,108 @@ def add_portability_routes(
             records=report.total,
         )
         return report
+
+    if isinstance(store, BlobPortabilityStore):
+        _add_blob_routes(app, module, store, _tenant)
+
+
+def _add_blob_routes(
+    app: FastAPI,
+    module: EpicurusModule,
+    store: BlobPortabilityStore,
+    tenant_of: Callable[[str | None], str],
+) -> None:
+    """Serve the three blob routes for a store that has bytes as well as rows (#876).
+
+    Split out of :func:`add_portability_routes` only for size; it is not separately callable
+    on purpose — a module that served these without the record routes would be a module the
+    core's fan-out never reaches, since the fan-out is driven by the NDJSON member.
+    """
+
+    @app.get("/export/blobs")
+    async def export_blobs(
+        tenant_id: str | None = Query(default=None, description="Tenant to export"),
+    ) -> StreamingResponse:
+        """List this tenant's blobs as NDJSON — one :class:`BlobRef` per line, no header.
+
+        A module without bytes never registers this route, so the core reads a 404 here as
+        "this module has no blob half" rather than as a failure.
+        """
+        tenant = tenant_of(tenant_id)
+
+        async def body() -> AsyncIterator[bytes]:
+            count = 0
+            async for ref in store.blobs(tenant_id=tenant):
+                count += 1
+                yield _ndjson_line(ref.model_dump())
+            log.info(
+                "portability blob listing served",
+                module=module.name,
+                tenant=tenant,
+                blobs=count,
+            )
+
+        return StreamingResponse(body(), media_type=NDJSON_MEDIA_TYPE)
+
+    @app.get("/export/blobs/{blob_id:path}")
+    async def export_blob(
+        blob_id: str = Path(description="The blob's stable id"),
+        tenant_id: str | None = Query(default=None, description="Tenant to export"),
+    ) -> StreamingResponse:
+        """Stream one blob's bytes. 404 if the id has none — decided before the first byte."""
+        tenant = tenant_of(tenant_id)
+        chunks = store.open_blob(tenant_id=tenant, blob_id=blob_id)
+        # Pull the first chunk here, inside the handler, so a missing blob is an honest 404
+        # instead of a 200 that dies two bytes in — a StreamingResponse cannot take back its
+        # status line once it has been sent.
+        try:
+            first = await anext(chunks)
+        except StopAsyncIteration:
+            first = b""  # a legitimately empty blob
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=f"no such blob: {blob_id}") from exc
+
+        async def body() -> AsyncIterator[bytes]:
+            if first:
+                yield first
+            async for chunk in chunks:
+                yield chunk
+
+        return StreamingResponse(body(), media_type="application/octet-stream")
+
+    @app.put("/import/blobs/{blob_id:path}", response_model=BlobOutcome)
+    async def import_blob(
+        request: Request,
+        blob_id: str = Path(description="The blob's stable id"),
+        tenant_id: str | None = Query(default=None, description="Tenant to import into"),
+        sha256: str = Query(default="", description="Expected SHA-256 of the body"),
+        size: int = Query(default=0, description="Expected byte length of the body"),
+        content_type: str = Query(
+            default="application/octet-stream", description="Media type to store the blob with"
+        ),
+    ) -> BlobOutcome:
+        """Write one blob into this tenant — additively, by content (never an overwrite)."""
+        tenant = tenant_of(tenant_id)
+        try:
+            outcome = await store.put_blob(
+                tenant_id=tenant,
+                blob_id=blob_id,
+                sha256=sha256,
+                size=size,
+                content_type=content_type,
+                chunks=verified_chunks(request.stream(), sha256=sha256, size=size),
+            )
+        except ValueError as exc:  # a corrupt or truncated body — the caller's, not ours
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        outcome.id = outcome.id or blob_id
+        log.info(
+            "portability blob imported",
+            module=module.name,
+            tenant=tenant,
+            blob=blob_id,
+            outcome=outcome.outcome,
+        )
+        return outcome
 
 
 async def _read_header(lines: AsyncIterator[str]) -> StreamHeader:

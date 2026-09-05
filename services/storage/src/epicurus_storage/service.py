@@ -319,13 +319,17 @@ def build_module(
 
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.9.3",
+        version="0.10.0",
         description=(
             "Agent file tools over the core-owned file space (list, search, read), plus "
             "app-managed object storage via MinIO and durable chat-upload ingest. The Files "
             "browser UI is served by the core (ADR-0063); private subtrees (e.g. notes) are "
             "hidden from the agent's file tools."
         ),
+        # Tenant portability (#876). Storage is the module whose data is *bytes*: its
+        # catalogue rows travel as records and its objects travel as blobs, both served by
+        # ``add_portability_routes`` over ``StoragePortability`` (wired in ``app.py``).
+        portable=True,
         ui=UiSection(
             icon="folder",
             summary="Agent file tools over the file space; manage platform objects.",

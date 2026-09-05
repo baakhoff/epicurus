@@ -17,6 +17,7 @@ from epicurus_core import (
     PlatformClient,
     add_manifest_route,
     add_ops_routes,
+    add_portability_routes,
     configure_logging,
     get_logger,
 )
@@ -25,6 +26,7 @@ from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
 from epicurus_tasks.lead_time_prefs import LeadTimePrefsStore
 from epicurus_tasks.local_provider import LocalTasksProvider
 from epicurus_tasks.models import Task, TaskScope
+from epicurus_tasks.portability import TasksPortability
 from epicurus_tasks.providers import TasksProvider
 from epicurus_tasks.router import TasksRouter, operator_clock
 from epicurus_tasks.scheduler import FiredMarkerStore, run_periodic
@@ -158,6 +160,10 @@ def create_app() -> FastAPI:
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
+    # Tenant data portability (#867/#871): GET /export + POST /import over the module's own
+    # source-of-truth rows (tasks, external-provider repeat rules, the lead-time pref).
+    portability = TasksPortability(tasks=store, repeats=repeats, lead_prefs=lead_prefs)
+    add_portability_routes(app, module, portability)
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:

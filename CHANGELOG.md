@@ -12,6 +12,18 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Tasks joins tenant export/import** (#871, part of #866/#867) — `tasks` implements the
+  module half of the portability contract: `portable=True` plus `GET /export` / `POST /import`
+  (schema `tasks/1`) over local tasks, a Google-linked task's recurrence rule (the *only* copy
+  of it — Google Tasks has no recurrence field of its own, ADR-0082), and the operator's
+  `task_due_soon` lead-time preference when set. Each carries its own stable id (a task's own
+  uuid, never the surrogate `pk`; a repeat rule's natural `list_id`/`task_id` pair; a fixed id
+  for the single per-tenant lead-time row) so import is a plain upsert and re-applying the same
+  export is a no-op. The Google task itself is not exported — it lives in the operator's
+  account, not this module's database — and the operator's enabled/active list selection is
+  left to the core's own export (`module_prefs.collections`) rather than duplicated here; the
+  scheduler's fire-once markers are operational and excluded too. `tasks` 0.23.3→0.24.0 (MINOR).
+
 - **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
   an operator could stand up a second epicurus but had no way to *move into it*. The volume
   backups in `infra/backups` image one deployment for disaster recovery; nothing carried a

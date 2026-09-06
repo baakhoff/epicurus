@@ -56,6 +56,13 @@ async def test_manifest_version_matches_the_packaged_version() -> None:
     assert manifest.version == declared
 
 
+async def test_manifest_declares_portable_data() -> None:
+    """The flag is what the core's export fans out over (#872, ADR-0133) — serving the routes
+    without raising it would leave every note out of the operator's archive, silently."""
+    manifest = await _module().manifest()
+    assert manifest.portable is True
+
+
 async def test_manifest_declares_propose_tool_side_effects() -> None:
     # The autonomy dial's tool allowance is derived from this classification (ADR-0105).
     # All four route through _stage()'s review-toggle interaction, an accepted resolution

@@ -439,6 +439,8 @@ referenced event resolves wherever it lives.
 | `GET` | `/resolve/{kind}/{ref_id}` | Hover-card resolver for a referenced event (ADR-0019); `kind` is `event`. Returns a `HoverCard`; unknown kind / missing event is `404`. Core-proxied. |
 | `GET` | `/attachments` | Chat-attachment picker (ADR-0019): upcoming events as `{ref_id, kind, title}`. Core-proxied. |
 | `GET` | `/attachments/{ref_id}` | Resolve an attached event to `{title, excerpt}` (ADR-0019); missing event is `404`. Core-proxied. |
+| `GET` | `/export` | Tenant export (#870, ADR-0133): this tenant's calendar as NDJSON — a header line, then one record per row. `tenant_id` is required (`400` without it). See [Portability](#portability-870) below. Core-driven. |
+| `POST` | `/import` | Tenant import: the same stream back, upserted by stable id, never deleting. `tenant_id` required; `dry_run=true` counts without writing. Answers an `ImportReport`; a stream from a newer `calendar/<n>` — or from another module — is refused `409` before anything is written. Core-driven. |
 | `POST /GET …` | `/mcp` | MCP SSE endpoint used by the core agent host. |
 
 ### Module events (ADR-0103, #664)
@@ -653,6 +655,61 @@ All three are created by `CalendarSyncStore.init` / `SelfWriteLedger.init` via `
 the shared additive `ensure_columns` reconcile (ADR-0067) — this is their first release, so the
 reconciled-column lists are empty; they exist so a *later* column lands in an already-provisioned
 database instead of 500ing every read.
+
+## Portability (#870)
+
+Calendar declares `portable=True` and serves the two contract routes
+(`epicurus_core.add_portability_routes`, wired in `app.py`), so an operator's tenant export
+carries their calendar into another installation. Implementation:
+`epicurus_calendar.portability.CalendarPortability`.
+
+**Schema:** `calendar/1` — the *record* schema, not the module's release version (that
+travels beside it in the stream header as `component_version`). Bumped only if the record
+envelope changes in a way an older reader could not handle; a new column is additive on the
+wire and does not move it.
+
+### What travels
+
+| `kind` | Stable id | Columns carried |
+| --- | --- | --- |
+| `event` | `event_id` — the natural id the module minted: a uuid4 for a plain event or a series master, `<series>_<original start>` for an exception ([`instance_id`](#recurring-events--attendees-432-adr-0075)). Never the surrogate `id`. | `event_id`, `title`, `start_dt`, `end_dt`, `description`, `location`, `all_day`, `recurrence`, `recurring_event_id`, `excluded`, `attendees`, `timezone`, `created_at` — every column of `calendar_events` except `tenant` and the surrogate `id`. |
+| `lead_time_prefs` | The literal `lead_time_prefs`. The table holds one row per tenant, so the tenant *is* the key — and the tenant never travels. | `lead_minutes`. Absent entirely when the operator never set one, so an import cannot pin the target to today's default. |
+
+Because a series master, its exceptions and its tombstones are all ordinary rows of one
+table, a recurring series arrives with its overrides still attached and expands to exactly
+the same occurrences on the far side — which is what the round-trip test asserts (it compares
+the *provider's* expansion, not just the rows). `attendees` travels as its stored JSON
+string; timestamps as canonical UTC ISO-8601, so a round trip through SQLite (no timezone-aware
+type) and Postgres (`timestamptz`) encodes identically and a re-apply reports `skipped`
+rather than `updated`.
+
+### What is excluded, and why
+
+| Left out | Why |
+| --- | --- |
+| `calendar_fired_markers` | **Operational** — a marker records that *this* deployment already announced an event. The target has announced nothing; carrying them would silence the first reminders it owed the operator. |
+| `calendar_sync_state` | **Operational** — an incremental-sync cursor. The token is opaque and was minted for the source's own OAuth session; the target's first pass re-primes it. |
+| `calendar_synced_event` | **Provider mirror** — a cache of what this module last *observed* in Google, used only to classify a delta. Rebuilt by the next reconcile pass. |
+| `calendar_self_writes` | **Operational** — a short-lived (TTL'd) "we already announced this" ledger about writes the source made. |
+| Google Calendar events | **Provider-owned** — they live in Google, not here. The operator carries them by reconnecting the account; exporting a mirror would duplicate every event the moment the first sync ran. |
+| The calendar selection (enabled calendars, the active one) | **Not calendar's to export** — it is stored core-side in `module_prefs` (ADR-0030), and the *core's* own archive already carries that table. Duplicating it here would give one setting two owners. |
+| Google OAuth tokens | **Never exported** — this module holds no credentials at all (ADR-0010/0020); they stay in OpenBao and the core's import report names the account to reconnect. |
+
+### Behaviour
+
+* **Additive, never destructive.** Import upserts by the stable id: absent → `created`,
+  present and identical → `skipped`, present and different → `updated`. Applying the same
+  archive twice is a no-op, and importing into a populated calendar merges rather than
+  replaces — an event only the target has is left standing.
+* **The tenant is context, not content.** It is stripped on export and re-applied from the
+  *target* tenant on import, so the same stream lands wherever it is told to and one
+  tenant's export can never contain another's events.
+* **`dry_run=true`** counts exactly what an apply would do and writes nothing.
+* An **unknown `kind`** (a newer calendar exported something this version has no table for)
+  is counted `skipped` with a warning, not an error; an unknown *field* on a known kind is
+  dropped, also with a warning. The rest of the stream still lands.
+* An **older** `calendar/<n>` is accepted with a warning; a **newer** one — or a stream from
+  another module — is refused `409` before a byte is written.
 
 ## Dependencies
 

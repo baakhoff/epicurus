@@ -253,6 +253,17 @@ function ReportView({ report }: { report: PortabilityReport }) {
   );
 }
 
+/** A core refusal (413 over PORTABILITY_MAX_ARCHIVE_MB, 422 not an archive) arrives as an
+ *  `ApiError` with the core's own sentence. Anything else means the request never got a
+ *  core answer at all — in practice a proxy in front of it refusing the body (#887: the
+ *  web image's nginx capped every `/platform/` upload at 12 MB, so a real archive died with
+ *  a bare "Failed to fetch"). Name the likely cause, because the symptom does not. */
+function uploadFailure(error: unknown): string {
+  if (error instanceof ApiError) return error.detail;
+  const message = error instanceof Error ? error.message : String(error);
+  return `The archive never reached the core (${message}). A proxy in front of it may cap the request size — see the web service docs.`;
+}
+
 function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
   const qc = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
@@ -327,13 +338,7 @@ function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
           </Button>
         )}
       </div>
-      {upload.isError && (
-        <p className="text-sm text-danger">
-          {upload.error instanceof ApiError
-            ? upload.error.detail
-            : (upload.error as Error).message}
-        </p>
-      )}
+      {upload.isError && <p className="text-sm text-danger">{uploadFailure(upload.error)}</p>}
       {apply.isError && <p className="text-sm text-danger">{(apply.error as Error).message}</p>}
       {current?.status === "failed" && <p className="text-sm text-danger">{current.error}</p>}
       {preview && (

@@ -270,6 +270,19 @@ describe("ExportImportCard (#867)", () => {
     expect(await screen.findByText(/exceeds the 4096-byte upload limit/)).toBeInTheDocument();
   });
 
+  it("points at a proxy when the upload never gets a core answer (#887)", async () => {
+    // A body refused before the core is a bare network error, not an ApiError — the
+    // shape a front proxy's size cap produces.
+    mockUpload.mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<ExportImportCard />, { wrapper });
+
+    pickFile("huge.tar.gz");
+
+    expect(
+      await screen.findByText(/never reached the core \(Failed to fetch\)/),
+    ).toBeInTheDocument();
+  });
+
   it("names the module credentials the archive does not carry", async () => {
     mockStartExport.mockResolvedValue(READY_EXPORT);
     mockExport.mockResolvedValue(READY_EXPORT);

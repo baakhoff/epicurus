@@ -12,7 +12,15 @@ the LAN/VPN reaches the UI at `http://<host>:8088/`.
 The web is a frontend — it exposes no API of its own; it consumes the core's
 [platform API](../reference/platform-api.md). nginx serves the static SPA and
 **same-origin-proxies** `/platform/` to the core (`CORE_APP_URL`), so there is no CORS and
-SSE streams pass through unbuffered; a CSP pins the app to its own origin.
+SSE streams pass through unbuffered; a CSP pins the app to its own origin. That proxy block
+caps request bodies at **12 MB** (chat attachments, Files-page uploads — at or above the
+core's `ATTACHMENT_MAX_BYTES` so the core's JSON 413 is what the operator sees). One route is
+exempt (#887): `POST /platform/v1/portability/imports`, the tenant-archive upload, has its own
+exact-match `location` with **no nginx body cap** and `proxy_request_buffering off`, so a
+multi-gigabyte archive streams straight to the core, which enforces the only ceiling
+(`PORTABILITY_MAX_ARCHIVE_MB`, 4 GiB). Anything an operator puts in front of the web
+container (a reverse proxy, a tunnel) has to carry the same exemption, or the upload dies
+there — the card then says the archive never reached the core.
 
 ### Screens
 
@@ -375,8 +383,10 @@ job is `ready` does a download appear, as a plain same-origin `<a href download>
 archive route (the `mailboxAttachmentUrl` precedent): the browser streams the bytes, and no
 multi-gigabyte blob is ever held in the tab.
 
-**Import** never applies what it is handed. Choosing a file uploads it, and the answer is a
-**preview**: where the archive came from, a table of components with record counts and a
+**Import** never applies what it is handed. Choosing a file uploads it (with no progress
+bar yet — a large archive shows only the busy button until the core answers; an upload the
+core never answers is named as such, distinguishing a proxy that refused the body from a
+core that did, #887), and the answer is a **preview**: where the archive came from, a table of components with record counts and a
 `Badge` verdict (`ok` / `warning` / `refused`, each with the core's own explanation), a
 collapsed list of what the archive deliberately leaves behind, and the "not carried" line
 naming the API keys to re-enter, the accounts to reconnect, and the module credentials to

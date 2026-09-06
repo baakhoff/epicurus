@@ -16,6 +16,25 @@ server {
         return 200 'ok';
     }
 
+    # The tenant-archive import (#887) — the one upload that is legitimately large. The
+    # core enforces its own ceiling (PORTABILITY_MAX_ARCHIVE_MB, 4 GiB by default → a JSON
+    # 413), so nginx must not refuse first, and must stream the body to the core rather
+    # than spool it to its own disk. An exact-match location wins over the prefix below.
+    location = /platform/v1/portability/imports {
+        resolver 127.0.0.11 valid=15s;
+        set $core ${CORE_APP_URL};
+        proxy_pass $core;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
+        client_max_body_size 0;
+    }
+
     # The core platform API. Buffering OFF end-to-end — SSE (chat tokens,
     # model-pull progress) must stream, never arrive as one blob.
     location /platform/ {

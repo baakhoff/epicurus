@@ -5,14 +5,17 @@ The LLM gateway is replaced by a lightweight fake so no network is needed.
 
 from __future__ import annotations
 
+from importlib.metadata import version
 from typing import Any
 
 import httpx
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core_app import platform_api
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.power import GatewayPausedError
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -125,6 +128,50 @@ async def test_info_returns_contract_and_version() -> None:
     body = resp.json()
     assert body["contract_version"] == "0.1"
     assert "core_version" in body
+
+
+async def test_info_names_the_service_and_the_library_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#893: the card showed the *library*'s version under the service's label.
+
+    ``core_version`` is kept exactly as it was — it is published contract, and renaming a field
+    to fix a label is a breaking change for a cosmetic gain — so the fix is the two unambiguous
+    fields beside it. ``library_version`` must equal it; ``core_app_version`` must be the
+    running service's, which is a different number and the one a bug report actually needs.
+    """
+    from epicurus_core import __version__ as library_version
+
+    monkeypatch.setenv(platform_api.RELEASE_TRACK_ENV, "testing")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(_FakeGateway())), base_url="http://test"
+    ) as client:
+        body = (await client.get("/platform/v1/info")).json()
+
+    assert body["library_version"] == library_version == body["core_version"]
+    assert body["core_app_version"] == version("epicurus-core-app")
+    assert body["core_app_version"] != body["library_version"]
+    assert body["release_track"] == "testing"
+    assert body["tenant"] == "local"
+
+
+async def test_info_reports_no_release_track_rather_than_guessing_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source checkout pulled no image. ``null`` is the honest answer; "latest" is a claim."""
+    monkeypatch.delenv(platform_api.RELEASE_TRACK_ENV, raising=False)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(_FakeGateway())), base_url="http://test"
+    ) as client:
+        assert (await client.get("/platform/v1/info")).json()["release_track"] is None
+
+    # A blank value — how compose passes an unset `${EPICURUS_VERSION:-}` through — is the
+    # same fact as unset, and must not be reported as a track named "".
+    monkeypatch.setenv(platform_api.RELEASE_TRACK_ENV, "   ")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(_FakeGateway())), base_url="http://test"
+    ) as client:
+        assert (await client.get("/platform/v1/info")).json()["release_track"] is None
 
 
 # ── /embed ─────────────────────────────────────────────────────────────────────

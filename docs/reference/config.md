@@ -226,6 +226,19 @@ pydantic model.
 | `CORE_APP_URL` | `http://core-app:8080` | web | Where nginx proxies `/platform/`. |
 | `NGINX_RESOLVER` | the first `nameserver` in the container's `/etc/resolv.conf` | web | The DNS server nginx resolves `CORE_APP_URL`'s hostname with, at request time (#891). Derived at container start by `services/web/docker-entrypoint.d/05-epicurus-resolver.envsh`, so the same image works under Compose (Docker's embedded DNS, `127.0.0.11`) and in a Kubernetes pod (the cluster DNS service) with nothing configured; an IPv6 address is bracketed, and an unreadable `resolv.conf` falls back to `127.0.0.11`. Set it explicitly only to override. See [web § Resolving the core](../services/web.md#resolving-the-core-891). |
 
+## Release track (#893)
+
+Not a `CoreAppSettings` field either — deliberately. `EPICURUS_VERSION` is not a knob the
+core acts on; it is the deployment's label for the build it is running, and a setting with a
+default would invent an answer where the honest one is "nothing said". So the core reads the
+env directly and reports it, unchanged, as `release_track` on
+[`GET /platform/v1/info`](platform-api.md#get-platformv1info) — which is what the Settings →
+Platform card shows as *track*.
+
+| Env var | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `EPICURUS_VERSION` | unset | core-app | The image tag this deployment pulled — `latest`, `testing`, or a semver. Compose already interpolates it into every fragment's `image:`, but that is a file-level substitution the container never sees, so `services/core-app/compose.yaml` passes it into the container's `environment:` as well; the Helm chart sets it from `image.tag` (or the chart's `appVersion`). Unset or blank reports `null`, and the card draws an em dash rather than guessing. |
+
 ## Type aliases
 
 ```python

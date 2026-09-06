@@ -18,14 +18,17 @@ than crafting HTTP calls by hand.
 
 ## `GET /platform/v1/info`
 
-Discovery — what core version and contract are running.
+Discovery — which build is running, and which contract it speaks.
 
 **Response**
 
 ```json
 {
   "contract_version": "0.1",
-  "core_version": "0.2.0",
+  "core_version": "0.37.0",
+  "core_app_version": "0.122.0",
+  "library_version": "0.37.0",
+  "release_track": "testing",
   "tenant": "local"
 }
 ```
@@ -33,8 +36,26 @@ Discovery — what core version and contract are running.
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `contract_version` | `str` | The module↔core contract version (see `CONTRACT_VERSION`). |
-| `core_version` | `str` | The installed `epicurus-core-app` version. |
+| `core_version` | `str` | **The `epicurus_core` library version.** Kept for compatibility; identical to `library_version` — prefer that one. |
+| `core_app_version` | `str` | The running `epicurus-core-app` service's version, from its distribution metadata. |
+| `library_version` | `str` | The `epicurus_core` library version the service is built against. |
+| `release_track` | `str \| null` | The image tag this deployment pulled — `EPICURUS_VERSION` as passed into the container (`latest`, `testing`, a semver). `null` where nothing set it. |
 | `tenant` | `str` | The active tenant ID. |
+
+**Why both version fields (#893).** `core_version` has always carried the *library*'s version
+while being labelled the core's, so the Settings **Platform** card reported `epicurus_core`
+0.37.0 as "core version" for a 0.121.0 core-app — the one number an operator quotes in a bug
+report, naming the wrong component. Renaming a published field to fix a label would break
+callers for a cosmetic gain, so the field stays exactly as it was and the two unambiguous ones
+are added beside it. New readers should use `core_app_version` and `library_version`;
+`core_version` is not deprecated, merely imprecise about what it is.
+
+`release_track` is deliberately *not* derived from a version number: a semver says what the
+code claims to be, a track says what was actually pulled, and after a reconcile that did not
+take those are exactly the two facts that disagree. It reports `null` rather than guessing
+`latest`. The container needs `EPICURUS_VERSION` in its own environment for it to have an
+answer — the stock `services/core-app/compose.yaml` passes it through; a hand-rolled
+deployment must do the same.
 
 ---
 
@@ -676,9 +697,36 @@ Applies a staged import in the background. **202**. **409** if the job is not `s
 (including a second apply of the same job — upload it again), or if the preview said
 `compatible: false`; **410** if staging has been swept.
 
+The **202 already carries the whole job**: `status: "running"` and a complete `progress` list,
+seeded from the preview, every entry `pending`. That is deliberate (#893) — the shell used to
+keep serving its stale `staged` copy until the next poll and so kept offering Apply, and a
+second press earned the 409 above. The refusal is the backstop; the seeded answer is what lets
+the shell make the press impossible instead of merely futile.
+
 ### `GET /platform/v1/portability/imports/{id}`
 
-`status` is `staged` · `running` · `done` · `failed`; once done it also carries the report:
+`status` is `staged` · `running` · `done` · `failed`. Since #893 it also carries `progress`, in
+exactly the shape the export's does — a staged job has taken no step and reports `[]`:
+
+```jsonc
+"progress": [
+  {"name": "conversations", "kind": "core", "state": "included", "count": 4812},
+  {"name": "calendar", "kind": "module", "state": "skipped",
+   "reason": "module is not installed, not enabled, or not reachable"},
+  {"name": "files", "kind": "files", "state": "included", "count": 130},
+  {"name": "file index", "kind": "rebuild", "state": "included", "count": 134},
+  {"name": "re-embed", "kind": "rebuild", "state": "included", "count": 7}
+]
+```
+
+`kind` gains one value on this side: **`rebuild`**, for the two steps the apply runs that are
+*not* in the archive — the forced file rescan and the re-embed fan-out. An export never emits
+one. A component the preview `refused` is listed as `skipped` with the preview's own reason
+rather than omitted, so the archive's contents and the progress list never silently disagree.
+`count` on an applied component is rows **touched** (created + updated), not rows read — the
+preview's `records` already said how many the archive holds.
+
+Once done the job also carries the report:
 
 ```jsonc
 {
@@ -694,6 +742,8 @@ Applies a staged import in the background. **202**. **409** if the job is not `s
   "files": {"written": 130, "skipped": 4, "conflicts": ["notes/edited.md"]},
   "rescan_entries": 134, "rescan_error": null, "rescan_forced": true,
   "reembed": [{"module": "knowledge", "status": "started"}], "reembed_error": null,
+  "embedding_model": "nomic-embed-text",
+  "embedding_note": "No embedding model is installed here: …",
   "reenter_secrets": {
     "provider_keys": ["openai"],
     "connected_accounts": ["google"],
@@ -717,6 +767,19 @@ the components land, the core runs the file rescan for **this import's tenant** 
 empty→populated flip) and then the re-embed fan-out (#332); both are reported, and either
 failing does not invalidate the data that already landed. `rescan_forced` says the fuse was
 waived, so a safety rule is never overridden without the report naming it.
+
+**`embedding_model` / `embedding_note` (#893).** The model the re-embed resolved to, and — only
+when this installation cannot serve it — a plain sentence saying so. The fan-out cannot report
+that condition itself: it is fire-and-forget, so on a box with no embedding model every module
+answers "started", retries against a model the runtime has never heard of, and parks in `error`
+minutes after the report was written. The core therefore asks *before* it asks the modules
+(`portability/embedding.py`), through the LLM gateway: a local model must be pulled, a hosted
+one's provider must hold a key in OpenBao. Three distinct answers, never collapsed — present
+(`embedding_note: null`), absent, and *unknown* (the runtime unreachable, or a vault that would
+not answer, which is the #728 distinction and must never be reported as "there is no key").
+The fan-out still runs whatever the probe says: a warning is not a veto over the operator's own
+rebuild. The sentence is written by the core and rendered verbatim by the card (ADR-0018), and
+appears again as the `reason` on the `re-embed` progress row.
 `reenter_secrets` repeats the source's secret inventory — **names only**, since no secret
 material is ever in an archive. Its third part, **`module_secrets`** (#875), is
 `{module: [the OpenBao paths that module declares and this tenant actually held]}`: a module

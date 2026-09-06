@@ -66,6 +66,7 @@ from epicurus_core_app.portability.archive import (
     sanitize_member,
 )
 from epicurus_core_app.portability.core_data import CORE_SCHEMA, CORE_SETS, EXCLUSIONS, MEMORY_SET
+from epicurus_core_app.portability.embedding import EmbeddingProbe, embedding_status
 from epicurus_core_app.portability.jobs import PortabilityJob, PortabilityJobStore
 from epicurus_core_app.portability.models import (
     ARCHIVE_MANIFEST_MEMBER,
@@ -75,6 +76,7 @@ from epicurus_core_app.portability.models import (
     ArchiveManifest,
     BlobTransfer,
     ComponentEntry,
+    ComponentKind,
     FileTransfer,
     ImportComponentPreview,
     ImportComponentResult,
@@ -100,6 +102,15 @@ log = get_logger("core.portability")
 
 FILES_COMPONENT = "files"
 """The name the file space travels under in progress, the manifest, and the preview."""
+
+RESCAN_COMPONENT = "file index"
+REEMBED_COMPONENT = "re-embed"
+"""The two post-apply rebuilds, as progress rows of their own (#893).
+
+They are not in the archive — they re-derive what it deliberately omits — but they are the
+part of an apply the operator waits longest on, so they are steps in the same list rather
+than a silence after the last module.
+"""
 
 # The memory fact corpus is scrolled, not paged, so the export takes it in one bounded read.
 # A personal assistant's fact store is small by construction (ADR-0045); above this the
@@ -145,6 +156,7 @@ class PortabilityService:
         secrets_inventory: Callable[[str], Awaitable[SecretsInventory]] | None = None,
         rescan: Callable[..., Awaitable[int]] | None = None,
         reembed: Callable[[], Awaitable[list[dict[str, str]]]] | None = None,
+        embedding_probe: EmbeddingProbe | None = None,
         max_file_bytes: int = 512 * 1024 * 1024,
         retention_hours: int = 24,
         request_timeout: float = 600.0,
@@ -159,6 +171,7 @@ class PortabilityService:
         self._secrets_inventory = secrets_inventory
         self._rescan = rescan
         self._reembed = reembed
+        self._embedding_probe = embedding_probe
         self._max_file_bytes = max_file_bytes
         self._retention = timedelta(hours=retention_hours)
         self._timeout = request_timeout
@@ -643,43 +656,93 @@ class PortabilityService:
         return None
 
     async def start_apply(self, *, tenant: str, job_id: str) -> PortabilityJob | None:
-        """Begin applying a staged import in the background (``None`` if the job is gone)."""
+        """Begin applying a staged import in the background (``None`` if the job is gone).
+
+        The job's ``progress`` is seeded **here**, synchronously, from the preview the upload
+        already produced — so the answer to the Apply request itself already carries the full
+        list of steps. Building it in the background task instead would leave the card with an
+        empty list for the first poll or two, and a progress display that arrives late is very
+        nearly a progress display that never arrives.
+        """
         job = await self._jobs.get(tenant=tenant, job_id=job_id)
         if job is None:
             return None
-        await self._jobs.update(tenant=tenant, job_id=job_id, status="running")
-        self._spawn(self._run_apply(tenant, job_id, Path(job.archive_path or "")))
+        plan = _apply_plan(ImportPreview.model_validate(job.preview) if job.preview else None)
+        await self._jobs.update(
+            tenant=tenant,
+            job_id=job_id,
+            status="running",
+            progress=[as_json(e) for e in plan],
+        )
+        self._spawn(self._run_apply(tenant, job_id, Path(job.archive_path or ""), plan))
         updated = await self._jobs.get(tenant=tenant, job_id=job_id)
         return updated
 
-    async def _run_apply(self, tenant: str, job_id: str, archive_path: Path) -> None:
-        """Apply every accepted component, then rebuild what the archive deliberately omits."""
+    async def _run_apply(
+        self,
+        tenant: str,
+        job_id: str,
+        archive_path: Path,
+        plan: list[ComponentEntry] | None = None,
+    ) -> None:
+        """Apply every accepted component, then rebuild what the archive deliberately omits.
+
+        *plan* is the seed :meth:`start_apply` wrote, kept so the rows the operator is already
+        looking at are the rows that tick over. The **archive** is still the authority on what
+        exists: a component in the tar that the seed does not name is appended rather than
+        skipped, so a preview that disagrees with its own archive cannot silently drop data.
+        """
         report = ImportReportView()
+        progress = _ProgressPlan(plan if plan is not None else _apply_plan(None))
         try:
             async with ArchiveReader(archive_path) as reader:
                 manifest = await reader.manifest()
                 report.reenter_secrets = manifest.secrets
                 for member in sorted(reader.ndjson_members(CORE_MEMBER_PREFIX)):
                     name = member[len(CORE_MEMBER_PREFIX) : -len(".ndjson")]
-                    report.components.append(await self._apply_core(reader, member, name, tenant))
+                    entry = progress.begin("core", name)
+                    await self._save_progress(tenant, job_id, progress.entries)
+                    result = await self._apply_core(reader, member, name, tenant)
+                    report.components.append(result)
+                    _mark(entry, result)
+                    await self._save_progress(tenant, job_id, progress.entries)
                 parts = archive_path.parent / "parts"
                 for member in sorted(reader.ndjson_members(MODULE_MEMBER_PREFIX)):
                     name = member[len(MODULE_MEMBER_PREFIX) : -len(".ndjson")]
-                    report.components.append(
-                        await self._apply_module(reader, member, name, tenant, parts)
-                    )
+                    entry = progress.begin("module", name)
+                    await self._save_progress(tenant, job_id, progress.entries)
+                    result = await self._apply_module(reader, member, name, tenant, parts)
+                    report.components.append(result)
+                    _mark(entry, result)
+                    await self._save_progress(tenant, job_id, progress.entries)
+                files_entry = progress.begin("files", FILES_COMPONENT)
+                await self._save_progress(tenant, job_id, progress.entries)
                 report.files = await self._apply_files(reader, tenant)
-            await self._rebuild(report, tenant)
+                files_entry.state = "included"
+                files_entry.count = report.files.written
+                if report.files.conflicts:
+                    files_entry.reason = (
+                        f"{len(report.files.conflicts)} file(s) already differ here and were "
+                        "left alone"
+                    )
+                await self._save_progress(tenant, job_id, progress.entries)
+            await self._rebuild(report, tenant, progress, job_id)
             await self._jobs.update(
-                tenant=tenant, job_id=job_id, status="done", report=as_json(report)
+                tenant=tenant,
+                job_id=job_id,
+                status="done",
+                progress=[as_json(e) for e in progress.entries],
+                report=as_json(report),
             )
             log.info("portability import applied", tenant=tenant, job=job_id)
         except Exception as exc:
             log.error("portability import failed", tenant=tenant, job=job_id, error=str(exc))
+            progress.fail(f"{type(exc).__name__}: {exc}")
             await self._jobs.update(
                 tenant=tenant,
                 job_id=job_id,
                 status="failed",
+                progress=[as_json(e) for e in progress.entries],
                 report=as_json(report),
                 error=f"{type(exc).__name__}: {exc}",
             )
@@ -807,7 +870,13 @@ class PortabilityService:
                 transfer.conflicts.append(path)
         return transfer
 
-    async def _rebuild(self, report: ImportReportView, tenant: str) -> None:
+    async def _rebuild(
+        self,
+        report: ImportReportView,
+        tenant: str,
+        progress: _ProgressPlan | None = None,
+        job_id: str | None = None,
+    ) -> None:
         """Re-derive what the archive deliberately omitted: the file index, then the vectors.
 
         The rescan is **forced** (#848): a fresh install's index is empty and the imported
@@ -821,7 +890,17 @@ class PortabilityService:
         apply knows the tenant all the way down; the last step must not be where it forgets.
         The re-embed fan-out carries no tenant of its own — it is the existing #332 call, and
         each module re-embeds its own tenant's corpus (single-tenant in v1).
+
+        The re-embed is preceded by :func:`~epicurus_core_app.portability.embedding.
+        embedding_status` (#893): the fan-out cannot report the one condition that makes it
+        pointless — no embedding model on this box — because every module accepts the job and
+        fails minutes later, out of the report's sight. Asked here, the finding lands on the
+        report as a sentence, and the fan-out still runs: whatever the answer, asking costs
+        nothing and a wrong "no" must not cost the operator their rebuild.
         """
+        entry = progress.begin("rebuild", RESCAN_COMPONENT) if progress else None
+        if progress and job_id:
+            await self._save_progress(tenant, job_id, progress.entries)
         if self._rescan is not None:
             try:
                 report.rescan_entries = await self._rescan(force=True, tenant=tenant)
@@ -829,12 +908,35 @@ class PortabilityService:
             except Exception as exc:
                 report.rescan_error = f"{type(exc).__name__}: {exc}"
                 log.warning("portability post-import rescan failed", error=str(exc))
+        if entry is not None:
+            entry.state = "failed" if report.rescan_error else "included"
+            entry.count = report.rescan_entries or 0
+            entry.error = report.rescan_error
+            if self._rescan is None:
+                entry.state = "skipped"
+                entry.reason = "no file index is wired into this core"
+
+        entry = progress.begin("rebuild", REEMBED_COMPONENT) if progress else None
+        if progress and job_id:
+            await self._save_progress(tenant, job_id, progress.entries)
+        if self._embedding_probe is not None:
+            model, note = await embedding_status(self._embedding_probe, tenant=tenant)
+            report.embedding_model = model
+            report.embedding_note = note
         if self._reembed is not None:
             try:
                 report.reembed = await self._reembed()
             except Exception as exc:
                 report.reembed_error = f"{type(exc).__name__}: {exc}"
                 log.warning("portability post-import re-embed failed", error=str(exc))
+        if entry is not None:
+            entry.state = "failed" if report.reembed_error else "included"
+            entry.count = len(report.reembed)
+            entry.error = report.reembed_error
+            entry.reason = report.embedding_note
+            if self._reembed is None:
+                entry.state = "skipped"
+                entry.reason = report.embedding_note or "no re-embed fan-out is wired in"
 
     # ── module HTTP (overridable in tests, like ModuleRegistry._post_reindex) ──
 
@@ -1085,6 +1187,85 @@ class PortabilityService:
             )
             response.raise_for_status()
             return ImportReport.model_validate(response.json())
+
+
+class _ProgressPlan:
+    """The apply's live progress list, addressable by ``(kind, name)`` (#893).
+
+    A thin wrapper rather than a bare list because the seed and the archive are two sources
+    that must agree without either being allowed to win outright: the seed decides the *order*
+    the operator sees (it is on screen before the tar is opened), the archive decides what
+    actually exists. Anything the archive holds and the seed did not name is appended as it is
+    reached, so a stale preview can never silently drop a component from the display.
+    """
+
+    def __init__(self, entries: list[ComponentEntry]) -> None:
+        self.entries = entries
+
+    def begin(self, kind: ComponentKind, name: str) -> ComponentEntry:
+        """Mark the ``(kind, name)`` step as running, adding it if the seed missed it."""
+        for entry in self.entries:
+            if entry.kind == kind and entry.name == name:
+                entry.state = "running"
+                return entry
+        entry = ComponentEntry(name=name, kind=kind, state="running")
+        self.entries.append(entry)
+        return entry
+
+    def fail(self, error: str) -> None:
+        """Whatever was mid-flight when the job died, said out loud on the row it died on.
+
+        Only the running rows: a component that already landed *did* land — an apply is
+        additive and never rolls back — and repainting it red would tell the operator to redo
+        work that is already done.
+        """
+        for entry in self.entries:
+            if entry.state == "running":
+                entry.state = "failed"
+                entry.error = error
+
+
+def _apply_plan(preview: ImportPreview | None) -> list[ComponentEntry]:
+    """Every step an apply will take, in order, all ``pending`` — the progress display's seed.
+
+    Built from the preview because that is what is already in hand at the moment Apply is
+    pressed: it names every component of the archive, graded, in the order the apply walks
+    them. A **refused** component is deliberately still listed — as ``skipped``, with the
+    preview's own sentence — because "we are not doing this one, and here is why" is precisely
+    what an operator watching an import wants to see, and omitting the row makes the archive's
+    contents and the progress list disagree for no stated reason.
+    """
+    plan: list[ComponentEntry] = []
+    for component in preview.components if preview else ():
+        entry = ComponentEntry(name=component.name, kind=component.kind, count=component.records)
+        if component.verdict == "refused":
+            entry.state = "skipped"
+            entry.reason = component.detail
+        plan.append(entry)
+    # The preview names a files component only when the archive carries file members, but the
+    # apply walks the files step unconditionally. Without this the row would be missing from
+    # the seed and `Progress.begin` would append it when it starts — i.e. *after* the two
+    # rebuild rows below — so an archive from a tenant with an empty file space would show its
+    # steps out of order. Seed it here instead, in the order the apply actually walks.
+    if not any(entry.kind == "files" for entry in plan):
+        plan.append(ComponentEntry(name=FILES_COMPONENT, kind="files"))
+    plan.append(ComponentEntry(name=RESCAN_COMPONENT, kind="rebuild"))
+    plan.append(ComponentEntry(name=REEMBED_COMPONENT, kind="rebuild"))
+    return plan
+
+
+def _mark(entry: ComponentEntry, result: ImportComponentResult) -> None:
+    """Fold one component's result back onto its progress row.
+
+    ``count`` becomes rows *touched* — created plus updated — rather than rows read: the
+    preview's ``records`` already showed how many the archive holds, so repeating it here
+    would answer a question nobody has, while "how many of them changed anything" is the one
+    the operator is actually watching for.
+    """
+    entry.state = result.state
+    entry.count = result.created + result.updated
+    entry.reason = result.reason or (result.warnings[0] if result.warnings else None)
+    entry.error = result.error
 
 
 def _line(payload: dict[str, Any]) -> bytes:

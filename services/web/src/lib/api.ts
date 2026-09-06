@@ -75,6 +75,7 @@ import {
 } from "@/lib/contracts";
 import { epFetch } from "@/lib/http";
 import { parseFrame, sseRequest } from "@/lib/sse";
+import { useConnection } from "@/stores/connection";
 
 export class ApiError extends Error {
   constructor(
@@ -114,6 +115,87 @@ async function request<T>(
     throw new ApiError(response.status, detail);
   }
   return schema.parse(await response.json());
+}
+
+/** The exact path the proxy's upload-size exemption matches — no trailing slash, no query. */
+const PORTABILITY_IMPORT_PATH = "/platform/v1/portability/imports";
+
+/** `epFetch`'s connectivity evidence, for the one request that cannot go through it (#893).
+ *
+ *  Every `/platform` call doubles as a reachability probe (#494, #791), and the archive upload
+ *  is exactly the call most likely to be the first to notice a box that has gone away. Losing
+ *  that evidence because the request needed upload progress would be a silent regression in a
+ *  feature that has nothing to do with portability, so it is reproduced here rather than
+ *  forgotten. */
+function uploadEvidence(status: number | null): void {
+  const connection = useConnection.getState();
+  if (status === null) {
+    connection.reportUnreachable({ method: "POST", path: PORTABILITY_IMPORT_PATH, kind: "TypeError" });
+  } else if (status === 502 || status === 504) {
+    connection.reportUnreachable({
+      method: "POST",
+      path: PORTABILITY_IMPORT_PATH,
+      kind: status === 502 ? "502" : "504",
+    });
+  } else {
+    connection.reportReachable();
+  }
+}
+
+/** POST the archive over XHR so the browser can report how far the body has got.
+ *
+ *  `onProgress` receives a 0–1 fraction, or `null` for a body whose length the browser will
+ *  not commit to (`lengthComputable: false`) — a real state, and one the card has to render as
+ *  "uploading" rather than as 0%. It is called once more with `1` when the body is away, so
+ *  the bar completes before the core's read of a multi-gigabyte tar begins. */
+function uploadArchive(
+  file: File,
+  onProgress?: (fraction: number | null) => void,
+): Promise<PortabilityImportJob> {
+  const form = new FormData();
+  form.append("file", file);
+  return new Promise<PortabilityImportJob>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", PORTABILITY_IMPORT_PATH);
+    xhr.upload?.addEventListener("progress", (event: ProgressEvent) => {
+      onProgress?.(event.lengthComputable && event.total > 0 ? event.loaded / event.total : null);
+    });
+    xhr.upload?.addEventListener("load", () => onProgress?.(1));
+    xhr.addEventListener("load", () => {
+      uploadEvidence(xhr.status);
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(PortabilityImportJob.parse(JSON.parse(xhr.responseText) as unknown));
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+        return;
+      }
+      // Identical taxonomy to the `fetch` path it replaced (#887): the core answers JSON with
+      // a `detail`; anything else was written by whatever is standing in front of it.
+      let detail: string | null = null;
+      try {
+        const value = (JSON.parse(xhr.responseText) as { detail?: unknown }).detail;
+        detail = typeof value === "string" ? value : null;
+      } catch {
+        /* non-JSON error body — not the core's */
+      }
+      reject(
+        detail === null
+          ? new ProxyError(xhr.status, `HTTP ${xhr.status}`)
+          : new ApiError(xhr.status, detail),
+      );
+    });
+    // A connection that died mid-body — the shape a front proxy's size cap produces. The card
+    // names it as "never reached the core", which is what a bare fetch TypeError also meant.
+    xhr.addEventListener("error", () => {
+      uploadEvidence(null);
+      reject(new TypeError("Failed to fetch"));
+    });
+    xhr.addEventListener("abort", () => reject(new TypeError("upload aborted")));
+    xhr.addEventListener("timeout", () => reject(new TypeError("upload timed out")));
+    xhr.send(form);
+  });
 }
 
 export const api = {
@@ -989,27 +1071,18 @@ export const api = {
   // core's JSON is a `ProxyError` (#887): a proxy's own HTML 413 has no detail to show, and
   // falling back to `statusText` would print "Request Entity Too Large" — or, over HTTP/2,
   // nothing at all — for a failure the core never saw.
-  uploadPortabilityArchive: async (file: File): Promise<PortabilityImportJob> => {
-    const form = new FormData();
-    form.append("file", file);
-    const response = await epFetch("/platform/v1/portability/imports", {
-      method: "POST",
-      body: form,
-    });
-    if (!response.ok) {
-      let detail: string | null = null;
-      try {
-        const body: unknown = await response.json();
-        const value = (body as { detail?: unknown }).detail;
-        detail = typeof value === "string" ? value : null;
-      } catch {
-        /* non-JSON error body — not the core's */
-      }
-      if (detail === null) throw new ProxyError(response.status, `HTTP ${response.status}`);
-      throw new ApiError(response.status, detail);
-    }
-    return PortabilityImportJob.parse(await response.json());
-  },
+  //
+  // **The one call in the app that is not `fetch`** (#893). A tenant archive is routinely
+  // gigabytes, and `fetch` has no upload-progress event at all — the request is opaque until
+  // the response arrives, so a ten-minute upload is indistinguishable from a hung one. XHR
+  // still reports `upload.progress`, so this one request uses it and everything else keeps
+  // the shared helper. The error taxonomy above is reproduced exactly, and so is `epFetch`'s
+  // connectivity evidence (see `uploadEvidence`), because dropping either would trade one
+  // real failure mode for another.
+  uploadPortabilityArchive: (
+    file: File,
+    onProgress?: (fraction: number | null) => void,
+  ): Promise<PortabilityImportJob> => uploadArchive(file, onProgress),
   applyPortabilityImport: (jobId: string) =>
     request(
       PortabilityImportJob,

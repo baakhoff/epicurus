@@ -12,6 +12,8 @@ disk dies; this is the path when a person moves house.
 * :mod:`.jobs` — the durable, tenant-scoped job rows a page reload can find again.
 * :mod:`.secrets` — what the source holds in OpenBao that the archive deliberately does not:
   names only, the modules' own credentials included.
+* :mod:`.embedding` — whether this installation can actually re-embed what an import lands,
+  asked before the fan-out rather than discovered from seven parked module jobs.
 * :mod:`.service` — the orchestrator: fan out, assemble, preview, apply, rebuild.
 * :mod:`.routes` — ``/platform/v1/portability``.
 """

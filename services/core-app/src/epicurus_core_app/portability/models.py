@@ -52,8 +52,14 @@ CORE_MEMBER_PREFIX = "core/"
 MODULE_MEMBER_PREFIX = "modules/"
 FILES_MEMBER_PREFIX = "files/"
 
-ComponentKind = Literal["core", "module", "files"]
-"""Which half of the archive a component belongs to."""
+ComponentKind = Literal["core", "module", "files", "rebuild"]
+"""Which half of the archive a component belongs to.
+
+``rebuild`` is the exception, and appears only in an **import**'s progress (#893): the file
+rescan and the re-embed fan-out are work the apply does that the archive deliberately does
+not contain. They are steps the operator waits on exactly like a module, so they are rows in
+the same list rather than a second vocabulary — an export never emits one.
+"""
 
 ComponentState = Literal["pending", "running", "included", "skipped", "failed"]
 """Where a component got to.
@@ -282,6 +288,17 @@ class ImportReportView(BaseModel):
     rescan_forced: bool = False
     reembed: list[dict[str, str]] = Field(default_factory=list)
     reembed_error: str | None = None
+    # The embedding model the re-embed fan-out actually resolves to, and — when this
+    # installation cannot serve it — the plain sentence saying so (#893).
+    #
+    # Asking every module to re-embed against a model that is not installed is not an error
+    # the fan-out can report: each module accepts the job, retries, and parks in ``error``
+    # minutes later, out of sight of the report. So the core checks *before* it asks and
+    # writes the finding down here. ``embedding_note`` is present only when a re-embed
+    # cannot succeed; the card renders that sentence verbatim, because deciding what a
+    # missing embedding model means is the core's job, not the shell's (ADR-0018).
+    embedding_model: str | None = None
+    embedding_note: str | None = None
     # Repeated from the source manifest so the operator sees it at the moment it matters.
     reenter_secrets: SecretsInventory = Field(default_factory=SecretsInventory)
 
@@ -293,6 +310,12 @@ class ImportJobView(BaseModel):
     status: Literal["staged", "running", "done", "failed"]
     created_at: str
     updated_at: str
+    # The same ``progress`` the export job carries, for the same reason (#893): an apply is
+    # a fan-out over sets, modules, the file space and two rebuilds, and it used to show the
+    # operator one undifferentiated spinner from the first record to the last. Seeded from
+    # the preview the moment Apply is pressed — a progress display that grows a row at a
+    # time cannot say how far along it is — and then ticked over by the job itself.
+    progress: list[ComponentEntry] = Field(default_factory=list)
     preview: ImportPreview | None = None
     report: ImportReportView | None = None
     error: str | None = None

@@ -205,7 +205,7 @@ land in a bucket nothing can see. So the module implements both halves of the
 | Kind | Stable id | What travels |
 | --- | --- | --- |
 | `file` | the object **path** (`uploads/a1-scan.pdf`) — the natural key, unique per tenant, and the same id its blob uses | `name` · `size` · `mtime` |
-| `folder` | the folder **path** (`uploads`) | `name` |
+| `folder` | the folder **path** (`uploads`) | `name` · `size` · `mtime` — the same three as a file: the exporter builds one record shape from the index row it reads, and a folder's row carries all three (a directory's `size`/`mtime` are simply whatever the index holds for it) |
 | *blob* | the same object path as the `file` record it belongs to | the object's bytes, with the `content_type` MinIO holds them under |
 
 Folders travel as records of their own rather than being re-derived from file paths on import:

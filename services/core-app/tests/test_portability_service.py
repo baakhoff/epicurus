@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -31,16 +32,25 @@ from epicurus_core.files import FileStore, LocalFileStore
 from epicurus_core_app.modules import ModuleSnapshot, ModuleStatus
 from epicurus_core_app.portability.archive import ArchiveReader, sanitize_member
 from epicurus_core_app.portability.core_data import CORE_SETS
+from epicurus_core_app.portability.embedding import EmbeddingProbe, embedding_status
 from epicurus_core_app.portability.jobs import PortabilityJobStore
 from epicurus_core_app.portability.models import (
     PORTABILITY_FORMAT_VERSION,
     ArchiveManifest,
+    ComponentEntry,
+    ImportComponentPreview,
     ImportPreview,
     ImportReportView,
     SecretsInventory,
 )
 from epicurus_core_app.portability.secrets import collect_module_secrets
-from epicurus_core_app.portability.service import PortabilityService
+from epicurus_core_app.portability.service import (
+    FILES_COMPONENT,
+    REEMBED_COMPONENT,
+    RESCAN_COMPONENT,
+    PortabilityService,
+    _apply_plan,
+)
 
 TENANT = "local"
 WHEN = datetime(2026, 9, 4, 9, 0, 0, tzinfo=UTC)
@@ -212,6 +222,7 @@ def _service(
     facts: FakeFacts | None = None,
     rescans: list[tuple[bool, str | None]] | None = None,
     reembeds: list[dict[str, str]] | None = None,
+    embedding_probe: EmbeddingProbe | None = None,
     max_file_bytes: int = 0,
 ) -> TestService:
     async def rescan(force: bool = False, tenant: str | None = None) -> int:
@@ -237,6 +248,7 @@ def _service(
         secrets_inventory=_secrets,
         rescan=rescan,
         reembed=reembed,
+        embedding_probe=embedding_probe,
         max_file_bytes=max_file_bytes,
     )
 
@@ -790,6 +802,246 @@ async def test_a_refused_module_is_skipped_while_the_rest_of_the_archive_applies
     by_name = {c.name: c for c in report.components}
     assert by_name["calendar"].state == "skipped"
     assert by_name["conversations"].created == 1  # the rest landed
+
+
+# ── apply progress (#893) ─────────────────────────────────────────────────────
+
+
+async def test_an_apply_reports_progress_for_every_step_it_takes(tmp_path: Path) -> None:
+    """Sets → modules → files → the two rebuilds, each landing on its own row.
+
+    The whole point is that the operator can see *which* part of a multi-gigabyte apply is
+    running; a plan that is only complete at the end would be a receipt, not progress. So this
+    checks the seed — before the job has done anything — as well as the settled result.
+    """
+    engine = await _engine(tmp_path)
+    await _seed_core(engine)
+    service = _service(
+        tmp_path,
+        engine,
+        snaps=[_snapshot("calendar")],
+        bases={"calendar": "http://calendar:8080"},
+        streams={
+            "http://calendar:8080": _module_stream(
+                "calendar/1", [{"kind": "event", "id": "e-1", "data": {"title": "lunch"}}]
+            )
+        },
+        facts=FakeFacts(["a fact"]),
+    )
+    await service._jobs.init()
+    await service._files.ensure_tenant_root(tenant=TENANT)
+    await _write_file(service._files, "notes/hello.md", b"# hello")
+    try:
+        archive = await _export_archive(service)
+        job = await _upload(service, archive)
+        assert job.progress == []  # a staged job has taken no step
+
+        started = await service.start_apply(tenant=TENANT, job_id=job.id)
+        assert started is not None
+        seeded = [ComponentEntry.model_validate(e) for e in started.progress]
+        # Complete and pending from the first frame, in the order the apply walks it.
+        assert all(e.state == "pending" for e in seeded)
+        assert {"conversations", "memory", "calendar", "files"} <= {e.name for e in seeded}
+        assert [e.name for e in seeded[-2:]] == ["file index", "re-embed"]
+        assert [e.kind for e in seeded[-2:]] == ["rebuild", "rebuild"]
+
+        done = await _settle(service, TENANT, job.id, "running")
+        assert done.status == "done", done.error
+        final = {e["name"]: ComponentEntry.model_validate(e) for e in done.progress}
+        assert final["calendar"].state == "included"
+        assert final["calendar"].count == 1  # rows *touched*, not rows read
+        assert final["files"].state == "included"
+        assert final["file index"].state == "included"
+        assert final["file index"].count == 7  # what the fixture's rescan reports
+        assert final["re-embed"].state == "included"
+        assert final["re-embed"].count == 1  # one module answered the fan-out
+        assert not any(e.state in ("pending", "running") for e in final.values())
+    finally:
+        await engine.dispose()
+
+
+def _bare_preview(*components: ImportComponentPreview) -> ImportPreview:
+    """A preview with nothing real behind it — enough to seed an apply plan from."""
+    return ImportPreview(
+        manifest=ArchiveManifest(
+            tenant=TENANT,
+            created_at="2026-09-06T00:00:00Z",
+            core_app_version="0.122.0",
+            epicurus_core_version="0.37.0",
+        ),
+        components=list(components),
+    )
+
+
+def test_the_files_step_is_seeded_even_when_the_archive_carries_no_files() -> None:
+    """An empty file space must not push the files row *below* the two rebuild rows.
+
+    ``preview_import`` names a files component only when the archive has file members, but
+    the apply walks the files step unconditionally — so a seed built from the preview alone
+    would miss the row, and ``Progress.begin`` would append it at the moment it starts, i.e.
+    after ``file index`` and ``re-embed`` had already been seeded. The operator would watch
+    the steps run in one order and the list render them in another.
+    """
+    plan = _apply_plan(_bare_preview(ImportComponentPreview(name="calendar", kind="module")))
+    assert [(e.kind, e.name) for e in plan] == [
+        ("module", "calendar"),
+        ("files", FILES_COMPONENT),
+        ("rebuild", RESCAN_COMPONENT),
+        ("rebuild", REEMBED_COMPONENT),
+    ]
+    assert all(e.state == "pending" for e in plan)
+
+
+def test_an_archive_that_carries_files_is_not_given_a_second_files_row() -> None:
+    """The preview's own row wins — it is the one carrying the record count to display."""
+    plan = _apply_plan(
+        _bare_preview(ImportComponentPreview(name="files", kind="files", records=12))
+    )
+    assert [e.kind for e in plan].count("files") == 1
+    assert plan[0].count == 12
+
+
+async def test_a_refused_component_is_listed_as_skipped_with_the_previews_own_words(
+    tmp_path: Path,
+) -> None:
+    """Not omitted: "we are not doing this one, and why" is what the operator came to read."""
+    engine = await _engine(tmp_path)
+    await _seed_core(engine)
+    exporter = _service(
+        tmp_path / "src",
+        engine,
+        snaps=[_snapshot("calendar")],
+        bases={"calendar": "http://calendar:8080"},
+        streams={
+            "http://calendar:8080": _module_stream(
+                "calendar/1", [{"kind": "event", "id": "e-1", "data": {}}]
+            )
+        },
+    )
+    await exporter._jobs.init()
+    await exporter._files.ensure_tenant_root(tenant=TENANT)
+    try:
+        archive = await _export_archive(exporter)
+        target = _service(tmp_path / "dst", engine)  # calendar is not installed here
+        await target._files.ensure_tenant_root(tenant=TENANT)
+        job = await _upload(target, archive)
+        started = await target.start_apply(tenant=TENANT, job_id=job.id)
+        assert started is not None
+        seeded = {e["name"]: ComponentEntry.model_validate(e) for e in started.progress}
+        assert seeded["calendar"].state == "skipped"
+        assert seeded["calendar"].reason is not None
+        assert "not installed" in seeded["calendar"].reason
+
+        done = await _settle(target, TENANT, job.id, "running")
+        assert done.status == "done", done.error
+        final = {e["name"]: ComponentEntry.model_validate(e) for e in done.progress}
+        assert final["calendar"].state == "skipped"
+    finally:
+        await engine.dispose()
+
+
+# ── the embedding-model check (#893) ──────────────────────────────────────────
+
+
+class FakeGateway:
+    """The three gateway calls the probe makes, and nothing else."""
+
+    def __init__(
+        self,
+        *,
+        embed_model: str = "nomic-embed-text",
+        installed: Sequence[str] = (),
+        provider_keys: Sequence[tuple[str, str]] = (),
+        fail: bool = False,
+    ) -> None:
+        self._embed_model = embed_model
+        self._installed = list(installed)
+        self._provider_keys = list(provider_keys)
+        self._fail = fail
+
+    async def effective_embed_default(self, tenant_id: str | None = None) -> str:
+        return self._embed_model
+
+    async def models(
+        self, tenant_id: str | None = None, *, with_capabilities: bool = False
+    ) -> list[Any]:
+        if self._fail:
+            raise RuntimeError("ollama is not up")
+        return [SimpleNamespace(name=name) for name in self._installed]
+
+    async def providers(self, tenant_id: str | None = None) -> list[Any]:
+        return [SimpleNamespace(alias=a, key_state=s) for a, s in self._provider_keys]
+
+
+async def test_no_local_embedding_model_is_said_plainly_in_the_report(tmp_path: Path) -> None:
+    """The condition the fan-out cannot report, because every module accepts and fails later."""
+    engine = await _engine(tmp_path)
+    await _seed_core(engine)
+    service = _service(tmp_path, engine, embedding_probe=FakeGateway(installed=["llama3.2:latest"]))
+    await service._jobs.init()
+    await service._files.ensure_tenant_root(tenant=TENANT)
+    try:
+        archive = await _export_archive(service)
+        job = await _upload(service, archive)
+        await service.start_apply(tenant=TENANT, job_id=job.id)
+        done = await _settle(service, TENANT, job.id, "running")
+        report = ImportReportView.model_validate(done.report)
+    finally:
+        await engine.dispose()
+
+    assert done.status == "done", done.error
+    assert report.embedding_model == "nomic-embed-text"
+    assert report.embedding_note is not None
+    assert "No embedding model is installed" in report.embedding_note
+    # Words to act on, and the reassurance that the data itself is fine.
+    assert "Re-embed everything" in report.embedding_note
+    assert "imported data is unharmed" in report.embedding_note
+    # The fan-out still ran: a probe is a warning, never a veto over the operator's rebuild.
+    assert report.reembed == [{"module": "knowledge", "status": "started"}]
+    # And the progress row carries the same sentence, where the operator is already looking.
+    reembed_row = next(e for e in done.progress if e["name"] == "re-embed")
+    assert reembed_row["reason"] == report.embedding_note
+
+
+@pytest.mark.parametrize(
+    ("gateway", "expected"),
+    [
+        # Pulled under the runtime's own `:latest` tag — the same loose match readiness makes.
+        (FakeGateway(installed=["nomic-embed-text:latest"]), None),
+        # A hosted embedding model whose provider holds a key (#865).
+        (
+            FakeGateway(
+                embed_model="gpt/text-embedding-3-small", provider_keys=[("gpt", "present")]
+            ),
+            None,
+        ),
+        # The same model with no key — a different cause, the same symptom.
+        (
+            FakeGateway(
+                embed_model="gpt/text-embedding-3-small", provider_keys=[("gpt", "missing")]
+            ),
+            "no API key here",
+        ),
+        # A vault that did not answer is *not* "there is no key" (#728) — say which it is.
+        (
+            FakeGateway(
+                embed_model="gpt/text-embedding-3-small", provider_keys=[("gpt", "unavailable")]
+            ),
+            "The vault did not answer",
+        ),
+        # A runtime that is down cannot prove a model absent, and must not claim it.
+        (FakeGateway(fail=True), "could not be reached"),
+    ],
+)
+async def test_the_embedding_probe_distinguishes_its_answers(
+    gateway: FakeGateway, expected: str | None
+) -> None:
+    model, note = await embedding_status(gateway, tenant=TENANT)
+    assert model is not None
+    if expected is None:
+        assert note is None
+    else:
+        assert note is not None and expected in note
 
 
 # ── jobs & staging ────────────────────────────────────────────────────────────

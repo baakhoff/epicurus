@@ -158,7 +158,14 @@ def create_portability_router(
     async def apply_import(
         job_id: str, tenant_id: str | None = Query(default=None)
     ) -> ImportJobView:
-        """Apply a staged import in the background. Poll the job for the final report."""
+        """Apply a staged import in the background. Poll the job for the final report.
+
+        **409 on a second apply.** The staged→running transition is the guard: a job that has
+        already started is not ``staged`` any more, so a duplicate press is refused rather
+        than doubling the work. It is a backstop, not the user experience — the answer here
+        already carries ``status: running`` and the seeded ``progress``, so the shell has what
+        it needs to make the second press impossible instead of merely futile (#893).
+        """
         tenant = _tenant(tenant_id)
         job = await _job(tenant, job_id, "import")
         if job.status != "staged":
@@ -224,6 +231,7 @@ def _import_view(job: PortabilityJob) -> ImportJobView:
         status=status,  # type: ignore[arg-type]
         created_at=job.created_at.isoformat(),
         updated_at=job.updated_at.isoformat(),
+        progress=[ComponentEntry.model_validate(entry) for entry in job.progress],
         preview=ImportPreview.model_validate(job.preview) if job.preview else None,
         report=ImportReportView.model_validate(job.report) if job.report else None,
         error=job.error,

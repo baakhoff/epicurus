@@ -92,7 +92,29 @@ preview:
 Only if the whole archive was written in a **format version** this build does not know is
 the import refused outright — there is nothing useful to salvage from guessing.
 
-Press **Apply import** when the preview looks right.
+While the archive is on its way up, the card shows **how far its bytes have got** — a real
+percentage, not a busy button, because a gigabyte archive over a home connection takes long
+enough that "still going" and "hung" are otherwise the same picture. (A browser that will not
+commit to a total says *Uploading…* instead of inventing a number.)
+
+Press **Apply import** when the preview looks right. Once pressed it is gone: an apply runs
+once per upload, and the card will not offer a second press while the first is in flight. To
+apply the same archive again, upload it again.
+
+### Watching an apply
+
+The apply shows its work the way an export does — one row per step, ticking over in the order
+it takes them:
+
+1. each **core data set** (conversations, memory, preferences, automations, …);
+2. each **module**, or the reason it was skipped;
+3. the **file space**;
+4. **file index** — the forced re-scan;
+5. **re-embed** — the fan-out to every module.
+
+A component the preview refused is listed too, as *skipped*, with the reason. The whole list
+is there from the moment you press Apply, so it says how far along you are rather than
+growing a row at a time.
 
 ### Importing is additive
 
@@ -116,7 +138,15 @@ import runs for you:
 
 1. a **forced re-scan** of your file space, rebuilding the Files index and search;
 2. the **re-embed** fan-out, asking each module to rebuild its vectors with *this*
-   installation's embedding model.
+   installation's embedding model — which the report names.
+
+**If this machine has no embedding model, the report says so, in as many words.** It is the
+commonest way a clean import still ends up feeling broken: your rows and files are all there,
+every module cheerfully accepts the re-embed, and half an hour later each one has quietly
+given up because the model it was told to use is not installed. The report checks first and
+tells you plainly — go to **Models**, pull an embedding model (or enter the API key for a
+hosted one), then run **Re-embed everything** from Settings. Nothing is lost in the meantime;
+only search over the imported data is missing until you do.
 
 Then finish the move by hand: **re-enter the API keys**, **reconnect the accounts**, and
 **reconnect the chat bridges** the report names (Settings → Chat bridges). Nothing else will
@@ -129,7 +159,9 @@ do it for you — that is the point of keeping them out of the archive.
 3. **Choose an archive**, read the preview, **Apply import**.
 4. Re-enter the API keys, reconnect the accounts, and reconnect the chat bridges the report
    lists.
-5. Give the re-embed a few minutes before judging search.
+5. If the report says there is no embedding model here, pull one on **Models** and run
+   **Re-embed everything**.
+6. Give the re-embed a few minutes before judging search.
 
 ## Limits and knobs
 

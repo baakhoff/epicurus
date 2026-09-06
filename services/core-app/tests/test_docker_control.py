@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 
-from epicurus_core_app.docker_control import DockerAvailability, DockerController, DockerError
+from epicurus_core_app.container_control import ContainerAvailability, ContainerControlError
+from epicurus_core_app.docker_control import DockerController
 
 _SERVICE = "com.docker.compose.service"
 _PROJECT = "com.docker.compose.project"
@@ -92,7 +93,7 @@ def test_remove_module_with_no_container_is_noop() -> None:
 def test_remove_protected_service_raises() -> None:
     for name in ("core-app", "web", "postgres", "nats", "openbao"):
         ctrl = _controller([_FakeContainer(name)])
-        with pytest.raises(DockerError, match="protected"):
+        with pytest.raises(ContainerControlError, match="protected"):
             ctrl.remove_module(name)
 
 
@@ -126,7 +127,7 @@ def test_docker_failure_is_wrapped() -> None:
         containers = _BoomContainers()
 
     ctrl = DockerController(_BoomClient(), project="epicurus")
-    with pytest.raises(DockerError, match="failed to remove"):
+    with pytest.raises(ContainerControlError, match="failed to remove"):
         ctrl.remove_module("tasks")
 
 
@@ -150,7 +151,7 @@ def test_restart_non_allowlisted_raises() -> None:
     ctrl = _controller([_FakeContainer("core-app"), _FakeContainer("tasks")])
     # Only RESTARTABLE names are permitted — core/modules/data-plane are all refused.
     for name in ("core-app", "tasks", "postgres", "web"):
-        with pytest.raises(DockerError, match="not restartable"):
+        with pytest.raises(ContainerControlError, match="not restartable"):
             ctrl.restart_service(name)
 
 
@@ -187,6 +188,6 @@ def test_from_env_succeeds_when_the_socket_is_reachable(monkeypatch: pytest.Monk
     monkeypatch.setattr(docker_sdk, "from_env", lambda: _FakeSdkClient())
     monkeypatch.setenv("COMPOSE_PROJECT_NAME", "epicurus-test")
     result = DockerController.from_env()
-    assert isinstance(result, DockerAvailability)
+    assert isinstance(result, ContainerAvailability)
     assert result.controller is not None
     assert result.reason is None

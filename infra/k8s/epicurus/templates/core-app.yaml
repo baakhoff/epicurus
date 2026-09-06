@@ -1,0 +1,306 @@
+{{- $files := .Values.core.persistence -}}
+{{- $localFiles := eq .Values.core.filesBackend "local" -}}
+{{- $baoTokenSecret := include "epicurus.openbaoTokenSecret" . -}}
+{{- /* Without the chart's RBAC and without an operator-supplied account, the pod
+       runs on the namespace default — the seam then has no permissions, which is
+       exactly what `core.containerRuntime.kind: none` is for. */}}
+{{- $sa := "default" -}}
+{{- if .Values.core.containerRuntime.rbac.create -}}
+{{- $sa = "core-app" -}}
+{{- end -}}
+{{- if .Values.core.containerRuntime.rbac.serviceAccountName -}}
+{{- $sa = .Values.core.containerRuntime.rbac.serviceAccountName -}}
+{{- end -}}
+{{- if and $localFiles $files.enabled (not $files.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: core-app-files
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "core-app") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    - {{ $files.accessMode }}
+  resources:
+    requests:
+      storage: {{ $files.size }}
+  {{- include "epicurus.storageClass" (dict "ctx" $ "class" $files.storageClass) | nindent 2 }}
+---
+{{- end }}
+{{- if .Values.core.containerRuntime.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: core-app
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "core-app") | nindent 4 }}
+---
+{{- /*
+  The Kubernetes half of the container-runtime seam (#891). No Docker daemon in a
+  cluster, so confirmed module removal (ADR-0028) scales the module's Deployment to
+  zero and the Ollama KV-cache apply (#307) rollout-restarts its StatefulSet. That is
+  the whole permission set: read the workloads, patch a scale, patch a pod template.
+  Namespace-scoped on purpose — the core can never touch another namespace, and it
+  can create or delete nothing.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: core-app-runtime
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "core-app") | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale", "statefulsets"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: core-app-runtime
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "core-app") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: core-app-runtime
+subjects:
+  - kind: ServiceAccount
+    name: core-app
+    namespace: {{ .Release.Namespace }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: core-app
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "core-app") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "core-app") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: core-app
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "core-app") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # A singleton in v1 (the epic's decision): the local file backend's inotify
+  # watcher, the in-process live-run registry and the portability staging dir are
+  # single-writer, and the file PVC is ReadWriteOnce. Recreate, not RollingUpdate,
+  # so two replicas never hold the same RWO volume during an upgrade.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "core-app") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "core-app") | nindent 8 }}
+        epicurus.io/metrics: "true"
+      {{- /* The operator's own annotations win: sprig `merge` gives precedence to the
+       first map, so podAnnotations comes first and can turn scraping off. */}}
+{{- $podAnnotations := merge (dict) .Values.core.podAnnotations (include "epicurus.metricsAnnotations" $ | fromYaml) }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      serviceAccountName: {{ $sa }}
+      {{- with .Values.core.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and $baoTokenSecret .Values.openbao.enabled }}
+      initContainers:
+        {{- include "epicurus.waitForOpenbaoToken" $ | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: core-app
+          image: {{ include "epicurus.image" (dict "ctx" $ "name" "core-app" "override" .Values.core.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.core.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            {{- include "epicurus.commonEnv" (dict "ctx" $ "role" "core") | nindent 12 }}
+            # POSTGRES_PASSWORD must precede DATABASE_URL: the kubelet expands
+            # $(VAR) only from env declared earlier in this same list.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: {{ include "epicurus.databaseUrl" $ | quote }}
+            - name: QDRANT_URL
+              value: {{ include "epicurus.qdrantUrl" $ | quote }}
+            - name: OLLAMA_URL
+              value: {{ include "epicurus.ollamaUrl" $ | quote }}
+            - name: OPENBAO_URL
+              value: {{ include "epicurus.openbaoUrl" $ | quote }}
+            {{- if $baoTokenSecret }}
+            - name: OPENBAO_TOKEN_FILE
+              value: /var/run/secrets/epicurus/openbao-token
+            {{- end }}
+            - name: MODULE_URLS
+              value: {{ include "epicurus.moduleUrls" $ | quote }}
+            - name: ATTACHMENT_SINK_URL
+              value: {{ include "epicurus.attachmentSinkUrl" $ | quote }}
+            - name: MEMORY_EMBED_MODEL
+              value: {{ .Values.core.memoryEmbedModel | quote }}
+            - name: LLM_DEFAULT_MODEL
+              value: {{ .Values.core.llm.defaultModel | quote }}
+            - name: LLM_KEEP_ALIVE
+              value: {{ .Values.core.llm.keepAlive | quote }}
+            - name: LLM_FALLBACKS
+              value: {{ .Values.core.llm.fallbacks | quote }}
+            - name: LLM_NUM_RETRIES
+              value: {{ .Values.core.llm.numRetries | quote }}
+            - name: LLM_TIMEOUT
+              value: {{ .Values.core.llm.timeout | quote }}
+            - name: LLM_TEMPERATURE
+              value: {{ .Values.core.llm.temperature | quote }}
+            - name: LLM_TOP_P
+              value: {{ .Values.core.llm.topP | quote }}
+            - name: LLM_NUM_CTX
+              value: {{ .Values.core.llm.numCtx | quote }}
+            - name: LLM_BOOTSTRAP_MODELS
+              value: {{ .Values.core.llm.bootstrapModels | quote }}
+            - name: OAUTH_REDIRECT_BASE_URL
+              value: {{ include "epicurus.oauthRedirectBaseUrl" $ | quote }}
+            - name: OAUTH_STATE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: OAUTH_STATE_SECRET
+            - name: FILES_BACKEND
+              value: {{ .Values.core.filesBackend | quote }}
+            {{- if $localFiles }}
+            - name: FILES_ROOT
+              value: /data
+            {{- else }}
+            - name: FILES_S3_URL
+              value: {{ include "epicurus.minioUrl" $ | quote }}
+            - name: FILES_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: MINIO_ROOT_USER
+            - name: FILES_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: MINIO_ROOT_PASSWORD
+            {{- end }}
+            # The container-runtime seam (#891): which implementation the core
+            # selects, and the namespace it may act in (downward API — never
+            # guessed, never hardcoded).
+            - name: CONTAINER_RUNTIME
+              value: {{ .Values.core.containerRuntime.kind | quote }}
+            - name: KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # What this deployment calls its own build, for `/platform/v1/info`'s
+            # `release_track` (#893). The compose fragment passes the operator's
+            # own EPICURUS_VERSION through; here the honest answer is the image
+            # tag the pod is actually running.
+            - name: EPICURUS_VERSION
+              value: {{ default .Chart.AppVersion .Values.image.tag | quote }}
+            {{- range $k, $v := .Values.core.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- if $baoTokenSecret }}
+            {{- include "epicurus.openbaoTokenMount" $ | nindent 12 }}
+            {{- end }}
+            {{- if $localFiles }}
+            - name: files
+              mountPath: /data
+            {{- end }}
+            # Where the core writes Ollama's start-up env file (#307). On compose
+            # this is a shared volume Ollama re-reads; in a cluster nothing else
+            # mounts it — see "Known limitations" in the Kubernetes docs.
+            - name: ollama-runtime
+              mountPath: /etc/epicurus
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- with .Values.core.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- if $baoTokenSecret }}
+        {{- include "epicurus.openbaoTokenVolume" $ | nindent 8 }}
+        {{- end }}
+        - name: ollama-runtime
+          emptyDir: {}
+        {{- if $localFiles }}
+        - name: files
+        {{- if $files.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default "core-app-files" $files.existingClaim }}
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+        {{- end }}
+      {{- with .Values.core.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.core.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.core.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

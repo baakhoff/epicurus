@@ -1,0 +1,151 @@
+{{- if .Values.qdrant.enabled }}
+{{- $p := .Values.qdrant.persistence }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "qdrant") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 6333
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: 6334
+      targetPort: grpc
+      protocol: TCP
+  selector:
+    {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "qdrant") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "qdrant") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  serviceName: qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "qdrant") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "qdrant") | nindent 8 }}
+    spec:
+      initContainers:
+        # The upgrade guard from compose's `qdrant-init` (#229), as an init
+        # container. qdrant panics on boot (exit 101) when the on-disk segment
+        # format predates the running server, and a crash-looping qdrant takes
+        # every dependent with it. The vectors are DERIVED data (knowledge
+        # re-embeds from the file space, memory re-embeds from Postgres), so a
+        # reset is safe and a background re-index repopulates.
+        - name: qdrant-init
+          image: {{ include "epicurus.thirdPartyImage" .Values.qdrant.initImage }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: QDRANT_TAG
+              value: {{ .Values.qdrant.image.tag | quote }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              STORAGE=/qdrant/storage
+              MARKER="$STORAGE/.epicurus_qdrant_version"
+              mkdir -p "$STORAGE"
+              if [ -f "$MARKER" ]; then
+                CURRENT="$(cat "$MARKER" 2>/dev/null || echo '')"
+                if [ "$CURRENT" = "$QDRANT_TAG" ]; then
+                  echo "qdrant-init: on-disk version '$CURRENT' matches '$QDRANT_TAG'; no action"
+                else
+                  echo "qdrant-init: on-disk version '$CURRENT' != '$QDRANT_TAG'; resetting derived vector store"
+                  find "$STORAGE" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+                  printf '%s' "$QDRANT_TAG" > "$MARKER"
+                fi
+              else
+                echo "qdrant-init: no version marker; stamping '$QDRANT_TAG' (no reset)"
+                printf '%s' "$QDRANT_TAG" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: data
+              mountPath: /qdrant/storage
+      containers:
+        - name: qdrant
+          image: {{ include "epicurus.thirdPartyImage" .Values.qdrant.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 6333
+              protocol: TCP
+            - name: grpc
+              containerPort: 6334
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /qdrant/storage
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          {{- with .Values.qdrant.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if or (not $p.enabled) $p.existingClaim }}
+      volumes:
+        - name: data
+        {{- if $p.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $p.existingClaim }}
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.qdrant.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.qdrant.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.qdrant.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and $p.enabled (not $p.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $p.size }}
+        {{- include "epicurus.storageClass" (dict "ctx" $ "class" $p.storageClass) | nindent 8 }}
+  {{- end }}
+{{- end }}

@@ -92,9 +92,9 @@ from epicurus_core_app.automations.store import (
     AutomationStore,
     KillSwitchStore,
 )
+from epicurus_core_app.container_control import select_controller
 from epicurus_core_app.core_events import CoreEventEmitter
 from epicurus_core_app.core_review import CorePages
-from epicurus_core_app.docker_control import DockerController
 from epicurus_core_app.event_log import EventIntake, EventLogStore, EventRetention
 from epicurus_core_app.event_log_routes import create_event_log_router
 from epicurus_core_app.file_index import FileIndex
@@ -478,14 +478,18 @@ def create_app() -> FastAPI:
         ephemeral=ephemeral_sessions,
     )
     mcp_host = McpHost(settings.module_mcp_urls)
-    # One tightly-scoped Docker handle (#127, ADR-0028): module removal for the registry, plus a
-    # restart-only path for Ollama's KV-cache apply (#307). Reaches docker-proxy-core by default
-    # (#708, ADR-0109) via DOCKER_HOST; the compose.docker-socket.yaml overlay points this at the
-    # raw socket instead (ADR-0099). If Docker is unreachable either way, that defers container
-    # teardown on removal to the next restart and leaves a KV-cache change unapplied until a
-    # manual restart; it never disables removal itself (ADR-0056/#382) or blocks startup.
-    docker_availability = DockerController.from_env()
-    docker = docker_availability.controller
+    # One tightly-scoped container handle (#127, ADR-0028, #891): module removal for the
+    # registry, plus a restart-only path for Ollama's KV-cache apply (#307). CONTAINER_RUNTIME
+    # picks the arm — under Compose that is Docker, reaching docker-proxy-core by default
+    # (#708, ADR-0109) via DOCKER_HOST (the compose.docker-socket.yaml overlay points it at the
+    # raw socket instead, ADR-0099); in a pod it is the Kubernetes API via the ServiceAccount.
+    # If no runtime is reachable, that defers container teardown on removal to the next restart
+    # and leaves a KV-cache change unapplied until a manual restart; it never disables removal
+    # itself (ADR-0056/#382) or blocks startup.
+    container_availability = select_controller(
+        settings.container_runtime, namespace=settings.kubernetes_namespace
+    )
+    docker = container_availability.controller
     registry = ModuleRegistry(
         settings.module_base_urls,
         mcp=mcp_host,
@@ -493,7 +497,7 @@ def create_app() -> FastAPI:
         tenant=settings.default_tenant_id,
         prefs=module_prefs,
         docker=docker,
-        docker_unavailable_reason=docker_availability.reason,
+        docker_unavailable_reason=container_availability.reason,
         core=core_pages,
         events=core_events,
     )

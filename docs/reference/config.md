@@ -117,6 +117,8 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `scheduled_turns_poll_interval_s` | `SCHEDULED_TURNS_POLL_INTERVAL_S` | `int` | `60` | How often the scheduled-turns poll loop checks for a due row (ADR-0092) — a plain poll, not one `sleep_until_hour` task per row, since rows are created/paused/deleted at runtime with independently configured hours. Keeps worst-case delivery lag under a minute without meaningfully polling Postgres. |
 | `automations_poll_interval_s` | `AUTOMATIONS_POLL_INTERVAL_S` | `int` | `60` | How often the automations loop drains the trigger queue (closing digest windows) and checks schedule triggers for due-ness (ADR-0105). A plain poll, for the same reason scheduled turns polled: rows are created/paused/deleted at runtime with independently configured hours, which a fixed set of sleep-until-hour tasks can't express. See [automations](automations.md). |
 | `events_retention_days` | `EVENTS_RETENTION_DAYS` | `int` | `30` | How long the core keeps a module event in its durable log (ADR-0103). The bus replays nothing, so the log is the copy of record and grows with the chattiest emitter. Days, not rows — the log answers "what happened recently", and an operator reasons in days. `0` or negative disables pruning entirely: keep everything, and mind the disk. See [events](events.md). |
+| `container_runtime` | `CONTAINER_RUNTIME` | `str` | `auto` | Which container runtime the core's one privileged path — module-container teardown and the Ollama KV-cache restart — talks to (#891): `auto`, `docker`, `kubernetes`, or `none`. `auto` picks `kubernetes` when `KUBERNETES_SERVICE_HOST` is set, else `docker` when `DOCKER_HOST` is set or `/var/run/docker.sock` exists, else `none` (which says so once at startup and defers teardown, never logging per call). Under Compose nothing changes. An unknown value warns and falls back to `auto` rather than failing startup. See [core-app § Container runtime](../services/core-app.md#container-runtime-891). |
+| `kubernetes_namespace` | `KUBERNETES_NAMESPACE` | `str` | `""` | Namespace the `kubernetes` runtime addresses its workloads in (the chart sets it from the downward API). Blank falls back to the pod's ServiceAccount `namespace` file; with neither, container control reports itself unavailable rather than guessing. Ignored by every other runtime. |
 | `events_prune_interval_s` | `EVENTS_PRUNE_INTERVAL_S` | `int` | `3600` | How often the event-log pruner sweeps. Retention is a window, not a deadline — an event lingering an extra hour past the cutoff costs nothing — so this is hourly rather than tight. |
 | `files_backend` | `FILES_BACKEND` | `str` | `local` | Core-owned file-space backend (ADR-0052): `local` (filesystem) or `s3` (MinIO/S3). See [file space](files.md). |
 | `files_root` | `FILES_ROOT` | `str` | `/data` | Local-backend base; the tenant file tree is `FILES_ROOT/<tenant>`. |
@@ -205,13 +207,24 @@ allow-list) is on the
 
 ## Docker-socket opt-in (#622, ADR-0099)
 
-Not a `CoreAppSettings` field — read directly by `services/core-app/docker-entrypoint.py`
+Only relevant to the `docker` container runtime (see `CONTAINER_RUNTIME` above). Not a
+`CoreAppSettings` field — read directly by `services/core-app/docker-entrypoint.py`
 (the container's root-run entrypoint) before the app process even starts, so it can't go
 through pydantic-settings like the rest of this page.
 
 | Env var | Default | Scope | Meaning |
 | --- | --- | --- | --- |
 | `DOCKER_GID` | unset | core-app entrypoint | Only relevant if you've layered `services/core-app/compose.docker-socket.yaml` — the raw-socket escape hatch from the default `docker-proxy-core` path (#708, ADR-0109). The host's docker-socket group id; when set, the entrypoint joins it (via `setgroups`, while still root) before dropping to the unprivileged app uid — the missing half of that overlay, which mounts `/var/run/docker.sock` but cannot by itself make it reachable by a non-root process. Unset (the default, and irrelevant unless you're using the overlay): module removal and the Ollama KV-cache restart apply immediately regardless, through the proxy (see [modules](modules.md#removing-a-module--tombstone-now-tear-the-container-down-out-of-band-127-382-adr-0028)). Find your host's value with `getent group docker \| cut -d: -f3` or `stat -c '%g' /var/run/docker.sock`. |
+
+## Web shell (nginx) — not a settings class
+
+Read by the `web` image's entrypoint when it renders `nginx.conf.template`, not by any
+pydantic model.
+
+| Env var | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `CORE_APP_URL` | `http://core-app:8080` | web | Where nginx proxies `/platform/`. |
+| `NGINX_RESOLVER` | the first `nameserver` in the container's `/etc/resolv.conf` | web | The DNS server nginx resolves `CORE_APP_URL`'s hostname with, at request time (#891). Derived at container start by `services/web/docker-entrypoint.d/05-epicurus-resolver.envsh`, so the same image works under Compose (Docker's embedded DNS, `127.0.0.11`) and in a Kubernetes pod (the cluster DNS service) with nothing configured; an IPv6 address is bracketed, and an unreadable `resolv.conf` falls back to `127.0.0.11`. Set it explicitly only to override. See [web § Resolving the core](../services/web.md#resolving-the-core-891). |
 
 ## Release track (#893)
 

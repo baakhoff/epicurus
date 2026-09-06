@@ -1,0 +1,37 @@
+#!/bin/sh
+# Derive nginx's DNS resolver from the container's own resolver (#891).
+#
+# The /platform/ proxy resolves the core's name *at request time* so nginx starts (and keeps
+# serving the UI) while the core is down or restarting — which means the config must name a
+# resolver, and there is no portable literal to hardcode: under Compose it is Docker's
+# embedded DNS (127.0.0.11), in a Kubernetes pod it is the cluster DNS service, and on a
+# plain host it is whatever the host resolves with. All three write it to /etc/resolv.conf,
+# so that is what we read; the operator can still override with NGINX_RESOLVER.
+#
+# Sourced (not executed) by the nginx image's entrypoint — hence the .envsh suffix and the
+# export, so the value reaches 20-envsubst-on-templates.sh, which renders it into the config.
+# NGINX_ENVSUBST_FILTER (set in the Dockerfile) keeps that substitution to this variable and
+# CORE_APP_URL, so nginx's own $host / $core / $proxy_add_x_forwarded_for survive untouched.
+#
+# RESOLV_CONF exists so the derivation can be exercised against a fixture
+# (tests/test_nginx_resolver.py) instead of only inside a running container.
+
+if [ -z "${NGINX_RESOLVER:-}" ]; then
+    _resolv="${RESOLV_CONF:-/etc/resolv.conf}"
+    _ns=""
+    if [ -r "$_resolv" ]; then
+        _ns=$(awk '$1 == "nameserver" { print $2; exit }' "$_resolv")
+    fi
+    case "$_ns" in
+        # No resolver to read (an empty or unreadable file): keep the Compose behaviour this
+        # image has always had rather than rendering a config nginx would refuse to load.
+        "") _ns="127.0.0.11" ;;
+        # An IPv6 literal must be bracketed in an nginx `resolver` directive; an address
+        # that already carries brackets is left alone.
+        \[*) ;;
+        *:*) _ns="[$_ns]" ;;
+    esac
+    NGINX_RESOLVER="$_ns"
+    unset _resolv _ns
+fi
+export NGINX_RESOLVER

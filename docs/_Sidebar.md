@@ -54,6 +54,7 @@
 - [Backup and restore](infrastructure/backup-and-restore.md)
 - [Qdrant (vector store + upgrades)](infrastructure/qdrant.md)
 - [NATS (authenticated bus)](infrastructure/nats.md)
+- [Kubernetes (Helm chart)](infrastructure/kubernetes.md)
 
 **Developer Guide**
 

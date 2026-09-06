@@ -179,6 +179,42 @@ Watchtower polls GHCR every 5 minutes (`WATCHTOWER_POLL_INTERVAL=300`).  When it
 finds a new image digest it pulls the image, stops the old container, and starts a
 new one in-place — no compose restart needed.
 
+## Helm chart
+
+Both `release.yml` and `testing.yml` publish the in-repo chart
+(`infra/k8s/epicurus/`, name `epicurus`) to GHCR as an OCI artifact **alongside**
+the images built in the same run — no separate chart repo or index to host.
+This is a second distribution channel for the same images, for operators
+running Kubernetes instead of (or beside) Docker Compose; it does not change
+anything about the Compose flow described above.
+
+| Track | Chart version | `appVersion` | Pushed to |
+| --- | --- | --- | --- |
+| Release (`vX.Y.Z` tag) | `X.Y.Z` (matches the tag) | `X.Y.Z` | `oci://ghcr.io/baakhoff/charts/epicurus` |
+| `testing` branch | `0.0.0-testing.<7-char sha>` | `testing` | `oci://ghcr.io/baakhoff/charts/epicurus` |
+
+The chart version tracks the release tag one-for-one, so there is only one
+number to reason about. Pulling and installing needs no separate registry
+login step beyond what OCI-aware Helm already does for a public GHCR package:
+
+```bash
+# latest release
+helm pull oci://ghcr.io/baakhoff/charts/epicurus --version 0.2.0
+helm install epicurus oci://ghcr.io/baakhoff/charts/epicurus --version 0.2.0
+
+# a testing-branch build, e.g. from the workflow run's short sha
+helm install epicurus oci://ghcr.io/baakhoff/charts/epicurus --version 0.0.0-testing.abcdef1
+```
+
+Both publish steps are guarded so they no-op (skip, not fail) on any commit
+where `infra/k8s/epicurus/Chart.yaml` doesn't exist yet — the chart and the
+images it deploys are gated together without either workflow depending on the
+other having merged first.
+
+See `docs/infrastructure/kubernetes.md` for the operator-facing page: cluster
+prerequisites, `values.yaml` reference, and the in-chart vs. external-service
+switches for the data plane.
+
 ## Rollback
 
 A rollback is a `.env` edit + reconcile — the previous image is already on GHCR.

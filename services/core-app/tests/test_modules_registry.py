@@ -28,7 +28,7 @@ from epicurus_core import (
     WritesDocument,
 )
 from epicurus_core_app.agent.mcp_host import ModuleUnreachableError, ToolCallError
-from epicurus_core_app.docker_control import DockerError
+from epicurus_core_app.container_control import ContainerControlDeferred, ContainerControlError
 from epicurus_core_app.modules import DockerStatus, ModuleRegistry, ModuleSnapshot, ModuleStatus
 
 
@@ -141,7 +141,7 @@ class _FakeModulePrefs:
 
 
 class _FakeDocker:
-    """In-memory stand-in for DockerController — records removals; never touches Docker."""
+    """In-memory stand-in for a ContainerController — records removals; never touches Docker."""
 
     def __init__(self, *, count: int = 1, error: Exception | None = None) -> None:
         self.calls: list[str] = []
@@ -817,12 +817,27 @@ async def test_remove_protected_without_docker_is_403() -> None:
 
 async def test_remove_protected_propagates_as_403() -> None:
     # ``echo`` is not in PROTECTED, so the denylist check is skipped and the Docker layer's
-    # own DockerError (the real protected guard) surfaces as a 403.
-    docker = _FakeDocker(error=DockerError("'echo' is protected and cannot be removed"))
+    # own ContainerControlError (the real protected guard) surfaces as a 403.
+    docker = _FakeDocker(error=ContainerControlError("'echo' is protected and cannot be removed"))
     registry, _, _ = _registry(docker=docker)
     with pytest.raises(HTTPException) as err:
         await registry.remove("echo")
     assert err.value.status_code == 403
+
+
+async def test_remove_when_the_runtime_defers_still_tombstones() -> None:
+    """A runtime that *cannot act now* is the degraded mode, not a failed removal (#891).
+
+    RBAC saying no in a cluster, or an API server that cannot be reached, must land exactly
+    where a missing Docker socket lands (ADR-0056/#382): the module is tombstoned and hidden
+    immediately, and the response tells the operator its workload keeps running until the next
+    restart — never a 403 that reads as "removal refused".
+    """
+    docker = _FakeDocker(error=ContainerControlDeferred("could not scale 'echo' to zero: 403"))
+    registry, _, _ = _registry(docker=docker)
+    result = await registry.remove("echo")
+    assert result == {"removed": "echo", "containers": 0, "container_teardown_deferred": True}
+    assert "echo" in await registry._prefs.removed_modules("local")
 
 
 async def test_reconcile_tombstones_re_removes_resurrected() -> None:

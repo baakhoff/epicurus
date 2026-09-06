@@ -1,5 +1,9 @@
 """Tightly-scoped Docker control for confirmed module removal (#127, ADR-0028, ADR-0099, ADR-0109).
 
+The Docker arm of the container-runtime seam (#891): one of the implementations of
+:class:`~epicurus_core_app.container_control.ContainerController`, selected under Compose and
+unchanged in behavior by that seam — everything below is what it has always done.
+
 Removing a module deletes its **container** — a privileged action the UI gates behind a
 confirm dialog. The core reaches Docker **only** through this class, which refuses to touch
 anything but a *known module's own* container:
@@ -28,69 +32,23 @@ from __future__ import annotations
 
 import os
 import socket
-from dataclasses import dataclass
 from typing import Any
 
 from epicurus_core import get_logger
+from epicurus_core_app.container_control import (
+    PROTECTED,
+    RESTARTABLE,
+    ContainerAvailability,
+    ContainerControlError,
+)
 
 log = get_logger("epicurus_core_app.docker_control")
 
-# Never removable, even if mis-configured as a module: the core itself, the web shell, and
-# every data-plane / infra service. The primary guard is that only a *configured module*
-# name is ever passed here; this denylist is defence-in-depth.
-PROTECTED: frozenset[str] = frozenset(
-    {
-        "core-app",
-        # The reserved in-process pseudo-module name (ADR-0093 §2) — the core answering its own
-        # ``review`` page. It has no container at all, so this entry is purely belt-and-braces:
-        # ``ModuleRegistry`` already refuses every management write addressed to this name.
-        "core",
-        "web",
-        "postgres",
-        "valkey",
-        "nats",
-        "qdrant",
-        "openbao",
-        "minio",
-        "minio-init",
-        "traefik",
-        "ollama",
-        "searxng",
-        "grafana",
-        "loki",
-        "prometheus",
-        "tempo",
-        "alertmanager",
-        "otel-collector",
-        "alloy",
-    }
-)
-
-# Allowlisted for a non-destructive **restart** (never removal): infra containers that read a
-# setting only at startup, so applying an operator's choice means bouncing them. A restart keeps
-# the container, its volumes, and config — the only effect is re-reading env (#307, ADR-0046).
-RESTARTABLE: frozenset[str] = frozenset({"ollama"})
+# The denylist (:data:`PROTECTED`) and the restart allowlist (:data:`RESTARTABLE`) are policy,
+# not Docker mechanics, so they live on the seam and every runtime enforces the same two sets.
 
 _SERVICE_LABEL = "com.docker.compose.service"
 _PROJECT_LABEL = "com.docker.compose.project"
-
-
-class DockerError(RuntimeError):
-    """Raised when a module's container cannot be removed (protected, or a Docker failure)."""
-
-
-@dataclass(frozen=True)
-class DockerAvailability:
-    """The result of probing for Docker access at startup (#622).
-
-    ``controller`` is ``None`` exactly when ``reason`` explains why — never both set, never
-    both empty. Kept as one value (not a bare ``DockerController | None``) so the *reason* an
-    operator sees on the Modules page is the real exception text, not a guess reconstructed
-    later from nothing.
-    """
-
-    controller: DockerController | None
-    reason: str | None = None
 
 
 class DockerController:
@@ -101,7 +59,7 @@ class DockerController:
         self._project = project
 
     @classmethod
-    def from_env(cls) -> DockerAvailability:
+    def from_env(cls) -> ContainerAvailability:
         """Connect to Docker — by default ``docker-proxy-core`` over ``DOCKER_HOST``, or the
         raw socket under the ``compose.docker-socket.yaml`` overlay (ADR-0099); never raises.
 
@@ -115,16 +73,16 @@ class DockerController:
         except Exception as exc:  # pragma: no cover - import guard
             reason = str(exc)
             log.warning("docker SDK unavailable; container teardown deferred", error=reason)
-            return DockerAvailability(controller=None, reason=reason)
+            return ContainerAvailability(controller=None, reason=reason, runtime="docker")
         try:
             client = docker.from_env()
             project = cls._detect_project(client)
             log.info("docker control ready", project=project)
-            return DockerAvailability(controller=cls(client, project=project))
+            return ContainerAvailability(controller=cls(client, project=project), runtime="docker")
         except Exception as exc:
             reason = str(exc)
             log.warning("docker unreachable; container teardown deferred", error=reason)
-            return DockerAvailability(controller=None, reason=reason)
+            return ContainerAvailability(controller=None, reason=reason, runtime="docker")
 
     @staticmethod
     def _detect_project(client: Any) -> str | None:
@@ -146,12 +104,12 @@ class DockerController:
     def remove_module(self, name: str) -> int:
         """Stop and remove *name*'s container(s); return how many were removed.
 
-        Raises :class:`DockerError` for a protected name. A name with no matching
+        Raises :class:`ContainerControlError` for a protected name. A name with no matching
         container is a no-op (returns 0) — removal is idempotent, which also lets the
         startup tombstone reconcile re-run safely.
         """
         if name in PROTECTED:
-            raise DockerError(f"{name!r} is protected and cannot be removed")
+            raise ContainerControlError(f"{name!r} is protected and cannot be removed")
         label_filters = [f"{_SERVICE_LABEL}={name}"]
         if self._project:
             label_filters.append(f"{_PROJECT_LABEL}={self._project}")
@@ -167,10 +125,10 @@ class DockerController:
                 container.remove(force=True)
                 removed += 1
             return removed
-        except DockerError:
+        except ContainerControlError:
             raise
         except Exception as exc:
-            raise DockerError(f"failed to remove {name!r}: {exc}") from exc
+            raise ContainerControlError(f"failed to remove {name!r}: {exc}") from exc
 
     def restart_service(self, name: str) -> bool:
         """Restart an allowlisted infra container in this Compose project; ``True`` if one was.
@@ -181,7 +139,7 @@ class DockerController:
         container is a no-op (``False``).
         """
         if name not in RESTARTABLE:
-            raise DockerError(f"{name!r} is not restartable")
+            raise ContainerControlError(f"{name!r} is not restartable")
         label_filters = [f"{_SERVICE_LABEL}={name}"]
         if self._project:
             label_filters.append(f"{_PROJECT_LABEL}={self._project}")
@@ -195,4 +153,4 @@ class DockerController:
                 restarted += 1
             return restarted > 0
         except Exception as exc:
-            raise DockerError(f"failed to restart {name!r}: {exc}") from exc
+            raise ContainerControlError(f"failed to restart {name!r}: {exc}") from exc

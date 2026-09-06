@@ -987,10 +987,10 @@ container, and its review is mandatory (nothing self-applies, ever).
 | --- | --- |
 | `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. Served from the probe cache by default; `?refresh=true` forces a fresh fleet-wide re-probe (the Modules page's manual refresh, #478). Also carries the reserved **`core`** pseudo-module (always healthy + enabled — it is this process), so the shell discovers its `review` page like any module's; the Modules screen filters it back out, since it manages what the operator *installed*. |
 | `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status, reason?}]}` (`started`/`error`, or the module's own answer). Best-effort — one module's failure never aborts the rest. A module that **refuses** the rebuild because the source it would rebuild from reads empty reports `refused` with its `reason` (#848), rather than the fan-out assuming a rebuild it never started. |
-| `GET /platform/v1/modules/docker-status` | Whether the core can reach Docker right now (#622, ADR-0099): `{available: bool, reason: str \| null}` — `reason` is the probe's own exception text, surfaced so the Modules page states plainly what's deferred (never "removal disabled" — see the callout below) and how to enable it, without the operator attempting a removal or reading the logs. |
+| `GET /platform/v1/modules/docker-status` | Whether the core can reach its **container runtime** right now (#622, ADR-0099; #891 widened it beyond Docker — the path and shape are unchanged): `{available: bool, reason: str \| null}` — `reason` is the selection/probe's own text (an unreachable socket, an unknown namespace, or `CONTAINER_RUNTIME=none`), surfaced so the Modules page states plainly what's deferred (never "removal disabled" — see the callout below) and how to enable it, without the operator attempting a removal or reading the logs. |
 | `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
-| `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, #382, ADR-0028): tombstone the module — which hides it everywhere and stops routing its tools at once — and tear its container down. **Decoupled from the live Docker socket** (#382): soft-removes with **200** even when the core has no Docker access, deferring the container teardown to the next startup reconcile; the response carries `container_teardown_deferred` (true when no socket was available). With a socket present it also stops + removes the container now, scoped to the core's own Compose project and refusing core-app / web / data-plane. **403** protected (enforced regardless of the socket) · **404** unknown. |
+| `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, #382, ADR-0028): tombstone the module — which hides it everywhere and stops routing its tools at once — and tear its container down. **Decoupled from the live container runtime** (#382, #891): soft-removes with **200** even when the core has no runtime access — or has one that refuses (a Kubernetes RBAC 403) — deferring the container teardown to the next startup reconcile; the response carries `container_teardown_deferred` (true whenever the workload was left running). With a socket present it also stops + removes the container now, scoped to the core's own Compose project and refusing core-app / web / data-plane. **403** protected (enforced regardless of the socket) · **404** unknown. |
 | `GET` · `PUT /platform/v1/modules/{name}/models` | Per-module model-slot selections (#128, ADR-0029): `{slot_key: model_id}`. `PUT` validates each key against the manifest's `required_models` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
 | `GET /platform/v1/modules/{name}/models/{slot}` | Resolve one slot to its chosen model (`null` = core default) — backs `PlatformClient.get_module_model` (#128). |
 | `GET /platform/v1/modules/{name}/collections` | The module's connected accounts + collections (ADR-0030), proxied from its `GET /accounts` and **merged** with the operator's stored selection (each collection annotated `enabled`/`active`). **404** if the module declares no `collections`. |
@@ -1009,11 +1009,13 @@ container, and its review is mandatory (nothing self-applies, ever).
 | `GET /platform/v1/calendar-feed?start=&end=` | **Cross-module calendar-feed aggregate** (#469, ADR-0088): date-anchored items (e.g. open tasks with a due date) from every enabled, healthy module — each stamped with its owning `module`. **Not a manifest-declared capability** — probes every module for `GET {base}/calendar-feed?start=&end=` and skips it on a 404/unreachable, the same best-effort tolerance `/suggestions` already relies on, so a module opts in purely by serving the path (`tasks` is the first). Item shape: `{id, title, date, status, ref_id, kind}` (`date` a floating `YYYY-MM-DD`, `end` exclusive — ADR-0023's own range convention; `kind` + `ref_id` + the stamped `module` route a click to that module's existing `GET /resolve/{kind}/{ref_id}` hover-card, ADR-0019 — no new UI contract). Backs the calendar page's read-only task-due-date overlay. (Lives at `/platform/v1/calendar-feed`, not under `/modules`.) |
 
 > **Privileged surface, least-privilege by default (ADR-0028, #307, #382, #622/ADR-0099,
-> #708/ADR-0109).** Tearing down a removed module's container — and applying the Ollama
-> KV-cache type — needs to reach Docker. The core touches it through a single
-> `DockerController`: it stops/removes **only a configured module's own container**, and
-> separately **restarts only an allowlisted infra container** (`ollama`, which is never
-> removable). Both are scoped to this Compose project and never touch core-app / web / a
+> #708/ADR-0109, #891).** Tearing down a removed module's container — and applying the Ollama
+> KV-cache type — needs to reach the **container runtime**. The core touches it through a
+> single seam (`container_control.py`, see [Container runtime](#container-runtime-891) below),
+> whichever runtime is selected: it stops/removes **only a configured module's own
+> container/workload**, and separately **restarts only an allowlisted infra one** (`ollama`,
+> which is never removable). Under Compose that seam is the Docker arm, and everything below
+> describes it. Both are scoped to this Compose project and never touch core-app / web / a
 > data-plane service. By default this goes over `DOCKER_HOST=tcp://docker-proxy-core:2375` — a
 > filtered proxy allowlisting exactly those calls and refusing exec/create/attach/images/
 > volumes/networks/system before they reach the socket at all; `services/core-app/compose.
@@ -1026,8 +1028,47 @@ container, and its review is mandatory (nothing self-applies, ever).
 > reconcile when neither path is reachable — so removal always works; a KV-cache change
 > likewise saves without applying. See [Docker-socket
 > access](../infrastructure/index.md#docker-socket-access-708-adr-0109). `GET
-> /platform/v1/modules/docker-status` reports the live state so the Modules page states it
-> proactively instead of an operator finding out by attempting a removal.
+> /platform/v1/modules/docker-status` reports the live state (for whichever runtime is
+> selected) so the Modules page states it proactively instead of an operator finding out by
+> attempting a removal.
+
+### Container runtime (#891)
+
+The two privileged actions above are the only place the core touches the runtime it is
+deployed on, and "the runtime" is not always Docker: on Kubernetes there is no daemon, and
+the pre-#891 code silently deferred forever. `container_control.py` holds the seam — the
+policy (the protected denylist, the restart allowlist), the `ContainerController` protocol,
+and the startup selection — with one thin adapter per runtime.
+
+| `CONTAINER_RUNTIME` | What it talks to | `remove_module` | `restart_service("ollama")` |
+| --- | --- | --- | --- |
+| `auto` (default) | resolves to one of the three below | — | — |
+| `docker` | `docker-proxy-core` over `DOCKER_HOST`, or the raw socket under the ADR-0099 overlay | stop + remove the module's container, scoped to this Compose project | `docker restart` the container |
+| `kubernetes` | `https://kubernetes.default.svc` with the pod's ServiceAccount (`httpx`; no client package) | `PATCH …/deployments/{name}/scale` → `replicas: 0` | patch the pod template's `kubectl.kubernetes.io/restartedAt` annotation (StatefulSet first, else Deployment) — a rollout restart |
+| `none` | nothing; says so **once** at startup, never per call | deferred | deferred |
+
+`auto` resolves in the only order that cannot be ambiguous: `KUBERNETES_SERVICE_HOST` set ⇒
+`kubernetes`; else `DOCKER_HOST` set or `/var/run/docker.sock` present ⇒ `docker`; else
+`none`. Under Compose nothing changes — `DOCKER_HOST` is always set. An unknown value logs a
+warning and falls back to `auto` rather than failing startup.
+
+The Kubernetes arm addresses workloads by **label selector, never by name** —
+`app.kubernetes.io/part-of=epicurus,app.kubernetes.io/component=<name>` in
+`KUBERNETES_NAMESPACE` (the chart sets it from the downward API; blank falls back to the
+ServiceAccount's own `namespace` file) — and re-checks each matched object's component label
+before patching it, the twin of the Docker arm re-reading each container's service label. It
+needs `get`/`list`/`patch` on `deployments`, `deployments/scale` and `statefulsets` in that
+namespace, and nothing else; the chart renders that Role. The bearer token is re-read from
+the projected file **on every request**, because projected tokens rotate.
+
+It never deletes the Deployment: the tombstone in `module_prefs` is what keeps a removed
+module gone (ADR-0056/#382), and deleting an object the chart owns would only invite the next
+`helm upgrade` to recreate it.
+
+RBAC saying no (a 403) — or an unreachable API server — is the **ordinary degraded mode**, not
+a failed removal: the module is tombstoned and hidden immediately and the response carries
+`container_teardown_deferred: true`, exactly where a missing Docker socket lands. Only a
+refusal by policy (a protected name) is an error the operator sees as a 403.
 
 Caller-supplied path segments the registry interpolates into a module request —
 `ref_id`, entity `kind`, `page_id` — reject `/`, `\`, or `..` with **400** so a
@@ -1601,6 +1642,8 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
 | `MAINTENANCE_HOUR` | `4` | Local hour of the scheduled nightly maintenance batch, an hour after `MEMORY_EXTRACTION_HOUR`. |
 | `SCHEDULED_TURNS_POLL_INTERVAL_S` | `60` | How often the scheduled-turns poll loop checks for a due row (ADR-0092). |
+| `CONTAINER_RUNTIME` | `auto` | Which container runtime the privileged path uses (#891): `auto` / `docker` / `kubernetes` / `none` — see [Container runtime](#container-runtime-891). |
+| `KUBERNETES_NAMESPACE` | — | Namespace the `kubernetes` runtime addresses; blank = the pod's ServiceAccount `namespace` file. Ignored by every other runtime. |
 | `OTEL_TRACES_ENABLED` | `false` | Emit OpenTelemetry traces — the agent loop, platform API, and event bus — to Tempo (#57). See the [tracing reference](../reference/observability.md#tracing-57-adr-0068). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://tempo:4318` | OTLP/HTTP base URL for traces (the exporter appends `/v1/traces`). |
 

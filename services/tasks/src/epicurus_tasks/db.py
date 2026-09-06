@@ -447,9 +447,13 @@ class RepeatStore:
     ) -> Literal["created", "updated"]:
         """Upsert one repeat rule by its natural ``(list_id, task_id)`` key (import, #871).
 
-        *dry_run* reports the outcome (a row already existing there is an ``"updated"``)
-        without writing; a live call defers to :meth:`set`, which is already an idempotent
-        delete-then-insert.
+        Deliberately *not* :meth:`set`, which replaces a rule by deleting it and inserting a
+        new one. That is fine for the module's own edit path, but the portability contract
+        says an import never deletes (ADR-0133) — and a reviewer should be able to read that
+        guarantee off the import path rather than reason about whether a delete happens to be
+        in the same transaction as its replacement. So an existing rule is *updated in place*
+        and only an absent one is inserted; *dry_run* reports which of the two it would be
+        without writing either.
         """
         async with self._session() as session:
             existing = await session.scalar(
@@ -459,8 +463,20 @@ class RepeatStore:
                     _StoredRepeat.task_id == task_id,
                 )
             )
-        outcome: Literal["created", "updated"] = "updated" if existing is not None else "created"
-        if dry_run:
-            return outcome
-        await self.set(tenant_id=tenant_id, list_id=list_id, task_id=task_id, rrule=rrule)
+            outcome: Literal["created", "updated"] = (
+                "updated" if existing is not None else "created"
+            )
+            if dry_run:
+                return outcome
+            if existing is None:
+                session.add(
+                    _StoredRepeat(
+                        tenant_id=tenant_id, list_id=list_id, task_id=task_id, rrule=rrule
+                    )
+                )
+            else:
+                await session.execute(
+                    update(_StoredRepeat).where(_StoredRepeat.pk == existing).values(rrule=rrule)
+                )
+            await session.commit()
         return outcome

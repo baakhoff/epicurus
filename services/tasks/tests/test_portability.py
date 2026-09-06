@@ -192,14 +192,20 @@ async def test_dry_run_writes_nothing(stores: TasksPortability) -> None:
         await stores._tasks.delete_task(tenant_id=TENANT, task_id=task.id)
     await stores._repeats.delete(tenant_id=TENANT, list_id="@default", task_id="g-task-1")
 
+    # Move the lead time away from the exported value, so a write during the dry run would
+    # be visible rather than hidden behind a coincidence.
+    await stores._lead_prefs.set_lead_days(TENANT, 9)
+
     report = await stores.import_(tenant_id=TENANT, records=_records(exported), dry_run=True)
     assert report.counts[TASK_KIND].created == 3
     assert report.counts[TASK_REPEAT_KIND].created == 1
+    assert report.counts[LEAD_TIME_PREFS_KIND].updated == 1
 
     assert await stores._tasks.list_tasks(tenant_id=TENANT, scope="all") == []
     assert (
         await stores._repeats.get(tenant_id=TENANT, list_id="@default", task_id="g-task-1") is None
     )
+    assert await stores._lead_prefs.get_lead_days(TENANT) == 9
 
 
 async def test_unknown_kind_is_skipped_with_a_warning(stores: TasksPortability) -> None:
@@ -231,14 +237,118 @@ async def test_tenant_isolation(stores: TasksPortability) -> None:
     }
 
 
-async def test_older_and_newer_schema_verdicts_via_the_route() -> None:
-    """`add_portability_routes`'s compatibility gate: same/older/newer/foreign (ADR-0133)."""
+async def test_a_malformed_record_is_skipped_and_named_not_raised(
+    stores: TasksPortability,
+) -> None:
+    """A line this module cannot read must not undo the lines before it.
+
+    The three kinds commit through three separate stores, so no transaction spans the stream:
+    raising would answer 400 while leaving everything ahead of the bad line already written.
+    A bad record is therefore counted `skipped` and named, and the good ones still land.
+    """
+    stream = _records(
+        [
+            PortabilityRecord(kind=TASK_KIND, id="t-good", data={"title": "Buy milk"}),
+            PortabilityRecord(kind=TASK_REPEAT_KIND, id="broken", data={"list_id": "@default"}),
+            PortabilityRecord(kind=LEAD_TIME_PREFS_KIND, id="prefs", data={"lead_days": "three"}),
+            PortabilityRecord(kind=TASK_KIND, id="t-after", data={"title": "Call the vet"}),
+        ]
+    )
+    report = await stores.import_(tenant_id=TENANT, records=stream, dry_run=False)
+
+    assert report.counts[TASK_KIND].created == 2
+    assert report.counts[TASK_REPEAT_KIND].skipped == 1
+    assert report.counts[LEAD_TIME_PREFS_KIND].skipped == 1
+    assert any("broken" in w for w in report.warnings)
+    assert any("prefs" in w for w in report.warnings)
+
+    # Both good records landed — the one before the bad line and the one after it.
+    titles = {t.title for t in await stores._tasks.list_tasks(tenant_id=TENANT, scope="all")}
+    assert titles == {"Buy milk", "Call the vet"}
+    # And `lead_days: "three"` did not become a lead time by accident.
+    assert await stores._lead_prefs.export_pref(TENANT) is None
+
+
+async def test_a_boolean_lead_days_is_not_a_lead_time_of_one(stores: TasksPortability) -> None:
+    """`bool` is an `int` in Python; `lead_days: true` must not import as one day."""
+    stream = _records(
+        [PortabilityRecord(kind=LEAD_TIME_PREFS_KIND, id="prefs", data={"lead_days": True})]
+    )
+    report = await stores.import_(tenant_id=TENANT, records=stream, dry_run=False)
+
+    assert report.counts[LEAD_TIME_PREFS_KIND].skipped == 1
+    assert await stores._lead_prefs.export_pref(TENANT) is None
+
+
+async def test_an_unreadable_created_at_is_named_rather_than_silently_replaced(
+    stores: TasksPortability,
+) -> None:
+    """The row still lands, but the operator is told its date was dropped."""
+    stream = _records(
+        [PortabilityRecord(kind=TASK_KIND, id="t-1", data={"title": "x", "created_at": "nonsense"})]
+    )
+    report = await stores.import_(tenant_id=TENANT, records=stream, dry_run=False)
+
+    assert report.counts[TASK_KIND].created == 1
+    assert any("created_at" in w for w in report.warnings)
+
+
+async def test_an_existing_repeat_rule_is_updated_in_place_never_deleted(
+    stores: TasksPortability,
+) -> None:
+    """ADR-0133's "never deletes", read straight off the import path.
+
+    The module's own edit path replaces a rule by deleting and re-inserting it; the import
+    path must not, so the row keeps its identity across an apply.
+    """
+    await stores._repeats.set(
+        tenant_id=TENANT, list_id="@default", task_id="g-task-1", rrule="FREQ=WEEKLY"
+    )
+    before = await _repeat_pk(stores)
+
+    outcome = await stores._repeats.upsert(
+        tenant_id=TENANT, list_id="@default", task_id="g-task-1", rrule="FREQ=MONTHLY"
+    )
+
+    assert outcome == "updated"
+    assert await _repeat_pk(stores) == before
+    assert (
+        await stores._repeats.get(tenant_id=TENANT, list_id="@default", task_id="g-task-1")
+        == "FREQ=MONTHLY"
+    )
+
+
+async def _repeat_pk(stores: TasksPortability) -> int:
+    """The surrogate key of the seeded repeat rule — unchanged means "not re-inserted"."""
+    from sqlalchemy import select
+
+    from epicurus_tasks.db import _StoredRepeat
+
+    async with stores._repeats._session() as session:
+        pk = await session.scalar(
+            select(_StoredRepeat.pk).where(
+                _StoredRepeat.tenant_id == TENANT,
+                _StoredRepeat.list_id == "@default",
+                _StoredRepeat.task_id == "g-task-1",
+            )
+        )
+    assert pk is not None
+    return int(pk)
+
+
+async def test_older_and_newer_schema_verdicts_via_the_route(tmp_path: Path) -> None:
+    """`add_portability_routes`'s compatibility gate: same/older/newer/foreign (ADR-0133).
+
+    File-backed SQLite and an in-process ASGI client rather than `:memory:` + `TestClient`:
+    the sync client drives the app on a loop of its own, and an in-memory database is one
+    shared `StaticPool` connection across both — the #677 failure mode, one record away.
+    """
     from fastapi import FastAPI
-    from fastapi.testclient import TestClient
+    from httpx import ASGITransport, AsyncClient
 
     from epicurus_core import EpicurusModule
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'routes.db'}")
     tasks = TaskStore(engine)
     repeats = RepeatStore(engine)
     lead_prefs = LeadTimePrefsStore(engine)
@@ -249,20 +359,42 @@ async def test_older_and_newer_schema_verdicts_via_the_route() -> None:
     module = EpicurusModule("tasks", version="0.24.0", portable=True)
     app = FastAPI()
     add_portability_routes(app, module, store)
-    client = TestClient(app)
 
-    def _stream(schema: str) -> bytes:
-        header = f'{{"schema": "{schema}"}}\n'
-        return header.encode()
+    def _stream(schema: str, *lines: str) -> bytes:
+        return "".join([f'{{"schema": "{schema}"}}\n', *(f"{line}\n" for line in lines)]).encode()
 
-    older = client.post("/import", params={"tenant_id": TENANT}, content=_stream("tasks/0"))
-    assert older.status_code == 200
-    assert any("older" in w for w in older.json()["warnings"])
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://tasks") as client:
+        older = await client.post(
+            "/import", params={"tenant_id": TENANT}, content=_stream("tasks/0")
+        )
+        assert older.status_code == 200
+        assert any("older" in w for w in older.json()["warnings"])
 
-    newer = client.post("/import", params={"tenant_id": TENANT}, content=_stream("tasks/2"))
-    assert newer.status_code == 409
+        newer = await client.post(
+            "/import", params={"tenant_id": TENANT}, content=_stream("tasks/2")
+        )
+        assert newer.status_code == 409
 
-    foreign = client.post("/import", params={"tenant_id": TENANT}, content=_stream("calendar/1"))
-    assert foreign.status_code == 409
+        foreign = await client.post(
+            "/import", params={"tenant_id": TENANT}, content=_stream("calendar/1")
+        )
+        assert foreign.status_code == 409
+
+        # A malformed record answers 200 with the bad line named — not a 400 over a stream
+        # whose earlier records this module has already committed.
+        partial = await client.post(
+            "/import",
+            params={"tenant_id": TENANT},
+            content=_stream(
+                "tasks/1",
+                '{"kind":"task","id":"t-1","data":{"title":"Buy milk"}}',
+                '{"kind":"task_repeat","id":"broken","data":{}}',
+            ),
+        )
+        assert partial.status_code == 200
+        body = partial.json()
+        assert body["counts"]["task"]["created"] == 1
+        assert body["counts"]["task_repeat"]["skipped"] == 1
+        assert any("broken" in w for w in body["warnings"])
 
     await engine.dispose()

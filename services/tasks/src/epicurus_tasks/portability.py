@@ -29,6 +29,13 @@ Excluded, and why:
 
 Import is an upsert by each kind's stable id; nothing here ever deletes. A second apply of
 the same stream reports everything ``skipped``/``updated`` with nothing duplicated.
+
+**One bad line does not undo the good ones.** The three kinds live in three stores, each
+committing its own session, so no transaction spans the stream — which means raising on a
+malformed record would leave the import *half applied* while answering 400 as though
+nothing had happened. A record this module cannot read is therefore counted ``skipped``
+with a warning naming it, exactly as an unknown ``kind`` is: the rest of the stream still
+lands, and the report says what did not.
 """
 
 from __future__ import annotations
@@ -113,11 +120,13 @@ class TasksPortability:
         async for record in records:
             outcome: ImportOutcome
             if record.kind == TASK_KIND:
-                outcome = await self._import_task(tenant_id, record, dry_run=dry_run)
+                outcome = await self._import_task(tenant_id, record, report, dry_run=dry_run)
             elif record.kind == TASK_REPEAT_KIND:
-                outcome = await self._import_repeat(tenant_id, record, dry_run=dry_run)
+                outcome = await self._import_repeat(tenant_id, record, report, dry_run=dry_run)
             elif record.kind == LEAD_TIME_PREFS_KIND:
-                outcome = await self._import_lead_time_prefs(tenant_id, record, dry_run=dry_run)
+                outcome = await self._import_lead_time_prefs(
+                    tenant_id, record, report, dry_run=dry_run
+                )
             else:
                 report.warn(f"unknown record kind {record.kind!r}; skipped")
                 outcome = "skipped"
@@ -125,9 +134,18 @@ class TasksPortability:
         return report
 
     async def _import_task(
-        self, tenant_id: str, record: PortabilityRecord, *, dry_run: bool
+        self, tenant_id: str, record: PortabilityRecord, report: ImportReport, *, dry_run: bool
     ) -> ImportOutcome:
         data: dict[str, Any] = record.data
+        raw_created = data.get("created_at")
+        created_at = _parse_created_at(raw_created)
+        if raw_created and created_at is None:
+            # The row still lands — a task is worth more than its birthday — but a silently
+            # substituted "now" would misdate the operator's history with nothing said.
+            report.warn(
+                f"task {record.id!r}: unreadable created_at {raw_created!r} was dropped; "
+                "the imported row is dated on arrival"
+            )
         return await self._tasks.upsert_task(
             tenant_id=tenant_id,
             id=record.id,
@@ -136,7 +154,7 @@ class TasksPortability:
             due=data.get("due"),
             completed=bool(data.get("completed", False)),
             completed_at=data.get("completed_at"),
-            created_at=_parse_created_at(data.get("created_at")),
+            created_at=created_at,
             status=data.get("status"),
             priority=data.get("priority"),
             tags=list(data.get("tags") or []),
@@ -145,14 +163,17 @@ class TasksPortability:
         )
 
     async def _import_repeat(
-        self, tenant_id: str, record: PortabilityRecord, *, dry_run: bool
+        self, tenant_id: str, record: PortabilityRecord, report: ImportReport, *, dry_run: bool
     ) -> ImportOutcome:
         data = record.data
         list_id = data.get("list_id")
         task_id = data.get("task_id")
         rrule = data.get("rrule")
         if not list_id or not task_id or not rrule:
-            raise ValueError(f"malformed task_repeat record {record.id!r}: missing a field")
+            report.warn(
+                f"task_repeat record {record.id!r} is missing list_id, task_id or rrule; skipped"
+            )
+            return "skipped"
         return await self._repeats.upsert(
             tenant_id=tenant_id,
             list_id=list_id,
@@ -162,9 +183,13 @@ class TasksPortability:
         )
 
     async def _import_lead_time_prefs(
-        self, tenant_id: str, record: PortabilityRecord, *, dry_run: bool
+        self, tenant_id: str, record: PortabilityRecord, report: ImportReport, *, dry_run: bool
     ) -> ImportOutcome:
         raw = record.data.get("lead_days")
-        if not isinstance(raw, int):
-            raise ValueError(f"malformed lead_time_prefs record {record.id!r}: bad lead_days")
+        # ``bool`` is an ``int`` in Python, and ``lead_days: true`` is not a lead time of one.
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            report.warn(
+                f"lead_time_prefs record {record.id!r} has an unusable lead_days {raw!r}; skipped"
+            )
+            return "skipped"
         return await self._lead_prefs.upsert(tenant_id, raw, dry_run=dry_run)

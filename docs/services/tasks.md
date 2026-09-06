@@ -756,12 +756,13 @@ same export reports everything `skipped`/`updated` with nothing duplicated.
   state (`module_prefs.collections`, ADR-0030), already carried by the core's own export —
   duplicating it here would just be two copies of the same fact to keep in sync.
 
-No docker-dependent tests exist in this module (confirmed: no `testcontainers`/`docker`
-reference anywhere under `services/tasks`); `tests/test_portability.py` is a plain unit suite
-against a file-backed SQLite store, covering the export shape, the round trip (export → wipe →
-import → equal), the idempotent second apply, `dry_run` writing nothing, an unknown `kind`
-counting as skipped with a warning, tenant isolation, and the route's schema-compatibility
-gate (same/older/newer/foreign, via `schema_verdict`).
+**A record this module cannot read is skipped, not raised.** The three kinds live in three
+stores, each committing its own session, so no transaction spans the stream — raising on a bad
+line would answer `400` while leaving every record ahead of it already written. So a
+`task_repeat` missing `list_id`/`task_id`/`rrule`, a `lead_time_prefs` whose `lead_days` is not
+a whole number, and an unknown `kind` are all counted `skipped` with a warning naming the
+record; the rest of the stream still lands. A task whose `created_at` will not parse is still
+imported — dated on arrival — with the dropped value named in the same way.
 
 ## Dependencies
 

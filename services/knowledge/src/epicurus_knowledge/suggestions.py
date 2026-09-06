@@ -316,12 +316,15 @@ class SuggestionStore:
             "note": _str_field(data, "note"),
             "to_path": _str_field(data, "to_path"),
         }
-        created_at = _parse_timestamp(data.get("created_at"))
         async with self._session() as session:
             row = await session.scalar(
                 select(_StoredSuggestion).where(
                     _StoredSuggestion.tenant == tenant, _StoredSuggestion.sid == sid
                 )
+            )
+            # Read after the lookup, so an unreadable stamp can fall back to the row's own.
+            created_at = _parse_timestamp(
+                data.get("created_at"), existing=row.created_at if row is not None else None
             )
             if row is None:
                 if dry_run:
@@ -345,18 +348,24 @@ class SuggestionStore:
             return "updated"
 
 
-def _parse_timestamp(value: Any) -> datetime:
-    """Parse an ISO-8601 timestamp from an import record; fall back to now on a bad value.
+def _parse_timestamp(value: Any, *, existing: datetime | None = None) -> datetime:
+    """Parse an ISO-8601 timestamp from an import record; keep *existing* on a bad value.
 
-    A malformed or missing timestamp must not fail the whole import (#873) — it's one
-    field on one record, not a reason to abandon the rest of the stream.
+    A malformed or missing timestamp must not fail the whole import (#873) — it's one field
+    on one record, not a reason to abandon the rest of the stream. What it must also not do
+    is mint a *fresh* stamp for a row that is already here. The contract accepts an **older**
+    stream, which is exactly the case where a field the exporting version did not yet write
+    is absent, and "now" would then make the row differ from itself on every apply: a
+    permanent ``updated`` instead of the second-apply no-op ADR-0133 requires, with the
+    stored timestamp rewritten each time. So an unreadable field keeps whatever the row
+    already says, and only a row that does not exist yet is dated on arrival.
     """
     if isinstance(value, str):
         try:
             return datetime.fromisoformat(value)
         except ValueError:
             pass
-    return datetime.now(UTC)
+    return existing if existing is not None else datetime.now(UTC)
 
 
 def _str_field(data: dict[str, Any], key: str, default: str = "") -> str:
@@ -590,13 +599,18 @@ class SuggestionAuditStore:
             "to_path": _str_field(data, "to_path"),
             "decision": _str_field(data, "decision"),
         }
-        proposed_at = _parse_timestamp(data.get("proposed_at"))
-        decided_at = _parse_timestamp(data.get("decided_at"))
         async with self._session() as session:
             row = await session.scalar(
                 select(_StoredDecision).where(
                     _StoredDecision.tenant == tenant, _StoredDecision.sid == sid
                 )
+            )
+            # Read after the lookup, so an unreadable stamp can fall back to the row's own.
+            proposed_at = _parse_timestamp(
+                data.get("proposed_at"), existing=row.proposed_at if row is not None else None
+            )
+            decided_at = _parse_timestamp(
+                data.get("decided_at"), existing=row.decided_at if row is not None else None
             )
             if row is None:
                 if dry_run:

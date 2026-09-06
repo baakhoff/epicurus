@@ -704,9 +704,12 @@ The **vault's own content** travels a different way entirely: it's file-space da
 row in this module's tables, so it rides the archive's `files/` tree (the core's own half of
 #867) rather than an NDJSON record here.
 
-**Rebuild after import.** The core's apply order writes `files/` first, then calls each
-module's `/import`, then runs the file rescan and the re-embed fan-out (#332) — `POST
-/reindex` with no `force` flag. On a fresh install this is safe by construction: the mass
+**Rebuild after import.** The core's apply order is core sets → each **module**'s `/import`
+→ `files/` → a *forced* file rescan → the re-embed fan-out (#332), the last being `POST
+/reindex` with no `force` flag of its own. This module's records therefore land before the
+vault tree does, which costs nothing — the review queue references paths, not file content —
+and the vault is fully on disk before any re-index is asked for. On a fresh install this is
+safe by construction: the mass
 de-index fuse (`fuse.py`, #848) only ever trips when a **non-empty** ledger would be mostly
 or wholly de-indexed (`IndexFuse.evaluate`'s first check is `ledger_rows <= 0` → never trips),
 and a freshly created knowledge service starts with empty `knowledge_notes` /
@@ -716,11 +719,14 @@ exactly as an initial index would. Importing *into* an already-populated install
 the same reason from the other direction: the vault only gained files, so the pass has
 nothing to delete and the fuse has nothing to refuse.
 
-**Not exercised in CI:** the mass-de-index-fuse interaction above is reasoned from
-`fuse.py`/`app.py` and covered by `services/knowledge/tests/test_fuse.py`'s existing unit
-coverage of `IndexFuse.evaluate`'s zero-ledger case; no new portability-specific test drives
-a real `/reindex` call after an import, since the underlying behavior is unchanged by this
-lane and already has its own tests.
+**Import semantics.** Upsert by the stable `sid`; nothing here deletes, so importing into an
+install that already has its own review queue merges rather than replaces. A record whose
+timestamp is absent or unreadable — the shape an **older** archive has, which the contract
+accepts — keeps whatever the row already carries rather than being re-dated, so a second
+apply still settles to `skipped`. The `MAX_DECISIONS` retention cap applies to the module's
+own pruning, not to an import: history an operator brings with them is not silently capped
+on arrival, so a merge can leave the trail temporarily over the cap until the next decision
+prunes it.
 
 ## Dependencies
 

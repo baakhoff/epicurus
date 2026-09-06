@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -43,8 +44,27 @@ TENANT = "acme"
 OTHER_TENANT = "other-co"
 
 
+_OPENED: list[AsyncEngine] = []
+
+
+@pytest.fixture(autouse=True)
+async def _dispose_engines() -> AsyncIterator[None]:
+    """Every engine this file opens is closed with the test that opened it.
+
+    ``_stores`` hands back stores rather than the engine behind them, so without this each
+    test leaks an aiosqlite connection to the garbage collector — a worker thread reaching
+    for an event loop that has already closed, which is `ResourceWarning` noise at best and
+    the "Event loop is closed" teardown spam AGENTS.md names at worst.
+    """
+    yield
+    while _OPENED:
+        await _OPENED.pop().dispose()
+
+
 def _engine(tmp_path: Path, name: str) -> AsyncEngine:
-    return create_async_engine(f"sqlite+aiosqlite:///{tmp_path / name}")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / name}")
+    _OPENED.append(engine)
+    return engine
 
 
 async def _stores(
@@ -75,13 +95,8 @@ def _stream(records: list[PortabilityRecord]) -> AsyncIterator[PortabilityRecord
 
 def test_schema_is_knowledge_v1() -> None:
     assert SCHEMA == "knowledge/1"
-    assert (
-        KnowledgePortability(
-            SuggestionStore(create_async_engine("sqlite+aiosqlite:///:memory:")),
-            SuggestionAuditStore(create_async_engine("sqlite+aiosqlite:///:memory:")),
-        ).schema
-        == SCHEMA
-    )
+    # A class attribute, so reading it needs no database behind it.
+    assert KnowledgePortability.schema == SCHEMA
 
 
 # ── export shape ──────────────────────────────────────────────────────────────
@@ -216,6 +231,73 @@ async def test_second_apply_of_the_same_archive_is_a_no_op(tmp_path: Path) -> No
     assert second.counts[SUGGESTION_KIND].updated == 0
     # No duplicate row was created.
     assert len(await dst_suggestions.list(tenant=TENANT)) == 1
+
+
+async def test_import_never_deletes_what_the_target_already_had(tmp_path: Path) -> None:
+    """ADR-0133's additive rule: importing into a populated install merges, never replaces.
+
+    The target holds a suggestion of its own that the archive knows nothing about — after an
+    apply it must still be there, untouched, beside the one that arrived.
+    """
+    src_suggestions, src_audit = await _stores(tmp_path, "src.db")
+    await src_suggestions.add(
+        tenant=TENANT,
+        path="from-the-archive.md",
+        operation="create",
+        proposed_content="hi",
+        origin="agent",
+        note="",
+    )
+    records = await _collect(KnowledgePortability(src_suggestions, src_audit), TENANT)
+
+    dst_suggestions, dst_audit = await _stores(tmp_path, "dst.db")
+    mine = await dst_suggestions.add(
+        tenant=TENANT,
+        path="only-here.md",
+        operation="update",
+        proposed_content="local work",
+        origin="operator",
+        note="mine",
+    )
+    dest = KnowledgePortability(dst_suggestions, dst_audit)
+
+    report = await dest.import_(tenant_id=TENANT, records=_stream(records), dry_run=False)
+
+    assert report.counts[SUGGESTION_KIND].created == 1
+    survivors = {s.sid: s for s in await dst_suggestions.list(tenant=TENANT)}
+    assert len(survivors) == 2
+    assert survivors[mine.sid].proposed_content == "local work"
+
+
+async def test_a_record_missing_a_timestamp_still_settles_after_one_apply(
+    tmp_path: Path,
+) -> None:
+    """An **older** stream is accepted by the contract, so a field it never wrote is absent.
+
+    Dating such a row "now" on every apply would make it differ from itself forever — a
+    permanent `updated` where ADR-0133 requires a second apply to be a no-op, with the stored
+    timestamp rewritten each time. An unreadable stamp keeps what the row already says.
+    """
+    suggestions, audit = await _stores(tmp_path)
+    dest = KnowledgePortability(suggestions, audit)
+    # No `created_at`, as an older exporter would have written it.
+    thin = [
+        PortabilityRecord(
+            kind=SUGGESTION_KIND,
+            id="e" * 32,
+            data={"path": "a.md", "operation": "create", "proposed_content": "hi"},
+        )
+    ]
+
+    first = await dest.import_(tenant_id=TENANT, records=_stream(thin), dry_run=False)
+    assert first.counts[SUGGESTION_KIND].created == 1
+    landed = (await suggestions.list(tenant=TENANT))[0]
+
+    second = await dest.import_(tenant_id=TENANT, records=_stream(thin), dry_run=False)
+
+    assert second.counts[SUGGESTION_KIND].skipped == 1
+    assert second.counts[SUGGESTION_KIND].updated == 0
+    assert (await suggestions.list(tenant=TENANT))[0].created_at == landed.created_at
 
 
 async def test_reapply_with_a_changed_field_reports_updated(tmp_path: Path) -> None:

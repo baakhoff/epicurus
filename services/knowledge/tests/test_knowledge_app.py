@@ -30,6 +30,8 @@ def test_app_exposes_ops_mcp_manifest_and_status_routes() -> None:
     assert "/attachments" in paths  # attachment picker (#137)
     assert "/attachments/{ref_id}" in paths  # attachment resolve (#137)
     assert "/resolve/{kind}/{ref_id}" in paths  # hover-card resolver (#143)
+    assert "/export" in paths  # tenant portability export (#867, #873)
+    assert "/import" in paths  # tenant portability import (#867, #873)
     assert any(p.startswith("/mcp") for p in paths)
 
 
@@ -39,6 +41,11 @@ async def test_manifest_declares_editor_and_review_pages() -> None:
     assert manifest.pages[0].archetype == "editor"
     assert manifest.pages[0].title == "Knowledge"
     assert manifest.pages[1].archetype == "review"  # suggestion queue (#220)
+
+
+async def test_manifest_declares_portable() -> None:
+    # The module fans out over this flag (#867); the routes are wired separately in app.py.
+    assert (await _module().manifest()).portable is True
 
 
 async def test_manifest_version_matches_the_packaged_version() -> None:

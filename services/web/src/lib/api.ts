@@ -55,6 +55,7 @@ import {
   PlatformInfo,
   PortabilityExportJob,
   PortabilityImportJob,
+  PortabilityJobSummary,
   PowerStatus,
   ProfileView,
   ProviderInfo,
@@ -963,6 +964,10 @@ export const api = {
   // ── Tenant data portability (#867) ──────────────────────────────────────
   // Export: start (202, returns at once), poll, then download. Import: upload — which
   // only ever *reads* the archive and answers a preview — then apply, then poll.
+  // The list is what makes either survive a reload (#877): a job id held in component
+  // state dies with the page, and the export it named finishes and is swept unoffered.
+  portabilityJobs: () =>
+    request(z.array(PortabilityJobSummary), "/platform/v1/portability/jobs"),
   startPortabilityExport: () =>
     request(PortabilityExportJob, "/platform/v1/portability/exports", { method: "POST" }),
   portabilityExport: (jobId: string) =>

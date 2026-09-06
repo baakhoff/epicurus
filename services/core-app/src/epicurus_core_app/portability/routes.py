@@ -1,9 +1,10 @@
 """The operator-facing portability API — ``/platform/v1/portability`` (#867).
 
-Six endpoints, two shapes. An **export** is started, polled, and downloaded; an **import**
-is uploaded (which only ever *reads* it), previewed, applied, and polled. The asymmetry is
-deliberate: an export can be started with one click because it changes nothing, while an
-import shows the operator exactly what it is about to do and waits to be told to do it.
+Seven endpoints, three shapes. An **export** is started, polled, and downloaded; an
+**import** is uploaded (which only ever *reads* it), previewed, applied, and polled. The
+asymmetry is deliberate: an export can be started with one click because it changes nothing,
+while an import shows the operator exactly what it is about to do and waits to be told to do
+it. The seventh, **the job list**, is what makes either survive a page reload (#877).
 
 Every endpoint is tenant-scoped, and a job id from another tenant reads as absent rather
 than forbidden (constraint #1 — a tenant should not be able to learn that another's job
@@ -12,6 +13,7 @@ exists).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -28,6 +30,7 @@ from epicurus_core_app.portability.models import (
     ImportJobView,
     ImportPreview,
     ImportReportView,
+    PortabilityJobSummary,
 )
 from epicurus_core_app.portability.service import ArchiveTooLarge, PortabilityService
 
@@ -36,6 +39,11 @@ __all__ = ["create_portability_router"]
 log = get_logger("core.portability.routes")
 
 _UPLOAD_CHUNK = 1024 * 1024
+
+# How far back the job list reaches. The list is a re-attachment aid, not a history: the
+# operator needs the job they just started and the handful before it, and the sweep removes
+# everything past the retention window anyway.
+_JOB_LIST_LIMIT = 20
 
 
 def create_portability_router(
@@ -58,6 +66,34 @@ def create_portability_router(
         if job is None or job.kind != kind:
             raise HTTPException(status_code=404, detail=f"no {kind} job {job_id!r}")
         return job
+
+    @router.get("/jobs", response_model=list[PortabilityJobSummary])
+    async def list_jobs(
+        tenant_id: str | None = Query(default=None),
+    ) -> list[PortabilityJobSummary]:
+        """This tenant's recent jobs, newest first, both kinds — how a reload re-attaches.
+
+        Without it a job is reachable only by an id the browser tab holds in memory, so a
+        refresh mid-export orphans the run: it finishes staging, is never offered, and is
+        swept `PORTABILITY_RETENTION_HOURS` later.
+        """
+        tenant = _tenant(tenant_id)
+        jobs = await service.recent(tenant=tenant, limit=_JOB_LIST_LIMIT)
+        # One hop off the loop for the whole page rather than one ``stat`` per row: the list
+        # is polled while a job runs, and twenty blocking syscalls a second is not free.
+        staged = await asyncio.to_thread(_staged_archives, jobs)
+        return [
+            PortabilityJobSummary(
+                id=job.id,
+                kind=job.kind,
+                status=job.status,
+                created_at=job.created_at.isoformat(),
+                updated_at=job.updated_at.isoformat(),
+                archive_available=job.id in staged,
+                size_bytes=job.size_bytes,
+            )
+            for job in jobs
+        ]
 
     @router.post("/exports", response_model=ExportJobView, status_code=202)
     async def start_export(tenant_id: str | None = Query(default=None)) -> ExportJobView:
@@ -149,6 +185,22 @@ def create_portability_router(
         return _import_view(await _job(_tenant(tenant_id), job_id, "import"))
 
     return router
+
+
+def _staged_archives(jobs: list[PortabilityJob]) -> set[str]:
+    """Which of *jobs* are downloadable right now — a ready export whose file is still there.
+
+    Blocking (``Path.exists``), so it is called through a thread; the caller passes the whole
+    page at once.
+    """
+    return {
+        job.id
+        for job in jobs
+        if job.kind == "export"
+        and job.status == "ready"
+        and job.archive_path
+        and Path(job.archive_path).exists()
+    }
 
 
 def _export_view(job: PortabilityJob) -> ExportJobView:

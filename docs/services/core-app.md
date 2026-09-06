@@ -1095,6 +1095,17 @@ lets the module refuse a corrupt transfer and skip an object it already holds by
 A blob half that fails is a warning on a component whose rows still landed, never a retroactive
 failure of the rows.
 
+**The secret inventory has three parts** (`portability/secrets.py` for the third): the
+provider aliases that hold an API key, the connected accounts, and — since #875 —
+`module_secrets`, `{module: [the OpenBao paths its manifest declares that this tenant
+actually holds]}`. That last part closes a blind spot the fan-out could not see: the fan-out
+walks `portable` modules, and a module can hold **no rows at all** and still hold a
+credential the core wrote for it. `messaging` is the pure case — nothing to export, and a
+bot token per connected bridge — so without the inventory the archive said "messaging: not
+portable" and the operator found out from the silence. Each declared path is **probed** for
+presence, never read, so no secret material can reach the manifest even by accident; a vault
+that will not answer yields an empty map rather than a failed export.
+
 **What travels: source of truth only.** Derived state is not exported; it is rebuilt after
 the import — the file rescan for **the tenant just imported into** (never the deployment
 default: the apply threads its tenant all the way down), run with the #848 mass de-index
@@ -1146,10 +1157,18 @@ job carries on — moving house does not cost the operator their conversations b
 mail container is restarting.
 
 **Staging.** Jobs are durable rows (`portability_jobs`), so an export survives the request
-that started it and stays readable by id; the
-archive itself lives in `PORTABILITY_STAGING_DIR`, a **disposable cache** (constraint #2)
+that started it and stays readable by id; the archive itself lives in
+`PORTABILITY_STAGING_DIR`, a **disposable cache** (constraint #2)
 swept after `PORTABILITY_RETENTION_HOURS`. A download of a swept archive is a `410`, and the
 answer is to export again.
+
+**And findable without an id** (#877). Durability is not re-attachment: the Settings card
+held its job id in component state, so a reload orphaned the run — the archive finished
+staging, was never offered, and was swept a day later.
+`GET /platform/v1/portability/jobs` lists the tenant's last 20 jobs newest-first with
+`archive_available` answered from the filesystem, so the shell offers a download exactly when
+one would succeed. The listing never sweeps: a read must not cost the operator their last
+archive.
 
 ### Chat bridges (ADR-0062)
 
@@ -1835,6 +1854,6 @@ docker compose up -d core-app      # comes up with the full stack
 Source is one package, `epicurus_core_app`, split by responsibility: `agent/`
 (loop + MCP host + routes), `llm/` (gateway, providers, power, models), `memory/`
 (store + facts + extraction + facade), `modules.py` (registry), `portability/` (tenant export/import — archive,
-core data sets, jobs, orchestrator, routes), `platform_api.py` (inference
+core data sets, jobs, secret inventory, orchestrator, routes), `platform_api.py` (inference
 endpoints), `app.py` (wiring). The agent targets only the gateway's interface and
 modules only through MCP — never a provider SDK.

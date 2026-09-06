@@ -1,5 +1,9 @@
 # The web shell: static SPA + a same-origin reverse proxy to the core.
-# Rendered by the image entrypoint (envsubst): ${CORE_APP_URL} only.
+# Rendered by the image entrypoint (envsubst): ${CORE_APP_URL} and ${NGINX_RESOLVER} only —
+# NGINX_ENVSUBST_FILTER (see the Dockerfile) keeps nginx's own $host / $core /
+# $proxy_add_x_forwarded_for out of the substitution. ${NGINX_RESOLVER} defaults at container
+# start to the first nameserver in /etc/resolv.conf (#891): Docker's embedded DNS under
+# Compose, the cluster DNS in a Kubernetes pod — so neither deployment needs to configure it.
 
 server {
     listen 8080;
@@ -21,7 +25,7 @@ server {
     # 413), so nginx must not refuse first, and must stream the body to the core rather
     # than spool it to its own disk. An exact-match location wins over the prefix below.
     location = /platform/v1/portability/imports {
-        resolver 127.0.0.11 valid=15s;
+        resolver ${NGINX_RESOLVER} valid=15s;
         set $core ${CORE_APP_URL};
         proxy_pass $core;
         proxy_http_version 1.1;
@@ -38,9 +42,9 @@ server {
     # The core platform API. Buffering OFF end-to-end — SSE (chat tokens,
     # model-pull progress) must stream, never arrive as one blob.
     location /platform/ {
-        # Resolve at request time via Docker's DNS so nginx starts (and keeps
-        # serving the UI) even while the core is down or restarting.
-        resolver 127.0.0.11 valid=15s;
+        # Resolve at request time via the container's own DNS so nginx starts (and
+        # keeps serving the UI) even while the core is down or restarting.
+        resolver ${NGINX_RESOLVER} valid=15s;
         set $core ${CORE_APP_URL};
         proxy_pass $core;
         proxy_http_version 1.1;

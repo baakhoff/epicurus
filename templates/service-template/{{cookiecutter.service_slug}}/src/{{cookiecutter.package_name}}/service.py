@@ -85,3 +85,9 @@ def build_module() -> EpicurusModule:
 #                return report
 #
 #        add_portability_routes(app, module, Portability())
+#
+#    If what the operator would miss is *bytes* rather than rows (objects, attachments),
+#    the same call also serves three blob routes for a store that additionally implements
+#    ``BlobPortabilityStore`` (``blobs`` / ``open_blob`` / ``put_blob``) — one archive member
+#    per object, streamed and capped and skipped individually (#876). See
+#    docs/reference/modules.md § Portability → Blobs.

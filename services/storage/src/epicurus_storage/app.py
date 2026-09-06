@@ -24,11 +24,13 @@ from epicurus_core import (
     PlatformClient,
     add_manifest_route,
     add_ops_routes,
+    add_portability_routes,
     configure_logging,
     get_logger,
 )
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore
+from epicurus_storage.portability import StoragePortability
 from epicurus_storage.service import (
     MODULE_NAME,
     build_module,
@@ -117,6 +119,10 @@ def create_app() -> FastAPI:
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
+    # Tenant portability (#876): the catalogue as records, the objects as blobs. The store is
+    # tenant-agnostic on purpose — every route names its tenant (constraint #1), so nothing
+    # here closes over this deployment's default one.
+    add_portability_routes(app, module, StoragePortability(index, objects))
     app.mount("/mcp", mcp_app)
 
     @app.post("/ingest")

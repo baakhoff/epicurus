@@ -1068,13 +1068,32 @@ operator can open it with tools they already have:
 manifest.json                 what this archive is, and what it deliberately omits
 core/<set>.ndjson             the core's own data, one set per member
 modules/<name>.ndjson         each portable module's stream, verbatim
+modules/<name>/blobs.ndjson   that module's blob listing, verbatim (#876)
+modules/<name>/blobs/<id>     one member per blob — the bytes themselves
 files/<path>                  the tenant file space, relative to the tenant root
 ```
 
 `manifest.json` carries the archive **format version**, the tenant, the timestamp, the
 source's `core-app` / `epicurus-core` versions, one entry per component (state, count,
-schema, module version, and the reason for anything skipped), the **exclusions** with their
-reasons, and the **secret inventory** — names only.
+`blobs` / `blob_bytes`, schema, module version, and the reason for anything skipped), the
+**exclusions** with their reasons, and the **secret inventory** — names only.
+
+**Bytes as well as rows (#876).** Most modules export rows; [`storage`](storage.md) also owns
+**objects**, in a per-tenant bucket that is not part of the file space the core carries itself.
+So the module contract has an optional byte half (`BlobPortabilityStore` — see
+[`modules`](../reference/modules.md#blobs--a-module-whose-data-is-bytes-876)) and the core
+discovers it per module rather than being told: after a module's NDJSON it calls
+`GET /export/blobs`, and a **404** is the answer "this one has no bytes". Where there are bytes,
+each object becomes its own archive member, streamed through the staging directory in both
+directions — an archive of objects must never be an archive-sized allocation — and
+`PORTABILITY_MAX_FILE_MB` caps each one, naming what it omitted. A component member is matched
+as *exactly one path segment* after its prefix, so a stored file genuinely called
+`notes.ndjson` cannot be mistaken for a module's export stream. On apply, bytes go after rows
+(the catalogue entry an object belongs to has to exist first), each member is staged out of the
+tar **once** and hashed on the way, and that digest is declared on the `PUT` — which is what
+lets the module refuse a corrupt transfer and skip an object it already holds byte-identically.
+A blob half that fails is a warning on a component whose rows still landed, never a retroactive
+failure of the rows.
 
 **The secret inventory has three parts** (`portability/secrets.py` for the third): the
 provider aliases that hold an API key, the connected accounts, and — since #875 —
@@ -1541,7 +1560,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `EVENTS_PRUNE_INTERVAL_S` | `3600` | How often the event-log pruner sweeps. |
 | `AUTOMATIONS_POLL_INTERVAL_S` | `60` | How often the automations loop drains the trigger queue and checks schedules (ADR-0105). |
 | `FILES_SCAN_FUSE_ENABLED` | `true` | **Mass de-index fuse** (#848): refuse a file-space scan's purge when the rows it would delete look wholesale — a stale or empty mount must not reconcile `core_files` to zero. `FILES_SCAN_FUSE_MAX_DELETE_RATIO` (`0.5`) and `FILES_SCAN_FUSE_MIN_DELETIONS` (`5`) set the thresholds. See [file space](../reference/files.md#configuration-core-app). |
-| `PORTABILITY_STAGING_DIR` | `/tmp/epicurus-portability` | Where a tenant export is assembled and an uploaded archive is staged (#867) — a **disposable cache** (constraint #2), swept after `PORTABILITY_RETENTION_HOURS` (`24`). `PORTABILITY_MAX_FILE_MB` (`512`) caps a single exported file; `PORTABILITY_MAX_ARCHIVE_MB` (`4096`) caps an upload. |
+| `PORTABILITY_STAGING_DIR` | `/tmp/epicurus-portability` | Where a tenant export is assembled and an uploaded archive is staged (#867) — a **disposable cache** (constraint #2), swept after `PORTABILITY_RETENTION_HOURS` (`24`). `PORTABILITY_MAX_FILE_MB` (`512`) caps a single exported file or module blob; `PORTABILITY_MAX_ARCHIVE_MB` (`4096`) caps an upload. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |

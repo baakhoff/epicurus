@@ -181,6 +181,31 @@ class FileIndex:
             )
             return None if row is None else _row_to_entry(row)
 
+    async def object_entries(
+        self, *, tenant: str, after: str = "", limit: int = 500
+    ) -> list[FileEntry]:
+        """One page of this tenant's **object-backed** entries, ordered by path (#876).
+
+        Paged by path rather than offset so a long export is a sequence of short, indexed
+        queries instead of one cursor held open across every write the module serves
+        meanwhile. ``source="fs"`` rows are deliberately absent: those mirror the core-owned
+        file space (ADR-0063), which travels in the archive's own ``files/`` tree — exporting
+        them here would carry the same tree twice and, worse, carry it as *this* module's
+        source of truth when it is not.
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_StoredFile)
+                .where(
+                    _StoredFile.tenant == tenant,
+                    _StoredFile.source == "object",
+                    *([_StoredFile.path > after] if after else []),
+                )
+                .order_by(_StoredFile.path)
+                .limit(limit)
+            )
+            return [_row_to_entry(r) for r in rows]
+
     async def purge_stale(self, *, tenant: str, seen_paths: set[str]) -> int:
         """Delete stale **filesystem** rows not visited in the most recent scan.
 

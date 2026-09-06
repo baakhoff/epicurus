@@ -87,7 +87,11 @@ from epicurus_core.module_events import (
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
 from epicurus_core.platform_client import PlatformClient
 from epicurus_core.portability import (
+    BLOB_CHUNK_BYTES,
     NDJSON_MEDIA_TYPE,
+    BlobOutcome,
+    BlobPortabilityStore,
+    BlobRef,
     ImportCounts,
     ImportOutcome,
     ImportReport,
@@ -98,6 +102,7 @@ from epicurus_core.portability import (
     iter_ndjson_lines,
     parse_schema,
     schema_verdict,
+    verified_chunks,
 )
 from epicurus_core.redaction import REDACTED_KEYS, is_secret_key, redact_mapping, secret_keys_in
 from epicurus_core.review import (
@@ -125,6 +130,7 @@ from epicurus_core.tenancy import (
 from epicurus_core.tracing import get_tracer, setup_tracing
 
 __all__ = [
+    "BLOB_CHUNK_BYTES",
     "CONTRACT_VERSION",
     "EVENTS_ACK_WAIT_S",
     "EVENTS_DURABLE",
@@ -149,6 +155,9 @@ __all__ = [
     "Attachment",
     "AttachmentSource",
     "AutomationTemplate",
+    "BlobOutcome",
+    "BlobPortabilityStore",
+    "BlobRef",
     "ChatMessage",
     "ChatResult",
     "Collection",
@@ -242,4 +251,5 @@ __all__ = [
     "setup_tracing",
     "tool_envelope",
     "validate_tenant_id",
+    "verified_chunks",
 ]

@@ -32,8 +32,13 @@ from epicurus_core import (
     get_logger,
 )
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
+from epicurus_core_app.container_control import (
+    PROTECTED,
+    ContainerControlDeferred,
+    ContainerControlError,
+    ContainerController,
+)
 from epicurus_core_app.core_events import CoreEventEmitter
-from epicurus_core_app.docker_control import PROTECTED, DockerController, DockerError
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
 log = get_logger("epicurus_core_app.modules")
@@ -85,7 +90,7 @@ class DockerStatus(BaseModel):
     """
 
     available: bool
-    # The probe's own exception text (``DockerAvailability.reason``); ``None`` when available.
+    # The probe's own exception text (``ContainerAvailability.reason``); ``None`` when available.
     reason: str | None = None
 
 
@@ -216,7 +221,7 @@ class ModuleRegistry:
         secrets: SecretStore,
         tenant: str,
         prefs: ModulePrefsStore,
-        docker: DockerController | None = None,
+        docker: ContainerController | None = None,
         docker_unavailable_reason: str | None = None,
         core: CorePseudoModule | None = None,
         events: CoreEventEmitter | None = None,
@@ -231,7 +236,7 @@ class ModuleRegistry:
         # funnel every review surface passes through. None disables emission (tests).
         self._events = events
         # Why ``docker`` is None, for the Modules page's proactive status card (#622) — never
-        # set when ``docker`` isn't, and vice versa (see ``DockerAvailability``).
+        # set when ``docker`` isn't, and vice versa (see ``ContainerAvailability``).
         self._docker_reason = docker_unavailable_reason
         # The reserved in-process pseudo-module (ADR-0093 §2), if wired. Deliberately kept out of
         # ``self._bases`` so ``snapshot()`` stays 1:1 with it (several callers zip the two with
@@ -597,7 +602,14 @@ class ModuleRegistry:
             assert self._docker is not None  # narrowed by ``deferred`` for mypy
             try:
                 containers = await asyncio.to_thread(self._docker.remove_module, name)
-            except DockerError as exc:
+            except ContainerControlDeferred as exc:
+                # The runtime is there but could not act *now* — RBAC said no, or the API was
+                # unreachable (#891). That is the ordinary degraded mode, not a failed removal:
+                # tombstone anyway and tell the operator the workload keeps running until the
+                # next restart, exactly as a missing socket does.
+                deferred = True
+                log.warning("container teardown deferred", module=name, error=str(exc))
+            except ContainerControlError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
         # Always tombstone — this hides the module everywhere and stops routing now, and is
         # re-enforced on the next startup so a ``compose up`` cannot silently resurrect it.
@@ -611,11 +623,14 @@ class ModuleRegistry:
         return {"removed": name, "containers": containers, "container_teardown_deferred": deferred}
 
     def docker_status(self) -> DockerStatus:
-        """Whether Docker is reachable right now, and why not (#622) — a pure read, no probe.
+        """Whether container control works right now, and why not (#622) — a pure read.
 
-        The probe already ran once at startup (:meth:`DockerController.from_env`); this just
-        reports its outcome so the Modules page can show an accurate, proactive status instead
-        of an operator only finding out by attempting a removal or reading the logs.
+        The runtime was selected and probed once at startup (#891,
+        :func:`~epicurus_core_app.container_control.select_controller`); this just reports its
+        outcome so the Modules page can show an accurate, proactive status instead of an
+        operator only finding out by attempting a removal or reading the logs. Named for
+        Docker because that is the runtime it was born on and the field is on the wire; it
+        answers for whichever runtime is selected.
         """
         if self._docker is not None:
             return DockerStatus(available=True)

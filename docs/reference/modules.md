@@ -984,15 +984,20 @@ needs the Docker socket.
 - **Endpoint** — `DELETE /platform/v1/modules/{name}` tombstones the module and (when a socket is
   available) stops + removes its container. Returns
   `{removed, containers, container_teardown_deferred}` — `container_teardown_deferred` is **true**
-  when no socket was available (the container is still running until the next restart), so the shell
+  when the workload was left running — no socket, or a runtime that refused (#891) — so the shell
   shows an **informational** notice rather than an error. **404** unknown module · **403** protected
   service (enforced *before* the tombstone is written, regardless of the socket). It soft-removes
   with **200** even without Docker — there is no longer a 503 path.
-- **Tightly scoped (security).** When the teardown does run, the core reaches Docker only through one
-  `DockerController`, which removes **only a configured module's own container** — matched by both
+- **Tightly scoped (security).** When the teardown does run, the core reaches the container runtime
+  only through one seam (`container_control.py`, #891) — under Compose its `DockerController` arm,
+  which removes **only a configured module's own container** — matched by both
   its `com.docker.compose.service` **and** `com.docker.compose.project` labels, so a co-located
   stack is never touched — and **never** core-app, web, or a data-plane / infra service (a hard
   denylist on top of the configured-module guard, also enforced in the registry before tombstoning).
+  On Kubernetes the same denylist and the same guard apply to the `kubernetes` arm, which scales the
+  module's Deployment to zero (matched by `app.kubernetes.io/part-of` + `app.kubernetes.io/component`)
+  and deletes nothing; a refused grant defers the teardown exactly as a missing socket does. See
+  [core-app § Container runtime](../services/core-app.md#container-runtime-891).
 - **Least-privilege by default, via a proxy (#708, ADR-0109).** `core-app` reaches Docker through
   `docker-proxy-core`, a filtered allowlist proxy scoped to exactly the calls this path makes —
   list/inspect a container, stop/restart/remove one by id — never exec/create/attach/images/

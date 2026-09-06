@@ -211,7 +211,7 @@ where `infra/k8s/epicurus/Chart.yaml` doesn't exist yet — the chart and the
 images it deploys are gated together without either workflow depending on the
 other having merged first.
 
-See `docs/infrastructure/kubernetes.md` for the operator-facing page: cluster
+See [Kubernetes (the Helm chart)](kubernetes.md) for the operator-facing page: cluster
 prerequisites, `values.yaml` reference, and the in-chart vs. external-service
 switches for the data plane.
 

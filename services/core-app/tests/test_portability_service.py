@@ -38,12 +38,19 @@ from epicurus_core_app.portability.models import (
     PORTABILITY_FORMAT_VERSION,
     ArchiveManifest,
     ComponentEntry,
+    ImportComponentPreview,
     ImportPreview,
     ImportReportView,
     SecretsInventory,
 )
 from epicurus_core_app.portability.secrets import collect_module_secrets
-from epicurus_core_app.portability.service import PortabilityService
+from epicurus_core_app.portability.service import (
+    FILES_COMPONENT,
+    REEMBED_COMPONENT,
+    RESCAN_COMPONENT,
+    PortabilityService,
+    _apply_plan,
+)
 
 TENANT = "local"
 WHEN = datetime(2026, 9, 4, 9, 0, 0, tzinfo=UTC)
@@ -851,6 +858,47 @@ async def test_an_apply_reports_progress_for_every_step_it_takes(tmp_path: Path)
         assert not any(e.state in ("pending", "running") for e in final.values())
     finally:
         await engine.dispose()
+
+
+def _bare_preview(*components: ImportComponentPreview) -> ImportPreview:
+    """A preview with nothing real behind it — enough to seed an apply plan from."""
+    return ImportPreview(
+        manifest=ArchiveManifest(
+            tenant=TENANT,
+            created_at="2026-09-06T00:00:00Z",
+            core_app_version="0.122.0",
+            epicurus_core_version="0.37.0",
+        ),
+        components=list(components),
+    )
+
+
+def test_the_files_step_is_seeded_even_when_the_archive_carries_no_files() -> None:
+    """An empty file space must not push the files row *below* the two rebuild rows.
+
+    ``preview_import`` names a files component only when the archive has file members, but
+    the apply walks the files step unconditionally — so a seed built from the preview alone
+    would miss the row, and ``Progress.begin`` would append it at the moment it starts, i.e.
+    after ``file index`` and ``re-embed`` had already been seeded. The operator would watch
+    the steps run in one order and the list render them in another.
+    """
+    plan = _apply_plan(_bare_preview(ImportComponentPreview(name="calendar", kind="module")))
+    assert [(e.kind, e.name) for e in plan] == [
+        ("module", "calendar"),
+        ("files", FILES_COMPONENT),
+        ("rebuild", RESCAN_COMPONENT),
+        ("rebuild", REEMBED_COMPONENT),
+    ]
+    assert all(e.state == "pending" for e in plan)
+
+
+def test_an_archive_that_carries_files_is_not_given_a_second_files_row() -> None:
+    """The preview's own row wins — it is the one carrying the record count to display."""
+    plan = _apply_plan(
+        _bare_preview(ImportComponentPreview(name="files", kind="files", records=12))
+    )
+    assert [e.kind for e in plan].count("files") == 1
+    assert plan[0].count == 12
 
 
 async def test_a_refused_component_is_listed_as_skipped_with_the_previews_own_words(

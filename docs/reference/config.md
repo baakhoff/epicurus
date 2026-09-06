@@ -213,6 +213,19 @@ through pydantic-settings like the rest of this page.
 | --- | --- | --- | --- |
 | `DOCKER_GID` | unset | core-app entrypoint | Only relevant if you've layered `services/core-app/compose.docker-socket.yaml` — the raw-socket escape hatch from the default `docker-proxy-core` path (#708, ADR-0109). The host's docker-socket group id; when set, the entrypoint joins it (via `setgroups`, while still root) before dropping to the unprivileged app uid — the missing half of that overlay, which mounts `/var/run/docker.sock` but cannot by itself make it reachable by a non-root process. Unset (the default, and irrelevant unless you're using the overlay): module removal and the Ollama KV-cache restart apply immediately regardless, through the proxy (see [modules](modules.md#removing-a-module--tombstone-now-tear-the-container-down-out-of-band-127-382-adr-0028)). Find your host's value with `getent group docker \| cut -d: -f3` or `stat -c '%g' /var/run/docker.sock`. |
 
+## Release track (#893)
+
+Not a `CoreAppSettings` field either — deliberately. `EPICURUS_VERSION` is not a knob the
+core acts on; it is the deployment's label for the build it is running, and a setting with a
+default would invent an answer where the honest one is "nothing said". So the core reads the
+env directly and reports it, unchanged, as `release_track` on
+[`GET /platform/v1/info`](platform-api.md#get-platformv1info) — which is what the Settings →
+Platform card shows as *track*.
+
+| Env var | Default | Scope | Meaning |
+| --- | --- | --- | --- |
+| `EPICURUS_VERSION` | unset | core-app | The image tag this deployment pulled — `latest`, `testing`, or a semver. Compose already interpolates it into every fragment's `image:`, but that is a file-level substitution the container never sees, so `services/core-app/compose.yaml` passes it into the container's `environment:` as well; the Helm chart sets it from `image.tag` (or the chart's `appVersion`). Unset or blank reports `null`, and the card draws an em dash rather than guessing. |
+
 ## Type aliases
 
 ```python

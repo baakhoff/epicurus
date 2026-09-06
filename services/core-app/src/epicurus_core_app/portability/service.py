@@ -1242,6 +1242,13 @@ def _apply_plan(preview: ImportPreview | None) -> list[ComponentEntry]:
             entry.state = "skipped"
             entry.reason = component.detail
         plan.append(entry)
+    # The preview names a files component only when the archive carries file members, but the
+    # apply walks the files step unconditionally. Without this the row would be missing from
+    # the seed and `Progress.begin` would append it when it starts — i.e. *after* the two
+    # rebuild rows below — so an archive from a tenant with an empty file space would show its
+    # steps out of order. Seed it here instead, in the order the apply actually walks.
+    if not any(entry.kind == "files" for entry in plan):
+        plan.append(ComponentEntry(name=FILES_COMPONENT, kind="files"))
     plan.append(ComponentEntry(name=RESCAN_COMPONENT, kind="rebuild"))
     plan.append(ComponentEntry(name=REEMBED_COMPONENT, kind="rebuild"))
     return plan

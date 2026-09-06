@@ -18,6 +18,7 @@ from epicurus_core import (
     PlatformClient,
     add_manifest_route,
     add_ops_routes,
+    add_portability_routes,
     configure_logging,
     get_logger,
     scope_collection,
@@ -30,6 +31,7 @@ from epicurus_knowledge.fuse import FusePolicy, rebuild_refusals
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
+from epicurus_knowledge.portability import KnowledgePortability
 from epicurus_knowledge.reader import ApiVaultReader, DiskVaultReader
 from epicurus_knowledge.resolver import KnowledgeResolver, create_resolver_router
 from epicurus_knowledge.runner import IndexRunner
@@ -277,6 +279,12 @@ def create_app() -> FastAPI:
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
+
+    # Tenant data portability (#867, #873): the suggestion queue + its resolved-decision
+    # audit trail are this module's only source-of-truth data outside the vault (which
+    # travels via the archive's files/ tree instead). Declaring `portable=True` above and
+    # serving the routes here are separate steps on purpose — see add_portability_routes.
+    add_portability_routes(app, module, KnowledgePortability(suggestion_store, suggestion_audit))
 
     # The review page (#220): registered BEFORE the editor pages router so its literal
     # GET /pages/review route wins over the editor's GET /pages/{page_id} path param.

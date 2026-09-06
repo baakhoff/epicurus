@@ -315,7 +315,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.29.0",
+        version="0.30.0",
         description=(
             "Obsidian vault RAG + platform self-documentation: semantic search,"
             " incremental indexing, and multi-project knowledge bases."
@@ -384,6 +384,11 @@ def build_module(
         # Holds embeddings (vault + platform/module docs): re-embed on demand when the
         # embedding model changes, via POST /reindex (the core's re-embed fan-out, #332).
         reindexable=True,
+        # The suggestion queue + its resolved-decision audit trail travel through the tenant
+        # archive (#867, #873) — see KnowledgePortability. Everything else the module owns
+        # (the doc index, module docs, versions, the vault's vectors) is derived and excluded;
+        # the vault's own content travels via the archive's `files/` tree instead.
+        portable=True,
         # Starter presets for the Templates tab (#705, ADR-0105) — never auto-instantiated.
         automation_templates=[
             AutomationTemplate(

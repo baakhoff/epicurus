@@ -12,6 +12,8 @@ operator-facing control exists.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from sqlalchemy import Integer, String
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -81,3 +83,32 @@ class LeadTimePrefsStore:
                 session.add(row)
             row.lead_days = lead_days
             await session.commit()
+
+    async def export_pref(self, tenant: str) -> int | None:
+        """The explicitly-set lead time for *tenant*, or ``None`` if unset (portability export,
+        #871). An unset preference has nothing worth carrying — the default travels with the
+        module's code, not the archive."""
+        async with self._session() as session:
+            row = await session.get(_LeadTimePrefRow, tenant)
+            if row is None or row.lead_days is None:
+                return None
+            return row.lead_days
+
+    async def upsert(
+        self, tenant: str, lead_days: int, *, dry_run: bool = False
+    ) -> Literal["created", "updated"]:
+        """Upsert the lead-time preference for *tenant* (portability import, #871).
+
+        *dry_run* reports the outcome without writing.
+        """
+        async with self._session() as session:
+            row = await session.get(_LeadTimePrefRow, tenant)
+            outcome: Literal["created", "updated"] = "updated" if row is not None else "created"
+            if dry_run:
+                return outcome
+            if row is None:
+                row = _LeadTimePrefRow(tenant=tenant)
+                session.add(row)
+            row.lead_days = lead_days
+            await session.commit()
+        return outcome

@@ -21,6 +21,7 @@ from epicurus_core import (
     PlatformClient,
     add_manifest_route,
     add_ops_routes,
+    add_portability_routes,
     configure_logging,
     emit_event,
     get_logger,
@@ -29,6 +30,7 @@ from epicurus_mail.cache import CachedMailbox
 from epicurus_mail.db import MailCache
 from epicurus_mail.gmail import GmailProvider
 from epicurus_mail.poller import run_periodic
+from epicurus_mail.portability import MailPortability
 from epicurus_mail.provider import ComposedMessage, MailNotConnected
 from epicurus_mail.service import (
     _NOT_CONNECTED_HINT,
@@ -174,6 +176,11 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
+    # Tenant data portability (#867/#874): every mail table is a Gmail-derived cache (see
+    # epicurus_mail.portability), so there is nothing to carry — the module deliberately
+    # leaves `portable=False` (the core never fans out to these routes today), but they are
+    # still served so a future genuine preference is a one-line flip of that flag.
+    add_portability_routes(app, module, MailPortability())
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:

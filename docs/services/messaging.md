@@ -74,6 +74,37 @@ None of its own — the conversation history lives in the core's `agent_messages
 (#369), read by the provider. The loopback provider keeps an in-memory list of delivered
 replies (disposable; surfaced in its `BridgeStatus.detail`).
 
+## Portability (#875, ADR-0133)
+
+**`portable = False`, deliberately — and there is nothing to make portable.** Tenant data
+portability carries a module's *source-of-truth rows*; this module has none. The
+conversation history a bridge produces is the core's (`agent_messages`, tenant-scoped) and
+travels in `core/conversations.ndjson` with everything else. The only per-tenant state the
+module has is the `{token, enabled}` pair per bridge in OpenBao — and a **secret never enters
+an archive at any strength** (ADR-0133). So there is no `PortabilityStore` here, no
+`GET /export` / `POST /import`, and the archive records `messaging` as skipped: *"module
+does not declare portable data"*.
+
+| Kind | Stable id | Travels |
+| --- | --- | --- |
+| — | — | nothing: the module persists no tenant rows |
+
+| Excluded | Why |
+| --- | --- |
+| `tenants/<tenant>/messaging/<bridge>` (`{token, enabled}`) | **secret** — bot tokens live in OpenBao and are never exported. Their *paths* are named in the archive's secret inventory (below). |
+| the loopback provider's delivered-reply list | operational — an in-memory, disposable buffer of this process's own deliveries. |
+| bridge conversation history | not this module's — it is the core's `agent_messages`, and travels in `core/conversations.ndjson`. |
+
+**What the operator actually needs is the reconnect line**, and that is what the core's
+[secret inventory](core-app.md#tenant-data-portability-867) provides: on export it probes
+every enabled module's manifest `secrets[]` for **presence** (never the value) and records
+`module_secrets: {"messaging": ["messaging/discord", "messaging/telegram"]}` in
+`manifest.json`; the import report replays it as *"re-enter in module settings: messaging —
+discord, telegram"*. Nothing about it is messaging-specific — any module that holds a
+credential and no rows gets the same treatment — but this module is the case that motivated
+it. Reconnect from **Settings → Chat bridges** after the import (#369); the tokens
+themselves have to be fetched from Discord/Telegram again, exactly as at first setup.
+
 ## Dependencies
 
 NATS (both subjects) · OpenBao (per-tenant bridge tokens, for real bridges) · the

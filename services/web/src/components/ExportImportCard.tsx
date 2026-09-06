@@ -8,7 +8,14 @@
  *
  *  The card renders data, not decisions: every verdict, count, exclusion and "re-enter this"
  *  line comes from the core (ADR-0018). Both halves poll while a job is in flight and stop
- *  the moment it settles, so an idle Settings page makes no requests. */
+ *  the moment it settles, so an idle Settings page makes no requests.
+ *
+ *  **A job outlives this page** (#877). The card used to hold a job id in component state
+ *  and nothing else, so a reload mid-export orphaned the run: it finished staging, was
+ *  never offered, and was swept a day later. The job list is now the source of truth — the
+ *  card reads it on mount and re-attaches to the newest job of each kind, whatever this tab
+ *  did or did not start. Deliberately not `localStorage`: the server's list is right on a
+ *  second device and in a different browser, and a remembered id is right in neither. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Download, Upload } from "lucide-react";
 import { useRef, useState } from "react";
@@ -18,10 +25,12 @@ import { api, ApiError } from "@/lib/api";
 import type {
   PortabilityComponent,
   PortabilityImportJob,
+  PortabilityJobSummary,
   PortabilityPreviewComponent,
   PortabilityReport,
   PortabilitySecrets,
 } from "@/lib/contracts";
+import { relativeTime } from "@/lib/format";
 
 const POLL_MS = 1_000;
 
@@ -69,9 +78,17 @@ function ComponentRows({ components }: { components: PortabilityComponent[] }) {
   );
 }
 
+/** `messaging/discord` → `discord`: the module's name is already the line's subject, so
+ *  repeating it in every path turns "messaging — discord, telegram" into noise. */
+function secretLabel(module: string, path: string): string {
+  return path.startsWith(`${module}/`) ? path.slice(module.length + 1) : path;
+}
+
 /** "Re-enter these" — secrets are never in the archive, so the list is all we can carry. */
 function SecretsNotice({ secrets }: { secrets: PortabilitySecrets }) {
-  if (!secrets.provider_keys.length && !secrets.connected_accounts.length) return null;
+  const modules = Object.entries(secrets.module_secrets ?? {});
+  if (!secrets.provider_keys.length && !secrets.connected_accounts.length && !modules.length)
+    return null;
   return (
     <p className="text-[11px] text-warn">
       Not carried (secrets never leave the vault):
@@ -81,25 +98,49 @@ function SecretsNotice({ secrets }: { secrets: PortabilitySecrets }) {
       {secrets.connected_accounts.length > 0 && (
         <> reconnect {secrets.connected_accounts.join(", ")}.</>
       )}
+      {modules.length > 0 && (
+        <>
+          {" "}
+          Re-enter in module settings:{" "}
+          {modules
+            .map(([module, paths]) => `${module} — ${paths.map((p) => secretLabel(module, p)).join(", ")}`)
+            .join("; ")}
+          .
+        </>
+      )}
     </p>
   );
 }
 
-function ExportHalf() {
+function ExportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
+  const qc = useQueryClient();
   const [jobId, setJobId] = useState<string | null>(null);
   const start = useMutation({
     mutationFn: () => api.startPortabilityExport(),
-    onSuccess: (job) => setJobId(job.id),
+    onSuccess: (job) => {
+      setJobId(job.id);
+      qc.invalidateQueries({ queryKey: ["portability-jobs"] });
+    },
   });
+
+  // What this tab started, else the newest export the server knows about (the list is
+  // newest-first). That second clause is the whole of #877: after a reload there is no
+  // `jobId`, and without it a finished archive is never offered to anyone.
+  const activeId = jobId ?? jobs.find((entry) => entry.kind === "export")?.id ?? null;
+  const summary = jobs.find((entry) => entry.id === activeId) ?? null;
   const job = useQuery({
-    queryKey: ["portability-export", jobId],
-    queryFn: () => api.portabilityExport(jobId as string),
-    enabled: jobId !== null,
+    queryKey: ["portability-export", activeId],
+    queryFn: () => api.portabilityExport(activeId as string),
+    enabled: activeId !== null,
     refetchInterval: (query) => (query.state.data?.status === "running" ? POLL_MS : false),
   });
 
   const data = job.data;
   const running = data?.status === "running" || start.isPending;
+  // Until the list has caught up with a job we just started, assume the archive we are
+  // about to stage will be there — the alternative is hiding a live download link for a
+  // second. A resumed job is only ever trusted to the server's answer.
+  const archiveAvailable = summary ? summary.archive_available : jobId !== null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -108,7 +149,7 @@ function ExportHalf() {
           <Download size={14} />
           {running ? "Exporting…" : "Export everything"}
         </Button>
-        {data?.status === "ready" && (
+        {data?.status === "ready" && archiveAvailable && (
           <a
             className="inline-flex items-center gap-2 rounded-(--radius-field) border border-accent/40 bg-accent-dim px-3.5 py-2 text-sm text-accent-strong"
             href={api.portabilityArchiveUrl(data.id)}
@@ -123,6 +164,12 @@ function ExportHalf() {
         <p className="text-sm text-danger">{(start.error as Error).message}</p>
       )}
       {data?.status === "failed" && <p className="text-sm text-danger">{data.error}</p>}
+      {data?.status === "ready" && !archiveAvailable && (
+        <p className="text-[11px] text-warn">
+          That archive has been cleaned up — staging is a cache, not storage. Export again to
+          get a fresh one.
+        </p>
+      )}
       {data && data.progress.length > 0 && <ComponentRows components={data.progress} />}
       {data?.manifest && <SecretsNotice secrets={data.manifest.secrets} />}
     </div>
@@ -206,23 +253,32 @@ function ReportView({ report }: { report: PortabilityReport }) {
   );
 }
 
-function ImportHalf() {
+function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
   const qc = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
   const [job, setJob] = useState<PortabilityImportJob | null>(null);
 
+  const settled = (next: PortabilityImportJob) => {
+    setJob(next);
+    qc.invalidateQueries({ queryKey: ["portability-jobs"] });
+  };
   const upload = useMutation({
     mutationFn: (file: File) => api.uploadPortabilityArchive(file),
-    onSuccess: setJob,
+    onSuccess: settled,
   });
   const apply = useMutation({
     mutationFn: (jobId: string) => api.applyPortabilityImport(jobId),
-    onSuccess: setJob,
+    onSuccess: settled,
   });
+  // This tab's own job, else the newest import on the server — so a reload lands back on
+  // the preview it was about to apply, or the report of the apply it started.
+  const activeId = job?.id ?? jobs.find((entry) => entry.kind === "import")?.id ?? null;
   const polled = useQuery({
-    queryKey: ["portability-import", job?.id],
-    queryFn: () => api.portabilityImport(job?.id as string),
-    enabled: job?.status === "running",
+    queryKey: ["portability-import", activeId],
+    queryFn: () => api.portabilityImport(activeId as string),
+    // Fetch once to re-attach to a job this tab did not start; after that, only while the
+    // apply is actually in flight (an upload's answer is already the whole preview).
+    enabled: activeId !== null && (job === null || job.status === "running"),
     refetchInterval: (query) => (query.state.data?.status === "running" ? POLL_MS : false),
   });
 
@@ -320,7 +376,57 @@ function ImportHalf() {
   );
 }
 
+function jobTone(status: string): "ok" | "danger" | "accent" | "dim" {
+  if (status === "ready" || status === "done") return "ok";
+  if (status === "failed") return "danger";
+  if (status === "running") return "accent";
+  return "dim";
+}
+
+/** The jobs behind the two halves — the history a reload can still reach into.
+ *
+ *  The halves already show the newest of each kind in full; this is the rest, so a second
+ *  export started an hour ago is still downloadable rather than merely swept. */
+function RecentJobs({ jobs }: { jobs: PortabilityJobSummary[] }) {
+  if (jobs.length === 0) return null;
+  return (
+    <details className="text-[11px] text-ink-dim" data-testid="portability-jobs">
+      <summary className="cursor-pointer">Recent jobs ({jobs.length})</summary>
+      <ul className="mt-1 flex flex-col gap-0.5">
+        {jobs.map((job) => (
+          <li key={job.id} className="flex flex-wrap items-center gap-1.5">
+            <Dot tone={jobTone(job.status)} />
+            <span className="text-ink">{job.kind}</span>
+            <span>· {job.status}</span>
+            <span>· {relativeTime(new Date(job.created_at))}</span>
+            {job.kind === "export" && job.status === "ready" && (
+              job.archive_available ? (
+                <a className="text-accent-strong underline" href={api.portabilityArchiveUrl(job.id)} download>
+                  download ({formatBytes(job.size_bytes)})
+                </a>
+              ) : (
+                <span className="text-warn">· archive cleaned up</span>
+              )
+            )}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 export function ExportImportCard() {
+  // Read on mount, before anything is clicked: this is how the card finds the job it (or
+  // another tab, or another device) started. It polls only while something is in flight, so
+  // an idle Settings page settles back to silence.
+  const jobs = useQuery({
+    queryKey: ["portability-jobs"],
+    queryFn: () => api.portabilityJobs(),
+    refetchInterval: (query) =>
+      query.state.data?.some((job) => job.status === "running") ? POLL_MS : false,
+  });
+  const list = jobs.data ?? [];
+
   return (
     <Card>
       <h3 className="mb-2 font-serif text-base text-ink">Export &amp; import</h3>
@@ -331,10 +437,15 @@ export function ExportImportCard() {
         archive twice changes nothing.
       </p>
       <div className="flex flex-col gap-4">
-        <ExportHalf />
+        <ExportHalf jobs={list} />
         <div className="border-t border-edge pt-3">
-          <ImportHalf />
+          <ImportHalf jobs={list} />
         </div>
+        {list.length > 0 && (
+          <div className="border-t border-edge pt-3">
+            <RecentJobs jobs={list} />
+          </div>
+        )}
       </div>
     </Card>
   );

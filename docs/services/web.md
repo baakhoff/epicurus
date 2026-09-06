@@ -360,7 +360,7 @@ click to each job's label and detail line. "Load more" fetches the next page wit
 page's `next_cursor` — each page is its own `useQuery` keyed on that cursor (react-query caches
 them independently) rather than accumulating into local state.
 
-### Settings → Export & import (#867)
+### Settings → Export & import (#867, #877)
 
 `ExportImportCard.tsx` — tenant data portability from the UI: take everything to another
 epicurus (see [Export & import](../user/export-import.md) and the
@@ -379,14 +379,34 @@ multi-gigabyte blob is ever held in the tab.
 **preview**: where the archive came from, a table of components with record counts and a
 `Badge` verdict (`ok` / `warning` / `refused`, each with the core's own explanation), a
 collapsed list of what the archive deliberately leaves behind, and the "not carried" line
-naming the API keys to re-enter and the accounts to reconnect. **Apply** is a second,
+naming the API keys to re-enter, the accounts to reconnect, and the module credentials to
+re-enter in module settings (#875 — `messaging — discord, telegram`, the OpenBao path's
+module prefix trimmed because the module already names the line). **Apply** is a second,
 deliberate press — disabled outright when the preview says the archive is incompatible. The
 final report shows per-component created/updated/unchanged counts, files written vs. left
 alone (conflicts named), and the two rebuilds the import triggers.
 
-Both halves poll only while a job is in flight and stop the moment it settles, so an idle
-Settings page makes no requests. Every verdict, count, exclusion and re-enter line comes
-from the core — the card renders data, it does not decide anything (ADR-0018).
+**A job outlives the page** (#877). On mount the card reads
+`GET /platform/v1/portability/jobs` and re-attaches to the newest job of each kind, whatever
+this tab did or did not start: a running export resumes its progress list, a finished one
+offers its download, and an apply left mid-flight comes back with its report. A `ready`
+export whose staged archive has since been cleaned up says so instead of offering a link
+that would 410, and a **Recent jobs** disclosure lists every job the endpoint returned — the
+two the halves already show included — each with a download beside it while its archive
+lasts. Deliberately not `localStorage`: the server's list is right on a second device and in
+a different browser, and a remembered id is right in neither.
+
+Deliberately **not** rendered (#886): a module's byte half. `ImportComponentResult.blobs` —
+how many objects were written, and the `conflicts` / `missing` id lists — and the
+per-component `warnings` that repeat them are in the report the API returns but have no row
+in this card; an operator who needs them reads
+`GET /platform/v1/portability/imports/{id}`. The same holds on the way out: the export
+progress list shows a component's record `count`, not its `blobs` / `blob_bytes`.
+
+Both halves poll only while a job is in flight and stop the moment it settles — as does the
+job list itself — so an idle Settings page settles back to no requests. Every verdict,
+count, exclusion and re-enter line comes from the core; the card renders data, it does not
+decide anything (ADR-0018).
 
 ### Notification center (#671, ADR-0104)
 

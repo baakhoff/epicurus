@@ -32,6 +32,7 @@ __all__ = [
     "ImportPreview",
     "ImportReportView",
     "ImportVerdict",
+    "PortabilityJobSummary",
     "SecretsInventory",
     "as_json",
 ]
@@ -106,14 +107,22 @@ class SecretsInventory(BaseModel):
     these accounts were connected. The import report replays the list as "re-enter these,
     reconnect those" instead of leaving the operator to discover it one broken feature at
     a time.
+
+    ``module_secrets`` is the same idea one level out (#875): a module holds no rows worth
+    exporting and still holds *credentials* the core wrote for it — a chat bridge's bot
+    token, say. Keyed by module name, valued by the paths its manifest declares that are
+    actually **present** for this tenant, so the report can say "reconnect messaging's
+    Discord and Telegram bridges" rather than leaving the operator to notice the silence.
+    Names only, in every case: no value is ever read into this.
     """
 
     provider_keys: list[str] = Field(default_factory=list)
     connected_accounts: list[str] = Field(default_factory=list)
+    module_secrets: dict[str, list[str]] = Field(default_factory=dict)
 
     @property
     def empty(self) -> bool:
-        return not self.provider_keys and not self.connected_accounts
+        return not self.provider_keys and not self.connected_accounts and not self.module_secrets
 
 
 class ArchiveManifest(BaseModel):
@@ -127,6 +136,30 @@ class ArchiveManifest(BaseModel):
     components: list[ComponentEntry] = Field(default_factory=list)
     exclusions: list[ExclusionEntry] = Field(default_factory=list)
     secrets: SecretsInventory = Field(default_factory=SecretsInventory)
+
+
+class PortabilityJobSummary(BaseModel):
+    """One row of ``GET /platform/v1/portability/jobs`` — enough to re-attach, no more (#877).
+
+    Deliberately not either job view: the list exists so a reloaded tab can find the job it
+    started, and dragging every component entry, manifest and report along for twenty rows
+    would make the cheapest read on the surface the most expensive one. The card follows an
+    id it recognises here into the full view it already had.
+    """
+
+    id: str
+    kind: Literal["export", "import"]
+    # A plain string rather than a Literal: the two kinds have different vocabularies
+    # (``running``/``ready``/``failed`` against ``staged``/``running``/``done``/``failed``),
+    # and a union of both would let this model claim a pairing neither job can produce.
+    status: str
+    created_at: str
+    updated_at: str
+    # Only an export has an archive, only once it is ``ready``, and only for as long as its
+    # staged file survives (staging is a disposable cache). Answered from the filesystem, so
+    # the card offers a download link exactly when the download would work.
+    archive_available: bool = False
+    size_bytes: int = 0
 
 
 class ExportJobView(BaseModel):

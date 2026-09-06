@@ -152,6 +152,26 @@ class PortabilityJobStore:
             row.updated_at = datetime.now(UTC)
             await session.commit()
 
+    async def recent(self, *, tenant: str, limit: int = 20) -> list[PortabilityJob]:
+        """This tenant's most recent jobs, newest first, capped at *limit* (#877).
+
+        The read a reloaded browser tab makes: the card holds a job id only for the life of
+        the page, so without this an export started a minute ago is unreachable and its
+        archive is swept without ever being offered. Tenant-filtered like every other read
+        here — one tenant never learns that another's job exists.
+
+        Ordered by ``created_at`` with the id as a tiebreak, so two jobs opened in the same
+        microsecond still come back in a stable order rather than the storage engine's.
+        """
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(_PortabilityJobRow)
+                .where(_PortabilityJobRow.tenant == tenant)
+                .order_by(_PortabilityJobRow.created_at.desc(), _PortabilityJobRow.id.desc())
+                .limit(limit)
+            )
+            return [PortabilityJob(row) for row in rows]
+
     async def expired(self, *, tenant: str, before: datetime) -> list[PortabilityJob]:
         """Jobs last touched before *before* — the sweep's candidates."""
         async with self._session() as session:

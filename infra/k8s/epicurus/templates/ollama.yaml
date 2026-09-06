@@ -1,0 +1,138 @@
+{{- if .Values.ollama.enabled }}
+{{- $p := .Values.ollama.persistence }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "ollama") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "ollama") | nindent 4 }}
+---
+{{- /*
+  A StatefulSet, and its component label is exactly `ollama`: the core's
+  Kubernetes container-runtime seam (#891) rollout-restarts THIS workload when the
+  operator applies a KV-cache change (#307), finding it by
+  part-of=epicurus + component=ollama. Renaming either label breaks that path.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ollama
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "ollama") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  serviceName: ollama
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "ollama") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "ollama") | nindent 8 }}
+    spec:
+      {{- with .Values.ollama.gpu.runtimeClassName }}
+      runtimeClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: ollama
+          image: {{ include "epicurus.thirdPartyImage" .Values.ollama.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 11434
+              protocol: TCP
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            {{- range $k, $v := .Values.ollama.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          resources:
+            {{- with .Values.ollama.resources.requests }}
+            requests:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+            {{- if or .Values.ollama.gpu.enabled .Values.ollama.resources.limits }}
+            limits:
+              {{- with .Values.ollama.resources.limits }}
+              {{- toYaml . | nindent 14 }}
+              {{- end }}
+              {{- if .Values.ollama.gpu.enabled }}
+              {{ .Values.ollama.gpu.resourceName }}: {{ .Values.ollama.gpu.count }}
+              {{- end }}
+            {{- end }}
+      {{- if or (not $p.enabled) $p.existingClaim }}
+      volumes:
+        - name: models
+        {{- if $p.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $p.existingClaim }}
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.ollama.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.ollama.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.ollama.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and $p.enabled (not $p.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: models
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $p.size }}
+        {{- include "epicurus.storageClass" (dict "ctx" $ "class" $p.storageClass) | nindent 8 }}
+  {{- end }}
+{{- end }}

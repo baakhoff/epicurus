@@ -193,9 +193,10 @@ task new-module -- "My Module"
 It renders the template (package, Dockerfile, compose fragment, tests), assigns
 the next free host port from the [host-port registry](../reference/ports.md), and
 wires the module into the root `pyproject.toml` (mypy + ruff), the top-level
-`compose.yaml` `include:` list, the core's `module_urls`, and the smoke CI override
-(`infra/ci/compose.ci.yaml`) — then refreshes `uv.lock`. Replace the sample `ping`
-tool and run the gates:
+`compose.yaml` `include:` list, the core's `module_urls`, the smoke CI override
+(`infra/ci/compose.ci.yaml`), and the [Helm chart](../infrastructure/kubernetes.md)'s
+`modules` map (`infra/k8s/epicurus/values.yaml`) — then refreshes `uv.lock`. Replace
+the sample `ping` tool and run the gates:
 
 ```bash
 uv sync --all-packages
@@ -206,9 +207,10 @@ task smoke
 ### Wiring it by hand
 
 If you scaffold with bare `cookiecutter templates/service-template` instead, do
-these four steps yourself — the **runtime smoke gate** (`task smoke`, the CI
+these steps yourself — the **runtime smoke gate** (`task smoke`, the CI
 `runtime-smoke` job) boots the stack and fails if a module is present but the
-agent can't discover it, so none can be silently skipped:
+agent can't discover it, and `tests/test_chart_services.py` fails if the chart and
+the compose stack disagree, so none can be silently skipped:
 
 1. **Register the package** in the root `pyproject.toml`: add it to
    `[tool.mypy] packages` and `[tool.ruff.lint.isort] known-first-party`.
@@ -222,6 +224,9 @@ agent can't discover it, so none can be silently skipped:
 5. **Reset its port in the smoke override** — add the service with
    `ports: !reset []` to `infra/ci/compose.ci.yaml`, or the smoke stack leaks its
    host binding and collides with a running dev stack.
+6. **Add it to the Helm chart** — an entry under `modules:` in
+   `infra/k8s/epicurus/values.yaml` (`enabled: true` plus the `wants` it needs).
+   See [Kubernetes](../infrastructure/kubernetes.md).
 
 See [Testing › Runtime smoke gate](testing.md#runtime-smoke-gate) for what it
 checks and how to run it locally.

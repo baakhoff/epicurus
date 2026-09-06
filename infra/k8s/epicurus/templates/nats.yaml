@@ -1,0 +1,160 @@
+{{- if .Values.nats.enabled }}
+{{- $p := .Values.nats.persistence }}
+{{- /*
+  The same server config the compose stack runs (ADR-0066): the SYS/APP accounts,
+  the core/module/sys role users, JetStream and the monitoring port. It is kept
+  byte-identical to infra/compose/nats-server.conf — tests/test_chart_services.py
+  fails if the two drift — so the bus behaves the same on either runtime. The
+  `$NATS_*_PASSWORD` references are resolved by the NATS server from its own env,
+  which comes from the Secret below; the passwords never enter this ConfigMap.
+*/}}
+{{- $config := default (.Files.Get "files/nats-server.conf") .Values.nats.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats-config
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "nats") | nindent 4 }}
+data:
+  nats-server.conf: |
+{{ $config | indent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "nats") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: client
+      port: 4222
+      targetPort: client
+      protocol: TCP
+    - name: monitor
+      port: 8222
+      targetPort: monitor
+      protocol: TCP
+  selector:
+    {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "nats") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "nats") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  serviceName: nats
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "nats") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "nats") | nindent 8 }}
+      annotations:
+        checksum/config: {{ $config | sha256sum }}
+    spec:
+      containers:
+        - name: nats
+          image: {{ include "epicurus.thirdPartyImage" .Values.nats.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["-c", "/etc/nats/nats-server.conf"]
+          ports:
+            - name: client
+              containerPort: 4222
+              protocol: TCP
+            - name: monitor
+              containerPort: 8222
+              protocol: TCP
+          env:
+            - name: NATS_CORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: NATS_CORE_PASSWORD
+            - name: NATS_MODULE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: NATS_MODULE_PASSWORD
+            - name: NATS_SYS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: NATS_SYS_PASSWORD
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nats
+              readOnly: true
+            - name: data
+              mountPath: /data
+          # The monitoring port needs no credentials — the image has no shell, so
+          # this is the only probe that can work (compose probes it from the host).
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          {{- with .Values.nats.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: nats-config
+        {{- if or (not $p.enabled) $p.existingClaim }}
+        - name: data
+          {{- if $p.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $p.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+      {{- with .Values.nats.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nats.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nats.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and $p.enabled (not $p.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $p.size }}
+        {{- include "epicurus.storageClass" (dict "ctx" $ "class" $p.storageClass) | nindent 8 }}
+  {{- end }}
+{{- end }}

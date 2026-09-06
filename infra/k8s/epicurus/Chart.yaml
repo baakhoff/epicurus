@@ -1,0 +1,33 @@
+apiVersion: v2
+name: epicurus
+description: >-
+  The whole epicurus stack — core runtime, web shell, modules and the data plane —
+  as one self-hostable Helm release.
+type: application
+
+# Chart version — the packaging's own SemVer, bumped when the templates change
+# (ADR-0017 treats the chart as its own component).
+version: 0.1.0
+
+# Placeholder. `appVersion` is the image tag every service defaults to, and the
+# release pipeline overrides it at package time (`helm package --app-version <tag>`,
+# #892) so a published chart always points at the images from the same release.
+# `latest` mirrors the compose default (`${EPICURUS_VERSION:-latest}`).
+appVersion: "latest"
+
+home: https://github.com/baakhoff/epicurus
+sources:
+  - https://github.com/baakhoff/epicurus
+keywords:
+  - assistant
+  - self-hosted
+  - local-first
+  - ai
+maintainers:
+  - name: baakhoff
+    url: https://github.com/baakhoff
+
+# `lookup` (the keep-my-passwords pattern in templates/secret.yaml), the stable
+# `apps/v1` + `networking.k8s.io/v1` surfaces and `Ingress.spec.ingressClassName`
+# are all present from 1.19; 1.25 is the floor we actually document and test against.
+kubeVersion: ">=1.25.0-0"

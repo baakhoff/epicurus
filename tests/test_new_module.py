@@ -11,6 +11,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -36,6 +37,9 @@ def _make_repo(new_module: ModuleType, dest: Path) -> Path:
     ci_dst = dest / new_module.CI_OVERRIDE_REL
     ci_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(REPO / new_module.CI_OVERRIDE_REL, ci_dst)
+    chart_dst = dest / new_module.CHART_VALUES_REL
+    chart_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(REPO / new_module.CHART_VALUES_REL, chart_dst)
     return dest
 
 
@@ -86,6 +90,12 @@ def test_run_scaffolds_and_wires(new_module: ModuleType, tmp_path: Path) -> None
     ci_override = (root / new_module.CI_OVERRIDE_REL).read_text(encoding="utf-8")
     assert "  throwaway-thing:\n    ports: !reset []" in ci_override
 
+    # The Helm chart gets the module too, so it deploys on Kubernetes unedited.
+    chart_values = yaml.safe_load((root / new_module.CHART_VALUES_REL).read_text(encoding="utf-8"))
+    assert chart_values["modules"]["throwaway-thing"] == {"enabled": True, "wants": {}}
+    # It lands inside the map, not after the next top-level key.
+    assert "moduleDefaults" in chart_values
+
     # The wired-in module must not introduce a port collision.
     bindings = new_module.port_bindings(root)
     ports = [p for p, _ in bindings]
@@ -100,13 +110,15 @@ def test_wiring_is_idempotent(new_module: ModuleType, tmp_path: Path) -> None:
     pyproject = root / "pyproject.toml"
     compose = root / "compose.yaml"
     ci_override = root / new_module.CI_OVERRIDE_REL
+    chart_values = root / new_module.CHART_VALUES_REL
 
-    def snapshot() -> tuple[str, str, str, str]:
+    def snapshot() -> tuple[str, str, str, str, str]:
         return (
             settings.read_text(),
             pyproject.read_text(),
             compose.read_text(),
             ci_override.read_text(),
+            chart_values.read_text(),
         )
 
     before = snapshot()
@@ -114,6 +126,7 @@ def test_wiring_is_idempotent(new_module: ModuleType, tmp_path: Path) -> None:
     new_module.wire_pyproject(root, "epicurus_throwaway_thing", "throwaway-thing")
     new_module.wire_compose_include(root, "throwaway-thing")
     new_module.wire_ci_port_reset(root, "throwaway-thing")
+    new_module.wire_chart_module(root, "throwaway-thing")
 
     assert snapshot() == before
 

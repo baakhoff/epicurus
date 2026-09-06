@@ -1,0 +1,91 @@
+epicurus {{ .Chart.Version }} is installed as "{{ .Release.Name }}" in namespace {{ .Release.Namespace }}.
+Images: tag {{ default .Chart.AppVersion .Values.image.tag }} from {{ .Values.image.registry }}.
+
+1. WATCH IT COME UP
+
+     kubectl -n {{ .Release.Namespace }} get pods -w
+
+{{- if and .Values.openbao.enabled .Values.openbao.bootstrap.enabled }}
+
+   core-app{{ if and .Values.modules.messaging .Values.modules.messaging.enabled (get (default (dict) .Values.modules.messaging.wants) "openbao") }} and messaging{{ end }} wait on an init container until the OpenBao
+   bootstrap job has written the app token. That is expected on a first install:
+
+     kubectl -n {{ .Release.Namespace }} logs job/openbao-bootstrap-{{ .Release.Revision }}
+
+2. THE UNSEAL KEY — BACK IT UP
+
+   The bootstrap job created the Secret "{{ .Values.openbao.bootstrap.secretName }}" holding the
+   OpenBao unseal key, the root token and the app token. It is created through the
+   Kubernetes API, NOT by Helm, so `helm uninstall` leaves it alone — but nothing
+   else protects it, and without the unseal key everything on the OpenBao volume is
+   unreachable. Save it somewhere outside the cluster now:
+
+     kubectl -n {{ .Release.Namespace }} get secret {{ .Values.openbao.bootstrap.secretName }} \
+       -o jsonpath='{.data.unseal-key}' | base64 -d
+
+   A restarted OpenBao pod comes back sealed; the openbao-unseal deployment
+   submits the key again on its own.
+{{- end }}
+
+{{- $bootstrapped := and .Values.openbao.enabled .Values.openbao.bootstrap.enabled }}
+{{ if $bootstrapped }}3{{ else }}2{{ end }}. REACH THE UI
+{{- if .Values.ingress.enabled }}
+
+     {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}{{ .Values.ingress.path }}
+{{- else if .Values.web.enabled }}
+
+   No ingress is enabled (the default). Port-forward the web shell:
+
+     kubectl -n {{ .Release.Namespace }} port-forward svc/web 8084:8080
+
+   then open http://localhost:8084. To publish it properly, set
+   `ingress.enabled=true` and `ingress.host`. Only `web` is ever exposed — the
+   core and the modules stay on the cluster network by design.
+{{- else }}
+
+   `web.enabled` is false, so this release has no UI. Reach the core's platform
+   API directly if you need it:
+
+     kubectl -n {{ .Release.Namespace }} port-forward svc/core-app 8082:8080
+{{- end }}
+
+{{ if $bootstrapped }}4{{ else }}3{{ end }}. FIRST THINGS TO CHECK
+
+   Modules discovered by the core:
+
+     kubectl -n {{ .Release.Namespace }} exec deploy/core-app -- \
+       python -c "import urllib.request,sys; sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:8080/platform/v1/modules').read().decode())"
+
+{{- if .Values.ollama.enabled }}
+
+   Ollama starts with an EMPTY model store — models are never baked into the
+   image. The core pulls the default chat and embedding models in the background
+   on first boot (LLM_BOOTSTRAP_MODELS={{ .Values.core.llm.bootstrapModels }}); on CPU that
+   takes a while and chat 404s until it finishes.
+{{- end }}
+
+{{- if and (not .Values.minio.enabled) (not .Values.minio.external.url) (and .Values.modules.storage .Values.modules.storage.enabled) }}
+
+   WARNING: the `storage` module is enabled but no object store is configured
+   (minio.enabled=false and minio.external.url is empty). The module runs, but
+   chat uploads, agent-written objects and the byte half of a tenant export will
+   fail at call time. Set `minio.enabled=true` or point `minio.external.url` at
+   your own S3 endpoint.
+{{- end }}
+
+{{- if and (eq .Values.core.filesBackend "s3") (not .Values.minio.enabled) (not .Values.minio.external.url) }}
+
+   WARNING: core.filesBackend is "s3" but no object store is configured. Enable
+   `minio` or set `minio.external.url`.
+{{- end }}
+
+{{- if not .Values.secrets.existingSecret }}
+
+   NOTE: the chart generated the stack's passwords into the Secret
+   "epicurus-secrets" and will keep them across `helm upgrade`. `helm uninstall`
+   DELETES it while the PVCs survive — a reinstall would then generate a new
+   POSTGRES_PASSWORD that does not match the existing database. For anything you
+   care about, manage them yourself with `secrets.existingSecret`.
+{{- end }}
+
+Full documentation: docs/infrastructure/kubernetes.md

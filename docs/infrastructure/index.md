@@ -88,10 +88,16 @@ Details: [`infra/observability/README.md`](../../infra/observability/README.md).
 
 `core-app` can tear down a removed module's container immediately, and restart Ollama to apply
 a KV-cache change (#307) — both need to reach Docker, which is **root-equivalent on the host**.
+Everything in this section describes the **`docker` container runtime**, which is what a
+Compose deployment selects (#891). It is one of three: in a Kubernetes pod the core selects
+the `kubernetes` runtime and reaches the API server with its own ServiceAccount instead — no
+socket, no proxy, and none of the wiring below — and `CONTAINER_RUNTIME=none` turns the
+privileged path off entirely. See
+[core-app § Container runtime](../services/core-app.md#container-runtime-891).
 By default this goes through **`docker-proxy-core`**, a filtered
 [`wollomatic/socket-proxy`](https://github.com/wollomatic/socket-proxy) sitting in front of the
 real socket, internal-network-only, with no published port. Its allowlist is an exact
-method+path match on precisely what `DockerController` does — list/inspect a container,
+method+path match on precisely what the `DockerController` arm of that seam does — list/inspect a container,
 stop/restart/remove one by id — and nothing else: `exec`, `create`, `attach`, `images`,
 `volumes`, `networks`, and `system` are simply not in the allowlist, so the proxy refuses them
 before they ever reach the socket, regardless of who asks. *Which* container gets
@@ -163,7 +169,8 @@ default) and reconcile stays on the proxy path.
 not the default — check `GET /platform/v1/modules/docker-status` (surfaced on the Modules page)
 for the probe's own exception text. Module removal always still works regardless (it tombstones
 the module at once, ADR-0056/#382); only the container teardown and a KV-cache restart defer to
-the next restart.
+the next restart. The same endpoint answers for whichever runtime is selected, so on Kubernetes
+it reports a refused RBAC grant or an unknown namespace in exactly the same place (#891).
 
 ## External file mounts (#731)
 
@@ -248,6 +255,14 @@ constraint. An operator who wants one override for *every* container regardless 
 edits can instead set `log-opts` in the box's Docker daemon config — see
 [Installation](../user/installation.md).
 
+## Kubernetes
+
+Everything on this page describes the **Docker Compose** stack, which is how
+epicurus runs on a single box. The same stack also ships as an in-repo **Helm
+chart** (`infra/k8s/epicurus/`) for a cluster: one release, the data plane
+switchable to managed endpoints, an ingress for the web shell only, and the
+OpenBao bootstrap as a Job. See [Kubernetes (the Helm chart)](kubernetes.md).
+
 ## How it's assembled
 
 The root `compose.yaml` `include`s the infra fragment and each module fragment (ADR-0006):
@@ -275,3 +290,6 @@ See the [Architecture](../developer/architecture.md) guide for how the pieces fi
   (`qdrant-init`), the healthcheck, and the qdrant version policy.
 - [NATS (authenticated bus)](nats.md) — the account/user auth model, how services
   authenticate, credential flow, and the deferred per-tenant isolation.
+- [Kubernetes (the Helm chart)](kubernetes.md) — running the whole stack on a
+  cluster: every values key, the PVCs and Secrets, the OpenBao bootstrap Job and
+  unseal loop, the ingress body-size rule, and what the chart deliberately omits.

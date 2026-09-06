@@ -23,7 +23,12 @@ build if any of these were missing):
   [docs/reference/ports.md](../../docs/reference/ports.md); override with the
   `{{ cookiecutter.port_env }}` env var;
 - reset in the smoke CI override (`infra/ci/compose.ci.yaml`) so it leaks no host
-  port when the smoke stack runs beside your dev stack.
+  port when the smoke stack runs beside your dev stack;
+- added to the Helm chart's `modules` map (`infra/k8s/epicurus/values.yaml`), so the
+  module deploys on Kubernetes too — see
+  [docs/infrastructure/kubernetes.md](../../docs/infrastructure/kubernetes.md). The
+  entry declares no shared endpoints (`wants: {}`); add the ones this module
+  actually uses (`database`, `qdrant`, `platform`, `openbao`, `minio`, `searxng`).
 
 > Scaffolded with a bare `cookiecutter` call instead of `task new-module`? Then do
 > those steps by hand — `task smoke` boots the stack and fails if any is missing.

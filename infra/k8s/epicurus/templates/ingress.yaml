@@ -1,0 +1,51 @@
+{{- if .Values.ingress.enabled }}
+{{- if not .Values.web.enabled }}
+{{- fail "ingress.enabled requires web.enabled — the web shell is the only thing the chart ever exposes" }}
+{{- end }}
+{{- /*
+  Constraint #7, made concrete: the web shell is the ONLY route in. Modules and
+  the core never get an Ingress — a module's contract is local-only, and exposing
+  one is a deliberate, gated capability, never a default.
+
+  The annotations carry the #887 lesson. ingress-nginx defaults to a 1 MB body cap
+  and buffered request bodies; the tenant-archive import is a multi-hundred-MB
+  upload and chat is a streamed response, so both defaults break the product
+  before the core sees a byte. `proxy-body-size: "0"` removes the cap (the core's
+  own PORTABILITY_MAX_ARCHIVE_MB is then the only ceiling) and
+  `proxy-request-buffering: "off"` streams instead of spooling.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "web") | nindent 4 }}
+  {{- $annotations := merge (dict) .Values.ingress.annotations .Values.commonAnnotations }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      {{- with .Values.ingress.tls.secretName }}
+      secretName: {{ . }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.path }}
+            pathType: {{ .Values.ingress.pathType }}
+            backend:
+              service:
+                name: web
+                port:
+                  number: 8080
+{{- end }}

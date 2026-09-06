@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.lead_time_prefs import LeadTimePrefsStore
 from epicurus_calendar.models import Event
+from epicurus_calendar.portability import CalendarPortability
 from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_calendar.providers.google import GoogleCalendarProvider
 from epicurus_calendar.providers.local import LocalCalendarProvider
@@ -45,6 +46,7 @@ from epicurus_core import (
     PlatformClient,
     add_manifest_route,
     add_ops_routes,
+    add_portability_routes,
     configure_logging,
     get_logger,
 )
@@ -159,6 +161,11 @@ def create_app() -> FastAPI:
     app = FastAPI(title=MODULE_NAME, lifespan=lifespan)
     add_ops_routes(app, service_name=MODULE_NAME, version=_service_version())
     add_manifest_route(app, module)
+    # GET /export + POST /import (#870, ADR-0133) — the core fans out over `portable=True`
+    # and streams this tenant's events + lead-time preference into (and back out of) the
+    # archive. Same engine as every other store: the tables it reads are created in the
+    # lifespan above.
+    add_portability_routes(app, module, CalendarPortability(engine))
 
     async def _require_event(ref_id: str) -> Event:
         """Fetch a referenced event, translating a miss into a 404 for the proxy."""

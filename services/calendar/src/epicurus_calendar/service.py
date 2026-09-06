@@ -206,7 +206,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.20.1",
+        version="0.21.0",
         description=(
             "Provider-neutral calendar: list events, create events (timed or all-day, on a"
             " chosen calendar), and find free time slots. Backed by a local store (no account"
@@ -244,6 +244,11 @@ def build_module(
         resolver=True,
         # Be a chat-attachment source: GET /attachments (picker) + /attachments/{id} (ADR-0019).
         attachable=True,
+        # Carry the tenant's calendar between installations (#870, ADR-0133): the local
+        # store's events and the lead-time preference travel; the Google mirror and the
+        # reconcile cursors do not. The flag is what the core fans out over — the routes
+        # themselves are wired in `app.py` (`add_portability_routes`), where the engine is.
+        portable=True,
         # Account/collection model (ADR-0030): a silent local default plus connectable
         # Google calendars the operator toggles/switches. Calendar overlays every enabled
         # calendar on read (multi) and writes to the active one. Serves GET /accounts.

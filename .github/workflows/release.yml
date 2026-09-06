@@ -42,6 +42,34 @@ jobs:
             echo "::endgroup::"
           done
 
+  # Package and publish the Helm chart beside the images, as an OCI artifact —
+  # no-op-safe (every step past checkout is guarded) so this job stays green
+  # whether or not infra/k8s/epicurus/Chart.yaml has landed yet (#890).
+  chart:
+    needs: images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Helm
+        if: hashFiles('infra/k8s/epicurus/Chart.yaml') != ''
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Package and push chart to GHCR
+        if: hashFiles('infra/k8s/epicurus/Chart.yaml') != ''
+        env:
+          HELM_REGISTRY_USER: ${{ github.actor }}
+          HELM_REGISTRY_PASSWORD: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          helm package infra/k8s/epicurus --version "${version}" --app-version "${version}" -d /tmp/charts
+          echo "${HELM_REGISTRY_PASSWORD}" | helm registry login ghcr.io -u "${HELM_REGISTRY_USER}" --password-stdin
+          helm push "/tmp/charts/epicurus-${version}.tgz" "oci://ghcr.io/${owner}/charts"
+
   release:
     needs: images
     runs-on: ubuntu-latest

@@ -12,6 +12,15 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The Helm chart ships beside the images, not as a separate download** (#892, part of #889) —
+  `release.yml` and `testing.yml` now package `infra/k8s/epicurus/` and push it to
+  `oci://ghcr.io/baakhoff/charts/epicurus` in the same run that builds and pushes the service
+  images, so `helm install epicurus oci://ghcr.io/baakhoff/charts/epicurus --version <x>` works
+  with no chart repo or index to host. A release tag publishes the chart at that tag's version
+  (`appVersion` matching); every push to `testing` publishes
+  `0.0.0-testing.<7-char sha>` with `appVersion: testing`. Both publish steps are
+  no-op-safe — they skip cleanly on any commit before `infra/k8s/epicurus/Chart.yaml` exists
+  (#890), so this lands independently of chart's own PR. No component bump.
 - **A real archive can now actually be imported** (#887) — the web shell's proxy capped every
   `/platform/` request body at 12 MB (right for chat attachments), and the archive upload from
   the Settings card went through the same block, so any export that carried a knowledge vault

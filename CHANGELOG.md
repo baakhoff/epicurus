@@ -12,6 +12,20 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Your calendar travels with you** (#870, part of #866) — the tenant archive now carries
+  calendar. Everything the local store owns goes: plain events, all-day events, and a recurring
+  series *whole* — its repeat rule, the wall-clock zone it expands in, an occurrence you moved or
+  retitled, and one you deleted — plus your `event_starting_soon` lead time. Import upserts by
+  each event's own id, so re-importing an archive changes nothing and importing into a calendar
+  you have already started using merges rather than replaces; a dry run tells you what would land
+  before anything does. What is deliberately left behind is everything that describes *this*
+  installation rather than your calendar: the Google mirror and its sync cursors (reconnect the
+  account and the next sync rebuilds them from Google itself, which still holds those events),
+  the fire-once reminder markers (so the new install still tells you about tomorrow's meeting),
+  and — of course — the OAuth token, which never leaves OpenBao. Which calendars are enabled and
+  which one new events land on already travel in the core's own half of the archive (they live in
+  `module_prefs`), so they are not duplicated here. `calendar` 0.20.1→0.21.0 (MINOR).
+
 - **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
   an operator could stand up a second epicurus but had no way to *move into it*. The volume
   backups in `infra/backups` image one deployment for disaster recovery; nothing carried a

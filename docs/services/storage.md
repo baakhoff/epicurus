@@ -1,6 +1,6 @@
 # storage — object store + chat-upload sink
 
-**`epicurus-storage`** v0.9.0 is a sidecar module that owns **app-managed object storage**
+**`epicurus-storage`** v0.10.0 is a sidecar module that owns **app-managed object storage**
 in MinIO — the durable sink for files the platform itself creates (chat uploads, exports,
 agent-written objects) — and exposes the agent's **file tools** (`storage_list` /
 `storage_search` / `storage_read`) over the **core file space**. Host port **8083**.

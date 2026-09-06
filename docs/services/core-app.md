@@ -1541,7 +1541,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `EVENTS_PRUNE_INTERVAL_S` | `3600` | How often the event-log pruner sweeps. |
 | `AUTOMATIONS_POLL_INTERVAL_S` | `60` | How often the automations loop drains the trigger queue and checks schedules (ADR-0105). |
 | `FILES_SCAN_FUSE_ENABLED` | `true` | **Mass de-index fuse** (#848): refuse a file-space scan's purge when the rows it would delete look wholesale — a stale or empty mount must not reconcile `core_files` to zero. `FILES_SCAN_FUSE_MAX_DELETE_RATIO` (`0.5`) and `FILES_SCAN_FUSE_MIN_DELETIONS` (`5`) set the thresholds. See [file space](../reference/files.md#configuration-core-app). |
-| `PORTABILITY_STAGING_DIR` | `/tmp/epicurus-portability` | Where a tenant export is assembled and an uploaded archive is staged (#867) — a **disposable cache** (constraint #2), swept after `PORTABILITY_RETENTION_HOURS` (`24`). `PORTABILITY_MAX_FILE_MB` (`512`) caps a single exported file; `PORTABILITY_MAX_ARCHIVE_MB` (`4096`) caps an upload. |
+| `PORTABILITY_STAGING_DIR` | `/tmp/epicurus-portability` | Where a tenant export is assembled and an uploaded archive is staged (#867) — a **disposable cache** (constraint #2), swept after `PORTABILITY_RETENTION_HOURS` (`24`). `PORTABILITY_MAX_FILE_MB` (`512`) caps a single exported file or module blob; `PORTABILITY_MAX_ARCHIVE_MB` (`4096`) caps an upload. |
 | `DATABASE_URL` | `postgresql+asyncpg://…/epicurus` | Conversation persistence. |
 | `QDRANT_URL` | `http://qdrant:6333` | Semantic-recall vectors. |
 | `MEMORY_EMBED_MODEL` | `nomic-embed-text` | Local embedding model for recall. |

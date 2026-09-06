@@ -215,7 +215,7 @@ is the one that actually protects the transfer.
 | Route | Notes |
 | --- | --- |
 | `GET /export/blobs?tenant_id=…` | NDJSON, one `BlobRef` per line — **no header line** (the record stream's header already names the schema). Absent (404) on a module without bytes. |
-| `GET /export/blobs/{id}?tenant_id=…` | The blob's bytes, streamed. An id is a whole path (`uploads/a/b.pdf`), so it is a `:path` parameter — URL-encode it. |
+| `GET /export/blobs/{id}?tenant_id=…` | The blob's bytes, streamed. An id is a whole path (`uploads/a/b.pdf`), so it is a `:path` parameter: percent-encode the segments but leave the `/` intact, which is what `urllib.parse.quote` does by default. |
 | `PUT /import/blobs/{id}?tenant_id=…&sha256=…&size=…&content_type=…` | The bytes back. **400** if the body does not match the declared digest or length. |
 
 **Idempotency is by content.** `put_blob` compares the digest of whatever already sits at that

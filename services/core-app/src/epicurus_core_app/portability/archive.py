@@ -222,7 +222,12 @@ class ArchiveReader:
         ]
 
     def blob_members(self, module_name: str) -> list[tuple[str, int]]:
-        """``(blob id, size)`` for every blob member of *module_name*, in archive order."""
+        """``(blob id, size)`` for every blob member of *module_name*, in id order.
+
+        Sorted rather than left in archive order, unlike :meth:`ndjson_members`: a listing of
+        objects is something an operator reads, and two archives of the same tenant should
+        enumerate their bytes the same way whatever order tar happened to write them in.
+        """
         prefix = module_blob_prefix(module_name)
         return [
             (name[len(prefix) :], self._members[name].size)

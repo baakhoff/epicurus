@@ -25,7 +25,7 @@ be restarting would be an absurd way to lose your conversations.
 **You can close the tab.** The job runs on the server, not in the browser, and the card
 finds it again when you come back — on a reload, on a second device, in a different browser.
 A run still going carries on where you left it; a finished one still has its **Download
-archive** link waiting. **Recent jobs** at the foot of the card lists the ones before it,
+archive** link waiting. **Recent jobs** at the foot of the card lists them all,
 each with its own download while its archive lasts. (Archives are cleaned up after a while —
 see the table at the end. A job whose archive has gone says so, and the answer is to export
 again.)
@@ -37,10 +37,22 @@ tar you can open with tools you already have:
 manifest.json                 what this archive is, and what it deliberately omits
 core/<set>.ndjson             the assistant's own data, one file per group
 modules/<name>.ndjson         each module's data, as the module wrote it
+modules/<name>/blobs.ndjson   the list of that module's files, if it keeps any
+modules/<name>/blobs/<id>     one file per entry — the bytes themselves
 files/<path>                  your file space, exactly as it sits on disk
 ```
 
-Everything inside is JSON, one record per line. Read it before you move it.
+The `.ndjson` members are JSON, one record per line; the blob members are the files
+themselves, byte for byte. Read it before you move it.
+
+**Your uploads travel too.** A file you dropped into a chat, or that the assistant saved for
+you, lives in the object store rather than your file space — those are carried as
+`modules/storage/blobs/…`, alongside the catalogue entries that make them findable. A file
+larger than the per-file ceiling (see the table at the end) is left out but still *listed*,
+so the import can tell you exactly which ones to copy across by hand; its entry is there,
+and its download says the bytes are missing. One consequence worth knowing before you look
+at the size: a note's text is in the archive twice — once as the `notes/<slug>.md` file you
+can read, once inside the note record the import actually restores from.
 
 ### What an export does not contain
 

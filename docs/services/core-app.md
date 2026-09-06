@@ -1138,8 +1138,8 @@ job carries on — moving house does not cost the operator their conversations b
 mail container is restarting.
 
 **Staging.** Jobs are durable rows (`portability_jobs`), so an export survives the request
-that started it and stays readable by id; the
-archive itself lives in `PORTABILITY_STAGING_DIR`, a **disposable cache** (constraint #2)
+that started it and stays readable by id; the archive itself lives in
+`PORTABILITY_STAGING_DIR`, a **disposable cache** (constraint #2)
 swept after `PORTABILITY_RETENTION_HOURS`. A download of a swept archive is a `410`, and the
 answer is to export again.
 
@@ -1835,6 +1835,6 @@ docker compose up -d core-app      # comes up with the full stack
 Source is one package, `epicurus_core_app`, split by responsibility: `agent/`
 (loop + MCP host + routes), `llm/` (gateway, providers, power, models), `memory/`
 (store + facts + extraction + facade), `modules.py` (registry), `portability/` (tenant export/import — archive,
-core data sets, jobs, orchestrator, routes), `platform_api.py` (inference
+core data sets, jobs, secret inventory, orchestrator, routes), `platform_api.py` (inference
 endpoints), `app.py` (wiring). The agent targets only the gateway's interface and
 modules only through MCP — never a provider SDK.

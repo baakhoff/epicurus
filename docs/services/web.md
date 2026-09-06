@@ -391,9 +391,17 @@ alone (conflicts named), and the two rebuilds the import triggers.
 this tab did or did not start: a running export resumes its progress list, a finished one
 offers its download, and an apply left mid-flight comes back with its report. A `ready`
 export whose staged archive has since been cleaned up says so instead of offering a link
-that would 410, and a **Recent jobs** disclosure lists the rest with a download beside each
-one that still has an archive. Deliberately not `localStorage`: the server's list is right
-on a second device and in a different browser, and a remembered id is right in neither.
+that would 410, and a **Recent jobs** disclosure lists every job the endpoint returned — the
+two the halves already show included — each with a download beside it while its archive
+lasts. Deliberately not `localStorage`: the server's list is right on a second device and in
+a different browser, and a remembered id is right in neither.
+
+Deliberately **not** rendered (#886): a module's byte half. `ImportComponentResult.blobs` —
+how many objects were written, and the `conflicts` / `missing` id lists — and the
+per-component `warnings` that repeat them are in the report the API returns but have no row
+in this card; an operator who needs them reads
+`GET /platform/v1/portability/imports/{id}`. The same holds on the way out: the export
+progress list shows a component's record `count`, not its `blobs` / `blob_bytes`.
 
 Both halves poll only while a job is in flight and stop the moment it settles — as does the
 job list itself — so an idle Settings page settles back to no requests. Every verdict,

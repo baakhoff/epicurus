@@ -21,7 +21,7 @@ import { AlertTriangle, Download, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { Badge, Button, Card, Dot, Spinner } from "@/components/ui";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, ProxyError } from "@/lib/api";
 import type {
   PortabilityComponent,
   PortabilityImportJob,
@@ -253,15 +253,19 @@ function ReportView({ report }: { report: PortabilityReport }) {
   );
 }
 
-/** A core refusal (413 over PORTABILITY_MAX_ARCHIVE_MB, 422 not an archive) arrives as an
- *  `ApiError` with the core's own sentence. Anything else means the request never got a
- *  core answer at all — in practice a proxy in front of it refusing the body (#887: the
+/** A core refusal (413 over PORTABILITY_MAX_ARCHIVE_MB, 400 not a readable archive) arrives
+ *  as an `ApiError` with the core's own sentence. Anything else means the request never got
+ *  a core answer at all — in practice a proxy in front of it refusing the body (#887: the
  *  web image's nginx capped every `/platform/` upload at 12 MB, so a real archive died with
- *  a bare "Failed to fetch"). Name the likely cause, because the symptom does not. */
+ *  a bare "Failed to fetch"). That refusal reaches us either as a network error (the
+ *  connection dropped mid-body) or as a `ProxyError` (its HTML 413 arrived, carrying no core
+ *  sentence); both get the same naming, because the symptom names nothing. */
 function uploadFailure(error: unknown): string {
+  const neverReached = (cause: string) =>
+    `The archive never reached the core (${cause}). A proxy in front of it may cap the request size — see the web service docs.`;
+  if (error instanceof ProxyError) return neverReached(`HTTP ${error.status}`);
   if (error instanceof ApiError) return error.detail;
-  const message = error instanceof Error ? error.message : String(error);
-  return `The archive never reached the core (${message}). A proxy in front of it may cap the request size — see the web service docs.`;
+  return neverReached(error instanceof Error ? error.message : String(error));
 }
 
 function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {

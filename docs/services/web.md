@@ -386,7 +386,9 @@ multi-gigabyte blob is ever held in the tab.
 **Import** never applies what it is handed. Choosing a file uploads it (with no progress
 bar yet — a large archive shows only the busy button until the core answers; an upload the
 core never answers is named as such, distinguishing a proxy that refused the body from a
-core that did, #887), and the answer is a **preview**: where the archive came from, a table of components with record counts and a
+core that did, #887 — whether that refusal arrives as a dropped connection or as the
+proxy's own HTML 413, which carries no core sentence to show), and the answer is a
+**preview**: where the archive came from, a table of components with record counts and a
 `Badge` verdict (`ok` / `warning` / `refused`, each with the core's own explanation), a
 collapsed list of what the archive deliberately leaves behind, and the "not carried" line
 naming the API keys to re-enter, the accounts to reconnect, and the module credentials to

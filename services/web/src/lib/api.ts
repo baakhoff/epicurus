@@ -87,6 +87,12 @@ export class ApiError extends Error {
 
 export class PausedError extends ApiError {}
 
+/** Somebody in front of the core answered instead of the core (#887). The core reports every
+ *  error as JSON with a `detail`; a body that isn't JSON came from a proxy — in practice one
+ *  refusing an upload on size, whose HTML 413 leaves nothing to render (`statusText` is empty
+ *  over HTTP/2). Kept distinct so the caller can name the cause rather than show a blank. */
+export class ProxyError extends ApiError {}
+
 async function request<T>(
   schema: z.ZodType<T>,
   path: string,
@@ -979,7 +985,10 @@ export const api = {
     `/platform/v1/portability/exports/${encodeURIComponent(jobId)}/archive`,
   // Multipart, so it bypasses the JSON `request` helper (like uploadAttachment). A 413
   // (over the size cap) or 400 (not a readable archive) surfaces as ApiError with the
-  // server's own detail so the card can render it verbatim.
+  // core's own detail so the card can render it verbatim. An error body that is *not* the
+  // core's JSON is a `ProxyError` (#887): a proxy's own HTML 413 has no detail to show, and
+  // falling back to `statusText` would print "Request Entity Too Large" — or, over HTTP/2,
+  // nothing at all — for a failure the core never saw.
   uploadPortabilityArchive: async (file: File): Promise<PortabilityImportJob> => {
     const form = new FormData();
     form.append("file", file);
@@ -988,12 +997,15 @@ export const api = {
       body: form,
     });
     if (!response.ok) {
-      let detail = response.statusText;
+      let detail: string | null = null;
       try {
-        detail = (await response.json()).detail ?? detail;
+        const body: unknown = await response.json();
+        const value = (body as { detail?: unknown }).detail;
+        detail = typeof value === "string" ? value : null;
       } catch {
-        /* non-JSON error body */
+        /* non-JSON error body — not the core's */
       }
+      if (detail === null) throw new ProxyError(response.status, `HTTP ${response.status}`);
       throw new ApiError(response.status, detail);
     }
     return PortabilityImportJob.parse(await response.json());

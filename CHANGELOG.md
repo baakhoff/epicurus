@@ -36,6 +36,22 @@ images to GHCR.
   agent-written objects and the byte half of a tenant export there, so shipping it off would
   have installed a module that starts and then fails at call time. Chart `0.1.0`; no
   component bump.
+- **The core no longer assumes a Docker daemon, and the web shell no longer assumes Docker's
+  DNS** (#891, part of #889) — the two places a Kubernetes deployment would have failed
+  silently. The one audited path that touches containers (tearing down a removed module's
+  container, restarting Ollama after a KV-cache change) now sits behind a runtime seam with
+  three arms, chosen by `CONTAINER_RUNTIME` (`auto` by default): Docker exactly as before under
+  Compose; in a pod, the cluster's own API through the ServiceAccount — a module's Deployment
+  scaled to zero, Ollama rollout-restarted, workloads found by label and never by name, under a
+  Role that grants nothing else; and `none`, which says once at startup that teardown is
+  unavailable instead of deferring forever in silence. A refusal (RBAC saying no) lands where a
+  missing socket already landed — the module is removed and hidden at once, only its workload
+  waits for the next restart. The web shell's nginx used to hardcode Docker's embedded resolver,
+  which does not exist in a cluster: it now derives `NGINX_RESOLVER` from the container's own
+  `/etc/resolv.conf` at start, so one image proxies the core in both worlds. Riding along, a
+  repo test now fails if nginx's upload cap is ever set below the core's own — the trap that
+  cost #887 an unimportable archive. `core-app` 0.120.0→0.121.0 (MINOR) · `web` 0.141.1→0.142.0
+  (MINOR).
 - **A real archive can now actually be imported** (#887) — the web shell's proxy capped every
   `/platform/` request body at 12 MB (right for chat attachments), and the archive upload from
   the Settings card went through the same block, so any export that carried a knowledge vault

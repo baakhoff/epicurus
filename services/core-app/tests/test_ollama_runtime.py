@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from epicurus_core_app.docker_control import DockerError
+from epicurus_core_app.container_control import ContainerControlError
 from epicurus_core_app.llm.ollama_runtime import KvCacheApplyResult, OllamaRuntime
 
 
@@ -25,7 +25,7 @@ class _FakeDocker:
 
     def restart_service(self, name: str) -> bool:
         if self._boom:
-            raise DockerError("no socket")
+            raise ContainerControlError("no socket")
         self.restarted.append(name)
         return self._result
 

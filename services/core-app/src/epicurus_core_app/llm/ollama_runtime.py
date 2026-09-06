@@ -5,13 +5,15 @@ environment **at startup only** — they are not per-request knobs. #296 stored 
 choice but left *applying* it to them (edit ``.env``, restart Ollama). This closes that loop
 (#307): the core writes the chosen values to a small env file the Ollama entrypoint sources on
 every (re)start — mounted from a named volume both containers share — then restarts the Ollama
-container through the tightly-scoped :class:`~epicurus_core_app.docker_control.DockerController`.
+container through the tightly-scoped
+:class:`~epicurus_core_app.container_control.ContainerController` (#891: Docker under Compose,
+the Kubernetes API in a pod).
 
 A plain ``docker restart`` would *not* re-read env (it is fixed at container create); the Ollama
 entrypoint wrapper re-sources the file on each start, so the restart applies the new value and it
-persists across reconciles (the file lives in the volume). When Docker is unavailable the choice
-is still persisted, and :meth:`apply_kv_cache_type` reports *how far it got* so the UI can give
-the operator the right instruction rather than the worst-case one (#709).
+persists across reconciles (the file lives in the volume). With no container runtime available the
+choice is still persisted, and :meth:`apply_kv_cache_type` reports *how far it got* so the UI
+can give the operator the right instruction rather than the worst-case one (#709).
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from epicurus_core import get_logger
-from epicurus_core_app.docker_control import DockerController, DockerError
+from epicurus_core_app.container_control import ContainerControlError, ContainerController
 
 log = get_logger("epicurus_core_app.llm.ollama_runtime")
 
@@ -53,7 +55,7 @@ class OllamaRuntime:
     """Writes Ollama's start-up env file and restarts the container to apply it."""
 
     def __init__(
-        self, docker: DockerController | None, *, env_path: str, service: str = "ollama"
+        self, docker: ContainerController | None, *, env_path: str, service: str = "ollama"
     ) -> None:
         self._docker = docker
         self._env_path = Path(env_path)
@@ -85,7 +87,7 @@ class OllamaRuntime:
             return KvCacheApplyResult(applied=False, staged=True)
         try:
             restarted = self._docker.restart_service(self._service)
-        except DockerError as exc:
+        except ContainerControlError as exc:
             log.warning("could not restart ollama; choice staged but not applied", error=str(exc))
             return KvCacheApplyResult(applied=False, staged=True)
         return KvCacheApplyResult(applied=restarted, staged=True)

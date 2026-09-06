@@ -323,6 +323,21 @@ class CoreAppSettings(CoreSettings):
     # v1, the same trade as the cap above. 0 disables it.
     event_alerts_rate_cap_per_hour: int = 20
 
+    # ── Container runtime (#891) ────────────────────────────────────────────────
+    # Which runtime the core's one audited container path (module removal, the Ollama
+    # restart) talks to — see container_control.py.
+    #   "auto"       — (default) kubernetes in a pod, else docker when DOCKER_HOST is set or
+    #                  /var/run/docker.sock exists, else none;
+    #   "docker"     — the Compose deployment: docker-proxy-core by default (ADR-0109);
+    #   "kubernetes" — in-cluster, via the pod's ServiceAccount (the chart wires the Role);
+    #   "none"       — no container control at all; teardown defers, said once at startup.
+    # An unknown value degrades to "auto" with a warning rather than failing startup.
+    container_runtime: str = "auto"
+    # The namespace the Kubernetes runtime addresses (the chart sets it from the downward
+    # API). Blank → the pod's ServiceAccount ``namespace`` file. Ignored by every other
+    # runtime.
+    kubernetes_namespace: str = ""
+
     # ── OAuth settings ────────────────────────────────────────────────────────
     # Public base URL of the server used to build the OAuth redirect_uri.
     # Must exactly match the URI registered with each OAuth provider.

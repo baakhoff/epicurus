@@ -151,6 +151,21 @@ jobs:
             | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" \
                 -schema-location default -schema-location "$CRD_SCHEMAS" -
 
+      # The optional pieces turned OFF, and the data plane pointed at managed
+      # services — the homelab default renders one way, a real cluster the
+      # other, and neither may break. Without this the "off" branch of every
+      # `if .Values.<x>.enabled` guard would go unrendered.
+      - name: Render and validate — optional pieces off, data plane external
+        run: |
+          helm template epicurus "$CHART" \
+            --set minio.enabled=false \
+            --set ollama.enabled=false,ollama.external.url=http://ollama.example.com:11434 \
+            --set postgres.enabled=false,postgres.external.host=pg.example.com \
+            --set nats.enabled=false,nats.external.url=nats://nats.example.com:4222 \
+            --set qdrant.enabled=false,qdrant.external.url=http://qdrant.example.com:6333 \
+            --set searxng.enabled=false,searxng.external.url=http://searx.example.com:8080 \
+            | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" -
+
   # Validates Prometheus and Alertmanager configs without booting the
   # observability stack. The runtime-smoke gate skips that stack, so a bad rule
   # (e.g. an undefined template function) would otherwise reach production

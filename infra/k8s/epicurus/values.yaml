@@ -430,14 +430,17 @@ openbao:
   tolerations: []
   affinity: {}
 
-# S3-compatible object store. OFF by default — a homelab pays a PVC and a
-# process for it, and the file space works without it. Turn it on (or point at
-# an external S3 with `external.url`) if you want either of:
-#   * the `storage` module's object store — chat uploads, agent-written objects,
-#     and the byte half of a tenant export;
-#   * `core.filesBackend: s3`, the alternative to the core's RWO file PVC.
+# S3-compatible object store. ON by default, as it is under Compose: the
+# `storage` module keeps its objects here — chat uploads, agent-written files,
+# and the byte half of a tenant export — so with no object store that module
+# starts, serves its file index, and then fails at call time on everything
+# else. A default install should not ship a half-working module. It also backs
+# `core.filesBackend: s3`, the alternative to the core's RWO file PVC.
+#
+# Turn it off (`enabled: false`) if you disable the `storage` module too, or
+# point at a real S3 with `external.url` and keep the credentials in the Secret.
 minio:
-  enabled: false
+  enabled: true
   image:
     repository: minio/minio
     tag: RELEASE.2025-04-22T22-12-26Z

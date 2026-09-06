@@ -230,6 +230,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # What this deployment calls its own build, for `/platform/v1/info`'s
+            # `release_track` (#893). The compose fragment passes the operator's
+            # own EPICURUS_VERSION through; here the honest answer is the image
+            # tag the pod is actually running.
+            - name: EPICURUS_VERSION
+              value: {{ default .Chart.AppVersion .Values.image.tag | quote }}
             {{- range $k, $v := .Values.core.extraEnv }}
             - name: {{ $k }}
               value: {{ $v | quote }}

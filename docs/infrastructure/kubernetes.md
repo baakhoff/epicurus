@@ -67,7 +67,7 @@ runs alongside the pods that are waiting for it.
 | `nats` | StatefulSet + PVC | `nats:2.10`, JetStream, the compose `nats-server.conf` as a ConfigMap. |
 | `qdrant` | StatefulSet + PVC | With the upgrade-guard init container (see below). |
 | `openbao` | StatefulSet + PVC | Plus a bootstrap Job and an unseal Deployment. |
-| `minio` | StatefulSet + PVC | Optional, **off by default**. Plus a bucket-seeding Job. |
+| `minio` | StatefulSet + PVC | On by default (as under Compose) — the `storage` module's object store. Plus a bucket-seeding Job. |
 | `ollama` | StatefulSet + PVC | Optional (on by default), CPU by default, GPU hooks. |
 | `searxng` | Deployment | Its `settings.yml` as a ConfigMap. |
 
@@ -160,6 +160,7 @@ Every value, with its default. Anything not listed is not a key.
 | `core.containerRuntime.kind` | `kubernetes` | `CONTAINER_RUNTIME`. `none` disables container control. |
 | `core.containerRuntime.rbac.create` | `true` | Render the ServiceAccount + Role + RoleBinding. |
 | `core.containerRuntime.rbac.serviceAccountName` | `""` | Use an account you manage instead. |
+| *(no key)* | — | `EPICURUS_VERSION` is set for you, to `image.tag` or the chart's `appVersion` — the tag this pod actually runs. It is what `/platform/v1/info` reports as `release_track`, and what the Settings → Platform card shows as the track. |
 | `core.llm.defaultModel` | `llama3.2` | `LLM_DEFAULT_MODEL`. |
 | `core.llm.keepAlive` | `5m` | `LLM_KEEP_ALIVE`. |
 | `core.llm.fallbacks` | `""` | `LLM_FALLBACKS`. |
@@ -325,7 +326,7 @@ cluster points at managed services.
 | `openbao.bootstrap.ttlSecondsAfterFinished` | `86400` |
 | `openbao.unseal.enabled` / `.intervalSeconds` | `true` / `30` |
 | `openbao.external.url` / `.tokenSecret` / `.tokenSecretKey` | `""` / `""` / `app-token` |
-| `minio.enabled` | **`false`** |
+| `minio.enabled` | **`true`** |
 | `minio.image.repository` / `.tag` | `minio/minio` / `RELEASE.2025-04-22T22-12-26Z` |
 | `minio.initImage.repository` / `.tag` | `minio/mc` / `RELEASE.2025-04-16T18-13-26Z` |
 | `minio.defaultBucket` | `epicurus` |
@@ -356,12 +357,15 @@ Postgres is the exception in shape: an external server is addressed by
 `external.host`/`.port` and the credentials still come from the Secret, so no DSN
 with a password in it ever sits in a values file.
 
-**MinIO is off by default.** It backs two different things: the `storage`
-module's object store (chat uploads, agent-written objects, the byte half of a
-tenant export) and, optionally, `core.filesBackend: s3`. With it off and no
-`minio.external.url`, the `storage` module still starts and its file-index half
-still works — but any object operation fails at call time. `NOTES.txt` says so
-after an install that is in that state. Turn MinIO on, or point at your own S3.
+**MinIO is on by default**, matching the Compose stack. It backs two different
+things: the `storage` module's object store (chat uploads, agent-written objects,
+the byte half of a tenant export) and, optionally, `core.filesBackend: s3`. It is
+on because `storage` is on: with no object store the module still starts and its
+file-index half still works, but every object operation fails at call time — a
+half-working module is a worse default than a PVC. If you would rather not run
+it, either point `minio.external.url` at your own S3 (credentials still come from
+the Secret) or set `minio.enabled: false` *and* disable the `storage` module;
+`NOTES.txt` warns after an install that is in the half-working state.
 
 ## Data model
 

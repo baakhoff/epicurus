@@ -32,7 +32,10 @@ images to GHCR.
   `chart-validate` CI job renders every branch and schema-checks it with `kubeconform`, the
   bootstrap script is exercised against a stubbed API in pytest, and `task new-module` writes
   the chart entry too — so a module can no longer be wired into compose and forgotten here.
-  Chart `0.1.0`; no component bump.
+  The object store is on by default, as it is under Compose: `storage` keeps chat uploads,
+  agent-written objects and the byte half of a tenant export there, so shipping it off would
+  have installed a module that starts and then fails at call time. Chart `0.1.0`; no
+  component bump.
 - **A real archive can now actually be imported** (#887) — the web shell's proxy capped every
   `/platform/` request body at 12 MB (right for chat attachments), and the archive upload from
   the Settings card went through the same block, so any export that carried a knowledge vault

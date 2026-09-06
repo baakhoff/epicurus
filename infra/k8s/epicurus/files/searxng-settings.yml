@@ -1,0 +1,19 @@
+use_default_settings: true
+
+server:
+  # Rotate this before exposing to the network. For an internal-only deployment
+  # the placeholder is acceptable, but a real secret prevents CSRF issues.
+  secret_key: "epicurus-internal-search-placeholder-change-me"
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: "en"
+  autocomplete: ""
+
+general:
+  debug: false
+  instance_name: "epicurus-search"

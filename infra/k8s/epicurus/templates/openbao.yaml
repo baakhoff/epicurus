@@ -1,0 +1,165 @@
+{{- if .Values.openbao.enabled }}
+{{- $p := .Values.openbao.persistence }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-config
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+data:
+  config.hcl: |
+    storage "file" {
+      path = "/openbao/data"
+    }
+
+    listener "tcp" {
+      address     = "0.0.0.0:8200"
+      tls_disable = true
+    }
+
+    # Cluster-internal address — every service reaches OpenBao at http://openbao:8200.
+    api_addr     = "http://openbao:8200"
+    cluster_addr = "https://openbao:8201"
+    ui           = false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  # A sealed vault is deliberately NOT ready (see the probe below), and the
+  # bootstrap Job has to reach it precisely while it is sealed — so this Service
+  # must route to the pod before it passes readiness.
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: 8200
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openbao
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  serviceName: openbao
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "openbao") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 8 }}
+    spec:
+      containers:
+        - name: openbao
+          image: {{ include "epicurus.thirdPartyImage" .Values.openbao.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Same handoff the compose fragment uses, and for the same reason: the
+          # image entrypoint drops to the `openbao` user (uid 100), which cannot
+          # write a freshly provisioned root-owned volume. Start as root, chown
+          # the data dir by NAME (never a guessed uid), then exec the image
+          # entrypoint, which re-drops. Set `fsGroup` in podSecurityContext and
+          # override this command if your cluster forbids a root start.
+          command: ["/bin/sh", "-c"]
+          args:
+            - "chown -R openbao:openbao /openbao/data && exec docker-entrypoint.sh server -config=/openbao/config/config.hcl"
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              # IPC_LOCK lets the server mlock its memory so secrets never reach
+              # swap; CHOWN/SETUID/SETGID are what the handoff above needs.
+              add: ["IPC_LOCK", "CHOWN", "SETUID", "SETGID"]
+          env:
+            # The bootstrap and unseal helpers talk to the Service, but anything
+            # running inside this container defaults to https without this.
+            - name: BAO_ADDR
+              value: http://127.0.0.1:8200
+          ports:
+            - name: http
+              containerPort: 8200
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /openbao/config
+              readOnly: true
+            - name: data
+              mountPath: /openbao/data
+          # `sealedcode`/`uninitcode` turn the two states that are NORMAL here
+          # into 200s: a fresh vault is uninitialised until the bootstrap Job runs,
+          # and a restarted one is sealed until the unseal loop gets to it. Without
+          # them the pod never passes a probe and nothing can bootstrap it.
+          livenessProbe:
+            httpGet:
+              path: /v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          {{- with .Values.openbao.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: openbao-config
+        {{- if or (not $p.enabled) $p.existingClaim }}
+        - name: data
+          {{- if $p.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $p.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+      {{- with .Values.openbao.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openbao.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.openbao.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and $p.enabled (not $p.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $p.size }}
+        {{- include "epicurus.storageClass" (dict "ctx" $ "class" $p.storageClass) | nindent 8 }}
+  {{- end }}
+{{- end }}

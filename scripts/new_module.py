@@ -12,7 +12,8 @@ module passes ``task smoke`` with no manual edits:
   4. add the fragment to the top-level ``compose.yaml`` ``include:`` list;
   5. register ``http://<slug>:8080`` in the core's ``module_urls``;
   6. reset its host port in the smoke override (``infra/ci/compose.ci.yaml``);
-  7. refresh ``uv.lock`` so the Docker build (``uv sync --frozen``) sees it.
+  7. add it to the Helm chart's ``modules`` map (``infra/k8s/epicurus/values.yaml``);
+  8. refresh ``uv.lock`` so the Docker build (``uv sync --frozen``) sees it.
 
 Usage::
 
@@ -39,6 +40,7 @@ PORT_BAND = range(8082, 8100)
 
 SETTINGS_REL = "services/core-app/src/epicurus_core_app/settings.py"
 CI_OVERRIDE_REL = "infra/ci/compose.ci.yaml"
+CHART_VALUES_REL = "infra/k8s/epicurus/values.yaml"
 
 # Host-port defaults are always written as ``${NAME:-1234}:<container>`` in this
 # repo's compose fragments; a defensive second pattern catches a literal
@@ -212,6 +214,35 @@ def wire_ci_port_reset(root: Path, slug: str) -> None:
     )
 
 
+def wire_chart_module(root: Path, slug: str) -> None:
+    """Add the module to the Helm chart's ``modules`` map (idempotent).
+
+    The chart renders one Deployment + Service per entry, and
+    ``tests/test_chart_services.py`` fails if this map and the compose include
+    list ever diverge — so a scaffolded module is deployable on Kubernetes with
+    no manual edit, the same way it already was on compose. A fresh module needs
+    no shared endpoints (``wants: {}``); add what it actually uses by hand.
+    """
+    path = root / CHART_VALUES_REL
+    lines = path.read_text(encoding="utf-8").splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line == "modules:")
+    except StopIteration:
+        raise RuntimeError(f"could not find the `modules:` map in {CHART_VALUES_REL}") from None
+    # The map runs until the next top-level key (indented and blank lines belong to it).
+    end = start + 1
+    while end < len(lines) and (not lines[end] or lines[end].startswith((" ", "\t"))):
+        end += 1
+    if f"  {slug}:" in lines[start:end]:
+        return
+    # Trailing blank lines are the gap before the next key, not part of the map.
+    insert_at = end
+    while insert_at > start + 1 and not lines[insert_at - 1]:
+        insert_at -= 1
+    lines[insert_at:insert_at] = [f"  {slug}:", "    enabled: true", "    wants: {}"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def scaffold(root: Path, service_name: str, port: int, *, output_dir: Path) -> Path:
     """Render the cookiecutter template and return the generated service dir."""
     from cookiecutter.main import cookiecutter
@@ -270,6 +301,7 @@ def run(
     wire_compose_include(root, slug)
     wire_module_urls(root, slug)
     wire_ci_port_reset(root, slug)
+    wire_chart_module(root, slug)
     if sync:
         _uv_lock(root)
     return ScaffoldResult(service_dir, slug, pkg, chosen)
@@ -286,7 +318,10 @@ def main(argv: list[str] | None = None) -> int:
     result = run(root, args.name, port=args.port, sync=not args.no_sync)
 
     rel = result.service_dir.relative_to(root).as_posix()
-    wired = "pyproject (mypy + ruff), compose include, core module_urls, CI port reset"
+    wired = (
+        "pyproject (mypy + ruff), compose include, core module_urls, CI port reset, "
+        "Helm chart modules"
+    )
     print(f"\nScaffolded and wired in '{result.slug}' at {rel} (host port {result.port}).")
     print(f"Wired: {wired}{'' if args.no_sync else ', uv.lock'}")
     print("\nNext:")

@@ -1,0 +1,131 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+  Constraint #7 as an enforced boundary rather than a convention: the module↔core
+  contract is local-only. Ingress-only by design — websearch, Ollama model pulls
+  and hosted LLM providers all need outbound traffic, and a default-deny egress
+  would break them (and DNS) the moment it is switched on.
+
+  Needs a CNI that enforces NetworkPolicy (Calico, Cilium, k3s' flannel does NOT).
+  Off by default for exactly that reason.
+*/}}
+{{- $modules := splitList "," (include "epicurus.enabledModules" .) }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: epicurus-default-deny
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "networkpolicy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: epicurus
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: epicurus-web
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "networkpolicy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "web") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    # The one door in. With no `from`, any source may reach it — which is what an
+    # ingress controller in its own namespace needs. Narrow it with
+    # `networkPolicy.webIngressFrom` (e.g. the controller's namespaceSelector).
+    {{- if .Values.networkPolicy.webIngressFrom }}
+    - from:
+        {{- toYaml .Values.networkPolicy.webIngressFrom | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- else }}
+    - ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: epicurus-core-app
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "networkpolicy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "core-app") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    # The web shell (its nginx proxies /platform/) and the modules (the platform
+    # API, ADR-0004). Nothing else in the cluster.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: epicurus
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- if $modules }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: epicurus-modules
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "networkpolicy") | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          {{- range $modules }}
+          - {{ . }}
+          {{- end }}
+    matchLabels:
+      app.kubernetes.io/part-of: epicurus
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+  ingress:
+    # A module answers the core and nobody else — MCP tools and the manifest are
+    # never exposed, not even to a sibling module.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "core-app") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: epicurus-data-plane
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "networkpolicy") | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["postgres", "nats", "qdrant", "openbao", "minio", "ollama", "searxng"]
+    matchLabels:
+      app.kubernetes.io/part-of: epicurus
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress"]
+  ingress:
+    # Reachable from inside the release only — the core, the modules, and the
+    # OpenBao bootstrap/unseal helpers (which carry the same part-of label).
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: epicurus
+              app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

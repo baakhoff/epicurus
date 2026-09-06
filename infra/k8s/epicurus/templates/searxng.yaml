@@ -1,0 +1,113 @@
+{{- if .Values.searxng.enabled }}
+{{- /*
+  The settings.yml the compose stack ships, kept byte-identical to
+  infra/searxng/settings.yml (tests/test_chart_services.py fails on drift) with
+  one templated exception: `searxng.secretKey` replaces the placeholder CSRF key
+  when the operator sets one. SearXNG is never exposed outside the cluster — only
+  the websearch module talks to it.
+*/}}
+{{- $settings := default (.Files.Get "files/searxng-settings.yml") .Values.searxng.settings }}
+{{- if .Values.searxng.secretKey }}
+{{- $settings = regexReplaceAll "secret_key: \"[^\"]*\"" $settings (printf "secret_key: %q" .Values.searxng.secretKey) }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: searxng-settings
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "searxng") | nindent 4 }}
+data:
+  settings.yml: |
+{{ $settings | indent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: searxng
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "searxng") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "searxng") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: searxng
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "searxng") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.searxng.replicas }}
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "searxng") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "searxng") | nindent 8 }}
+      annotations:
+        checksum/settings: {{ $settings | sha256sum }}
+    spec:
+      containers:
+        - name: searxng
+          image: {{ include "epicurus.thirdPartyImage" .Values.searxng.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: settings
+              mountPath: /etc/searxng/settings.yml
+              subPath: settings.yml
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          {{- with .Values.searxng.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: settings
+          configMap:
+            name: searxng-settings
+      {{- with .Values.searxng.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.searxng.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.searxng.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

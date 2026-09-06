@@ -12,6 +12,27 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **epicurus runs on Kubernetes — one Helm chart for the whole stack** (#890, part of #889) —
+  the stack was Docker Compose or nothing, even though the architecture was built for a
+  cluster all along: stateless services with externalised state, swappable storage and LLM
+  backends, health and metrics on every service, images on GHCR. What was missing was the
+  packaging. `infra/k8s/epicurus/` now installs the lot — the core, the web shell, all nine
+  modules, and a data plane where each piece is either in-chart or pointed at a managed
+  endpoint (`postgres.enabled=false` + `external.host`, and so on), so a homelab installs one
+  release and a real cluster brings its own Postgres. The core is a singleton with a
+  ReadWriteOnce file volume, which is honest about what it is today rather than pretending it
+  scales. Only the web shell gets an Ingress — a module answers the core and nobody else, and
+  the optional NetworkPolicy makes that a rule the cluster enforces rather than a convention.
+  Its default ingress annotations carry the lesson from the archive-import fix: no body cap,
+  no request buffering, or a real export is refused before the core sees a byte. The hardest
+  part, OpenBao, is a Job that behaves the way the compose script does — initialise once,
+  unseal, mint the periodic app token — except it stores the unseal key in a Kubernetes Secret
+  it creates itself, so `helm uninstall` cannot take your vault with it, and a companion loop
+  unseals a restarted pod. Passwords are generated once and kept across upgrades. A new
+  `chart-validate` CI job renders every branch and schema-checks it with `kubeconform`, the
+  bootstrap script is exercised against a stubbed API in pytest, and `task new-module` writes
+  the chart entry too — so a module can no longer be wired into compose and forgotten here.
+  Chart `0.1.0`; no component bump.
 - **A real archive can now actually be imported** (#887) — the web shell's proxy capped every
   `/platform/` request body at 12 MB (right for chat attachments), and the archive upload from
   the Settings card went through the same block, so any export that carried a knowledge vault

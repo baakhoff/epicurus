@@ -1,0 +1,514 @@
+# epicurus — default values.
+#
+# Every key here is documented, with this same default, in
+# docs/infrastructure/kubernetes.md. Read that page before changing anything
+# structural; the comments below are the short form.
+#
+# NAMING: workloads and Services are named *bare* (`core-app`, `knowledge`,
+# `postgres`) rather than `<release>-<name>`. That is deliberate and load-bearing:
+# the core locks a module's file-space folder by the hostname in `MODULE_URLS`
+# (`CoreAppSettings.module_hostnames`, ADR-0063), and the compose stack's names are
+# the ones the code and the docs already speak. The consequence is **one epicurus
+# release per namespace** — install a second one into its own namespace.
+
+# ── Images ───────────────────────────────────────────────────────────────────
+image:
+  # Every service image is `<registry>/<repositoryPrefix><service>`, e.g.
+  # ghcr.io/baakhoff/epicurus-core-app. Override per service under
+  # `core.image` / `web.image` / `modules.<name>.image`.
+  registry: ghcr.io/baakhoff
+  repositoryPrefix: epicurus-
+  # Blank = `.Chart.AppVersion` (set by the release pipeline at package time).
+  tag: ""
+  pullPolicy: IfNotPresent
+  # Names of imagePullSecrets in the release namespace (private registries).
+  pullSecrets: []
+
+# ── Stack-wide settings ──────────────────────────────────────────────────────
+# Tenant is a first-class primitive even at one tenant (constraint #1). This is
+# the tenant a single-tenant self-host resolves to.
+defaultTenantId: local
+# debug | info | warning | error | critical
+logLevel: info
+# local | staging | production. Anything but `local` renders JSON logs, which is
+# what a cluster log pipeline wants.
+appEnv: production
+
+# OpenTelemetry tracing (#57). Off by default; point `endpoint` at your own
+# collector — the chart never ships one (observability on Kubernetes is #896).
+tracing:
+  enabled: false
+  endpoint: http://tempo:4318
+
+# Applied to every PVC the chart creates when set; blank = the cluster default.
+storageClass: ""
+
+# Extra labels/annotations merged onto every workload the chart renders.
+commonLabels: {}
+commonAnnotations: {}
+
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# One Secret holds every credential the stack shares. By default the chart
+# generates the passwords and **keeps them across `helm upgrade`** (it reads the
+# live Secret back with `lookup` before generating). Set `existingSecret` to
+# manage them yourself — recommended for anything you would be sad to lose,
+# because `helm uninstall` deletes a chart-generated Secret while the PVCs
+# survive, and a regenerated POSTGRES_PASSWORD does not match old PGDATA.
+#
+# An existing Secret must carry all of: POSTGRES_PASSWORD, NATS_CORE_PASSWORD,
+# NATS_MODULE_PASSWORD, NATS_SYS_PASSWORD, OAUTH_STATE_SECRET, MINIO_ROOT_USER,
+# MINIO_ROOT_PASSWORD. Keep passwords URL-safe: POSTGRES_PASSWORD is interpolated
+# into a DSN.
+secrets:
+  existingSecret: ""
+  # Explicit values (blank = generate). Prefer `existingSecret` over these —
+  # anything set here sits in your values file in clear text.
+  postgresPassword: ""
+  natsCorePassword: ""
+  natsModulePassword: ""
+  natsSysPassword: ""
+  oauthStateSecret: ""
+  minioRootUser: ""
+  minioRootPassword: ""
+
+# ── core-app — the runtime ───────────────────────────────────────────────────
+core:
+  # replicas is deliberately absent: core-app is a **singleton** in v1 (the local
+  # file backend's inotify watcher, the in-process live-run registry and the
+  # portability staging dir are all single-writer). Lifting it is a follow-up.
+  image:
+    repository: ""
+    tag: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+  # The file space (ADR-0063). `local` serves the PVC below at FILES_ROOT/<tenant>;
+  # `s3` serves a per-tenant bucket on the MinIO/S3 endpoint instead (and then the
+  # PVC is not needed — see docs).
+  filesBackend: local
+  persistence:
+    enabled: true
+    # Reuse a claim you already have instead of letting the chart create one.
+    existingClaim: ""
+    accessMode: ReadWriteOnce
+    size: 20Gi
+    storageClass: ""
+  # The image entrypoint starts as root, creates and chowns ONLY
+  # <FILES_ROOT>/<tenant> to uid 10001, then setuids to 10001 and execs the app
+  # (#421, ADR-0069). That needs uid 0 plus CHOWN/SETUID/SETGID; everything else
+  # is dropped. On a namespace under the `restricted` Pod Security Standard, set
+  # `podSecurityContext.fsGroup: 10001` + `securityContext.runAsUser: 10001`
+  # instead — the entrypoint tolerates a non-root start (it skips provisioning) —
+  # and read the caveat in docs/infrastructure/kubernetes.md first.
+  podSecurityContext: {}
+  securityContext:
+    runAsUser: 0
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+      add: ["CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"]
+  # The container-runtime seam (#891). `kubernetes` scales a module's Deployment
+  # to zero on confirmed removal and rollout-restarts Ollama; `none` says so once
+  # instead of logging on every call.
+  containerRuntime:
+    kind: kubernetes
+    rbac:
+      # Renders the ServiceAccount + Role + RoleBinding that grant get/list/patch
+      # on deployments, deployments/scale and statefulsets in THIS namespace.
+      create: true
+      # Use a ServiceAccount you manage instead of the chart's.
+      serviceAccountName: ""
+  # LLM gateway (#114). Blank = the code default; every knob is env-only.
+  llm:
+    defaultModel: llama3.2
+    keepAlive: 5m
+    fallbacks: ""
+    numRetries: 2
+    timeout: 1800
+    temperature: ""
+    topP: ""
+    numCtx: ""
+    # auto = pull the effective chat + embedding defaults on first boot;
+    # "" = never pull; "a,b" = pull exactly these.
+    bootstrapModels: auto
+  memoryEmbedModel: nomic-embed-text
+  oauth:
+    # Public base URL a provider redirects back to. Blank derives it from
+    # `ingress.host` when the ingress is enabled, else falls back to the code
+    # default — set it explicitly for any real OAuth use.
+    redirectBaseUrl: ""
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Free-form extra env, e.g. MAINTENANCE_SCHEDULE_ENABLED. Applied last, so it
+  # overrides anything the chart set.
+  extraEnv: {}
+
+# ── web — the UI shell ───────────────────────────────────────────────────────
+web:
+  enabled: true
+  replicas: 1
+  image:
+    repository: ""
+    tag: ""
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  extraEnv: {}
+
+# ── Modules ──────────────────────────────────────────────────────────────────
+# One Deployment + ClusterIP Service each. `wants` decides which shared endpoints
+# and credentials the pod is handed — it is the chart's version of what each
+# module's compose fragment sets, so a module never receives a credential it does
+# not use. `env` is merged last.
+#
+# `task new-module` adds the entry here automatically (scripts/new_module.py).
+modules:
+  echo:
+    enabled: true
+    wants: {}
+  storage:
+    enabled: true
+    wants:
+      database: true
+      platform: true
+      minio: true
+  knowledge:
+    enabled: true
+    wants:
+      database: true
+      qdrant: true
+      platform: true
+    env:
+      VAULT_PATH: /data/knowledge
+  websearch:
+    enabled: true
+    wants:
+      platform: true
+      searxng: true
+  calendar:
+    enabled: true
+    wants:
+      database: true
+      platform: true
+  mail:
+    enabled: true
+    wants:
+      database: true
+      platform: true
+  tasks:
+    enabled: true
+    wants:
+      database: true
+      platform: true
+  notes:
+    enabled: true
+    wants:
+      database: true
+      qdrant: true
+      platform: true
+    env:
+      NOTES_ROOT: /data/notes
+  messaging:
+    enabled: true
+    wants:
+      openbao: true
+    env:
+      MESSAGING_PROVIDER: loopback
+
+# Defaults every module entry inherits; a module's own keys win.
+moduleDefaults:
+  replicas: 1
+  image:
+    repository: ""
+    tag: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  env: {}
+
+# ── Ingress (web only) ───────────────────────────────────────────────────────
+# Constraint #7: only the web shell is ever exposed. Modules and the core stay on
+# the cluster network — reach them with `kubectl port-forward` when you must.
+ingress:
+  enabled: false
+  className: nginx
+  host: epicurus.example.com
+  path: /
+  pathType: Prefix
+  # The #887 lesson, as defaults: an ingress that buffers a body or caps it at a
+  # few MB refuses a tenant-archive import long before the core sees a byte, and
+  # buffering breaks streamed chat. Override the map wholesale for another
+  # controller (Traefik, HAProxy, …) — these keys are ingress-nginx's.
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  tls:
+    enabled: false
+    secretName: ""
+
+# ── NetworkPolicy ────────────────────────────────────────────────────────────
+# Ingress-only, and off by default (it needs a CNI that enforces policy). It
+# makes constraint #7 explicit: the modules answer only to the core, the core
+# answers only to the web and the modules, and the data plane answers only to
+# those. Egress is deliberately unrestricted — websearch, Ollama model pulls and
+# hosted LLM providers all need it, and a default-deny egress is a footgun.
+networkPolicy:
+  enabled: false
+  # Extra selectors allowed to reach `web` (the ingress controller's namespace,
+  # typically). Empty = any pod in the cluster may reach web:8080.
+  webIngressFrom: []
+
+# ── Metrics ──────────────────────────────────────────────────────────────────
+metrics:
+  # prometheus.io/scrape|port|path annotations on the pods that serve /metrics.
+  podAnnotations: true
+  podMonitor:
+    # A PodMonitor for kube-prometheus-stack. Needs its CRD installed.
+    enabled: false
+    # Blank = the release namespace.
+    namespace: ""
+    interval: 30s
+    # Labels the Prometheus resource's podMonitorSelector matches on.
+    labels: {}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Data plane. Each piece is `enabled: true` in-chart or pointed at a managed
+# endpoint with `enabled: false` + `external.*`.
+# ═════════════════════════════════════════════════════════════════════════════
+
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "17"
+  auth:
+    username: epicurus
+    database: epicurus
+    # The password always comes from the Secret's POSTGRES_PASSWORD key — for the
+    # in-chart server and for an external one alike.
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  # The official image starts as root and drops to uid 999; fsGroup makes the
+  # volume writable for it.
+  podSecurityContext:
+    fsGroup: 999
+  external:
+    host: ""
+    port: 5432
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+nats:
+  enabled: true
+  image:
+    repository: nats
+    tag: "2.10"
+  # The same server config the compose stack uses (role users core/module/sys,
+  # JetStream, the monitoring port), rendered into a ConfigMap. Replace it
+  # wholesale if you run your own account model.
+  config: ""
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+  external:
+    # e.g. nats://nats.data.svc.cluster.local:4222 — credentials still come from
+    # the Secret's NATS_*_PASSWORD keys.
+    url: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+qdrant:
+  enabled: true
+  image:
+    repository: qdrant/qdrant
+    # Server minor must stay within 1 of the qdrant-client pin (1.18) or the
+    # client refuses to connect. This tag is also the on-disk version marker.
+    tag: v1.18.2
+  # Vectors are DERIVED data (knowledge re-embeds, memory re-embeds), and a
+  # qdrant whose on-disk segment format predates the server panics on boot
+  # (#229). An init container compares a marker in the volume to the tag above
+  # and wipes the store on a mismatch, exactly like compose's `qdrant-init`.
+  initImage:
+    repository: alpine
+    tag: "3.21"
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+  external:
+    url: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+openbao:
+  enabled: true
+  image:
+    repository: openbao/openbao
+    tag: 2.2.0
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+  # The bootstrap Job (init 1-of-1 → unseal → KV v2 at secret/ → the
+  # epicurus-core policy → a periodic app token) and the unseal loop that brings
+  # a restarted, sealed vault back. Both talk plain HTTP to the OpenBao API, so
+  # they need nothing but curl.
+  bootstrap:
+    enabled: true
+    image:
+      repository: curlimages/curl
+      tag: 8.11.1
+    # Name of the Secret the Job creates and app pods read the token from. It is
+    # created through the Kubernetes API, NOT by Helm — so `helm uninstall` never
+    # deletes it and a reinstall over surviving PVCs still unseals. Back it up.
+    secretName: epicurus-openbao
+    # Mirror the compose bootstrap's step 6: record the NATS role passwords in
+    # OpenBao as the source of truth. Best-effort — a failure only logs.
+    storeNatsPasswords: true
+    # Seconds the Job may run before Kubernetes gives up on it.
+    activeDeadlineSeconds: 900
+  unseal:
+    enabled: true
+    # Seconds between seal-status checks.
+    intervalSeconds: 30
+  external:
+    url: ""
+    # An external OpenBao is bootstrapped by whoever runs it, so the chart cannot
+    # mint the app token. Name a Secret you manage that holds it, and app pods
+    # mount it at OPENBAO_TOKEN_FILE exactly as they do the in-chart one. Leave it
+    # blank and no token is wired at all.
+    tokenSecret: ""
+    tokenSecretKey: app-token
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# S3-compatible object store. OFF by default — a homelab pays a PVC and a
+# process for it, and the file space works without it. Turn it on (or point at
+# an external S3 with `external.url`) if you want either of:
+#   * the `storage` module's object store — chat uploads, agent-written objects,
+#     and the byte half of a tenant export;
+#   * `core.filesBackend: s3`, the alternative to the core's RWO file PVC.
+minio:
+  enabled: false
+  image:
+    repository: minio/minio
+    tag: RELEASE.2025-04-22T22-12-26Z
+  # The mc client is versioned SEPARATELY from the server — the tags do not match.
+  initImage:
+    repository: minio/mc
+    tag: RELEASE.2025-04-16T18-13-26Z
+  defaultBucket: epicurus
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 50Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  external:
+    # e.g. https://s3.eu-central-1.amazonaws.com — credentials still come from
+    # the Secret's MINIO_ROOT_USER / MINIO_ROOT_PASSWORD keys.
+    url: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# The local LLM runtime. A StatefulSet (component `ollama`) so the
+# container-runtime seam can rollout-restart it by that label (#891).
+ollama:
+  enabled: true
+  image:
+    repository: ollama/ollama
+    tag: 0.30.7
+  persistence:
+    enabled: true
+    existingClaim: ""
+    # Models are large. This is the one PVC that regularly needs raising.
+    size: 100Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 4Gi
+  env:
+    OLLAMA_KEEP_ALIVE: 5m
+    OLLAMA_FLASH_ATTENTION: "0"
+    OLLAMA_KV_CACHE_TYPE: f16
+  gpu:
+    # Adds `nvidia.com/gpu: <count>` to the container's limits. Needs a device
+    # plugin on the node; set `runtimeClassName` if your cluster wants one.
+    enabled: false
+    count: 1
+    resourceName: nvidia.com/gpu
+    runtimeClassName: ""
+  external:
+    url: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Self-hosted metasearch behind the websearch module.
+searxng:
+  enabled: true
+  image:
+    repository: searxng/searxng
+    tag: 2026.6.10-de03f4eb1
+  # Blank = the settings.yml the compose stack ships, rendered into a ConfigMap.
+  settings: ""
+  # SearXNG's CSRF secret. It is never exposed outside the cluster network, so
+  # the shipped placeholder is acceptable; set your own to be safe.
+  secretKey: ""
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+  external:
+    url: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

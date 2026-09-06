@@ -1,0 +1,184 @@
+{{- if .Values.minio.enabled }}
+{{- $p := .Values.minio.persistence }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "minio") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+      protocol: TCP
+    - name: console
+      port: 9001
+      targetPort: console
+      protocol: TCP
+  selector:
+    {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "minio") | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "minio") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "minio") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "minio") | nindent 8 }}
+    spec:
+      containers:
+        - name: minio
+          image: {{ include "epicurus.thirdPartyImage" .Values.minio.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - name: api
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: MINIO_ROOT_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: api
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: api
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          {{- with .Values.minio.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if or (not $p.enabled) $p.existingClaim }}
+      volumes:
+        - name: data
+        {{- if $p.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ $p.existingClaim }}
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.minio.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.minio.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.minio.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and $p.enabled (not $p.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $p.size }}
+        {{- include "epicurus.storageClass" (dict "ctx" $ "class" $p.storageClass) | nindent 8 }}
+  {{- end }}
+---
+{{- /*
+  Seeds the default bucket, the same one-shot compose runs. Per-tenant bucket
+  provisioning is the storage module's own concern; this only makes sure it has
+  somewhere to write. A hook, so it re-runs (harmlessly — `mb --ignore-existing`)
+  on every release rather than being a Job that can never be upgraded in place.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "minio") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "minio") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      containers:
+        - name: minio-init
+          # The mc client is versioned SEPARATELY from the server — never assume
+          # they share a release tag.
+          image: {{ include "epicurus.thirdPartyImage" .Values.minio.initImage }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              until mc alias set local "$MINIO_URL" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                echo "waiting for MinIO at $MINIO_URL..."
+                sleep 5
+              done
+              mc mb --ignore-existing "local/$MINIO_DEFAULT_BUCKET"
+          env:
+            - name: MINIO_URL
+              value: {{ include "epicurus.minioUrl" $ | quote }}
+            - name: MINIO_DEFAULT_BUCKET
+              value: {{ .Values.minio.defaultBucket | quote }}
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: MINIO_ROOT_PASSWORD
+{{- end }}

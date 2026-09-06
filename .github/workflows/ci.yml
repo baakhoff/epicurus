@@ -100,6 +100,57 @@ jobs:
       - name: Validate the assembled compose stack (observability profile)
         run: docker compose -f compose.yaml --profile observability config -q
 
+  # The Helm chart gets the same treatment the compose stack does: rendered, then
+  # checked. `helm lint` catches template errors, `helm template` proves the branches
+  # render at all, and `kubeconform -strict` validates the result against the real
+  # Kubernetes API schemas — which is what catches a misspelled field or a wrong
+  # apiVersion that YAML-level linting cannot see. Two renders, because the optional
+  # surfaces (ingress, MinIO, NetworkPolicy, PodMonitor) are exactly where a template
+  # bug hides. The PodMonitor is a kube-prometheus-stack CRD with no built-in schema,
+  # so the second run adds the CRDs-catalog schema location rather than skipping it
+  # (a skip would validate nothing and still report success).
+  #
+  # No cluster is booted here: a kind-based k8s-smoke, mirroring infra/ci/smoke.sh's
+  # assertions, is #894.
+  chart-validate:
+    runs-on: ubuntu-latest
+    env:
+      CHART: infra/k8s/epicurus
+      HELM_VERSION: "3.16.4"
+      KUBECONFORM_VERSION: "0.6.7"
+      # Oldest Kubernetes the chart claims to support (Chart.yaml kubeVersion).
+      KUBE_VERSION: "1.25.0"
+      CRD_SCHEMAS: "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Helm and kubeconform (pinned)
+        run: |
+          set -euo pipefail
+          curl -sSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o helm.tgz
+          tar xzf helm.tgz linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" -o kubeconform.tgz
+          tar xzf kubeconform.tgz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          helm version --short
+          kubeconform -v
+
+      - name: Lint the chart
+        run: helm lint "$CHART"
+
+      - name: Render and validate — default values
+        run: |
+          helm template epicurus "$CHART" \
+            | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" -
+
+      - name: Render and validate — ingress, MinIO, NetworkPolicy, PodMonitor
+        run: |
+          helm template epicurus "$CHART" \
+            --set ingress.enabled=true,minio.enabled=true,networkPolicy.enabled=true,metrics.podMonitor.enabled=true \
+            | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" \
+                -schema-location default -schema-location "$CRD_SCHEMAS" -
+
   # Validates Prometheus and Alertmanager configs without booting the
   # observability stack. The runtime-smoke gate skips that stack, so a bad rule
   # (e.g. an undefined template function) would otherwise reach production

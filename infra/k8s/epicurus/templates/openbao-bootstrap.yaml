@@ -1,0 +1,198 @@
+{{- if and .Values.openbao.enabled .Values.openbao.bootstrap.enabled }}
+{{- /*
+  The bootstrap Job and the unseal loop. Both are plain curl against OpenBao's
+  HTTP API — the scripts live in scripts/ rather than inline here so CI's
+  shell-lint job (shellcheck, driven off `git ls-files '*.sh'`) actually parses
+  them; an inline command block would be linted by nothing.
+
+  The Job runs as a post-install AND post-upgrade hook: a Job's pod template is
+  immutable, so a plain Job could not be upgraded in place, and the script is
+  idempotent by design (it skips init when initialised, unseal when unsealed, and
+  keeps an app token that still authenticates).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-bootstrap-scripts
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+data:
+  bootstrap.sh: |
+{{ .Files.Get "scripts/openbao-bootstrap.sh" | indent 4 }}
+  unseal.sh: |
+{{ .Files.Get "scripts/openbao-unseal.sh" | indent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-bootstrap
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-bootstrap
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+rules:
+  # `create` cannot be narrowed by resourceNames (the object does not exist yet),
+  # so it is namespace-wide; read/patch are pinned to the one Secret this Job owns.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.openbao.bootstrap.secretName | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-bootstrap
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openbao-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: openbao-bootstrap
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-bootstrap
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    # Not `hook-succeeded`: the finished Job (and its logs) is the record of what
+    # the bootstrap did. It is replaced on the next release, not deleted on success.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 6
+  activeDeadlineSeconds: {{ .Values.openbao.bootstrap.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: openbao-bootstrap
+      {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      containers:
+        - name: bootstrap
+          image: {{ include "epicurus.thirdPartyImage" .Values.openbao.bootstrap.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/scripts/bootstrap.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: BAO_ADDR
+              value: {{ include "epicurus.openbaoUrl" $ | quote }}
+            - name: SECRET_NAME
+              value: {{ .Values.openbao.bootstrap.secretName | quote }}
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: TENANT
+              value: {{ .Values.defaultTenantId | quote }}
+            - name: STORE_NATS
+              value: {{ .Values.openbao.bootstrap.storeNatsPasswords | quote }}
+            {{- if .Values.openbao.bootstrap.storeNatsPasswords }}
+            - name: NATS_CORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: NATS_CORE_PASSWORD
+            - name: NATS_MODULE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: NATS_MODULE_PASSWORD
+            - name: NATS_SYS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: NATS_SYS_PASSWORD
+            {{- end }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: openbao-bootstrap-scripts
+{{- if .Values.openbao.unseal.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openbao-unseal
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao-unseal") | nindent 4 }}
+  {{- with .Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "openbao-unseal") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao-unseal") | nindent 8 }}
+    spec:
+      {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      containers:
+        - name: unseal
+          image: {{ include "epicurus.thirdPartyImage" .Values.openbao.bootstrap.image }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/scripts/unseal.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: BAO_ADDR
+              value: {{ include "epicurus.openbaoUrl" $ | quote }}
+            - name: UNSEAL_KEY_FILE
+              value: /var/run/secrets/openbao/unseal-key
+            - name: INTERVAL_SECONDS
+              value: {{ .Values.openbao.unseal.intervalSeconds | quote }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: unseal-key
+              mountPath: /var/run/secrets/openbao
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: openbao-bootstrap-scripts
+        - name: unseal-key
+          secret:
+            # `optional`: on a first install this Deployment starts before the
+            # bootstrap Job has created the Secret. The loop waits for the file.
+            secretName: {{ .Values.openbao.bootstrap.secretName }}
+            optional: true
+            items:
+              - key: unseal-key
+                path: unseal-key
+{{- end }}
+{{- end }}

@@ -1,0 +1,178 @@
+{{- /*
+  One Deployment + ClusterIP Service per enabled module, from `.Values.modules`.
+  The Service name is the bare module name because the core locks that module's
+  file-space folder by the hostname in MODULE_URLS (ADR-0063) — see _helpers.tpl.
+
+  Every workload carries `app.kubernetes.io/component: <module>` and
+  `app.kubernetes.io/part-of: epicurus`, which is how the core's Kubernetes
+  container-runtime seam (#891) finds the Deployment to scale to zero on a
+  confirmed module removal.
+*/}}
+{{- range $name, $raw := .Values.modules }}
+{{- if $raw.enabled }}
+{{- $cfg := mergeOverwrite (deepCopy $.Values.moduleDefaults) (deepCopy $raw) }}
+{{- $wants := default (dict) $cfg.wants }}
+{{- $baoTokenSecret := include "epicurus.openbaoTokenSecret" $ }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" $name) | nindent 4 }}
+  {{- with $.Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" $name) | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" $name) | nindent 4 }}
+  {{- with $.Values.commonAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ $cfg.replicas }}
+  selector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" $name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "epicurus.labels" (dict "ctx" $ "component" $name) | nindent 8 }}
+        epicurus.io/metrics: "true"
+      {{- $podAnnotations := merge (dict) (include "epicurus.metricsAnnotations" $ | fromYaml) $cfg.podAnnotations }}
+      {{- with $podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      {{- if and (get $wants "openbao") $baoTokenSecret $.Values.openbao.enabled }}
+      initContainers:
+        {{- include "epicurus.waitForOpenbaoToken" $ | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "epicurus.image" (dict "ctx" $ "name" $name "override" $cfg.image) }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          securityContext:
+            # The module images already run as the unprivileged `epicurus` user
+            # (uid 10001) — nothing here needs root or a capability.
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            {{- include "epicurus.commonEnv" (dict "ctx" $ "role" "module") | nindent 12 }}
+            {{- if get $wants "platform" }}
+            - name: PLATFORM_URL
+              value: {{ include "epicurus.platformUrl" $ | quote }}
+            {{- end }}
+            {{- if get $wants "database" }}
+            # POSTGRES_PASSWORD must precede DATABASE_URL — the kubelet expands
+            # $(VAR) only from env declared earlier in this same list.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: {{ include "epicurus.databaseUrl" $ | quote }}
+            {{- end }}
+            {{- if get $wants "qdrant" }}
+            - name: QDRANT_URL
+              value: {{ include "epicurus.qdrantUrl" $ | quote }}
+            {{- end }}
+            {{- if get $wants "searxng" }}
+            - name: SEARXNG_URL
+              value: {{ include "epicurus.searxngUrl" $ | quote }}
+            {{- end }}
+            {{- if get $wants "minio" }}
+            - name: MINIO_URL
+              value: {{ include "epicurus.minioUrl" $ | quote }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "epicurus.secretName" $ }}
+                  key: MINIO_ROOT_PASSWORD
+            {{- end }}
+            {{- if get $wants "openbao" }}
+            - name: OPENBAO_URL
+              value: {{ include "epicurus.openbaoUrl" $ | quote }}
+            {{- if $baoTokenSecret }}
+            - name: OPENBAO_TOKEN_FILE
+              value: /var/run/secrets/epicurus/openbao-token
+            {{- end }}
+            {{- end }}
+            {{- range $k, $v := $cfg.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- if and (get $wants "openbao") $baoTokenSecret }}
+          volumeMounts:
+            {{- include "epicurus.openbaoTokenMount" $ | nindent 12 }}
+          {{- end }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          {{- with $cfg.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if and (get $wants "openbao") $baoTokenSecret }}
+      volumes:
+        {{- include "epicurus.openbaoTokenVolume" $ | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

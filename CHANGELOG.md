@@ -28,6 +28,51 @@ images to GHCR.
   is exactly the case the #848 mass de-index fuse always lets through. `knowledge` 0.29.0→0.30.0
   (MINOR).
 
+
+- **Your notes move house with their words intact** (#872, part of #866) — `notes` now implements
+  the module half of tenant export/import (schema `notes/1`): every note, every folder you made,
+  the agent's pending suggestion queue and the decision trail behind it travel in the archive and
+  land in the new installation under its own tenant. **Bodies travel with the rows**, which is the
+  opposite of how it first looked: a note is already mirrored to `notes/<slug>.md` in the shared
+  file space, and the file space is in the archive — but that mirror is write-only derived output
+  that nothing ever reads back into the store, so carrying metadata alone would have handed the
+  operator a Files tree full of markdown and a Notes page full of empty documents. What stays
+  behind is what can be rebuilt or was never ours: per-save version history (already deduped and
+  pruned to 50 per note, and every row a whole body of text whose current state travels beside
+  it), the Qdrant vectors (rebuilt by the re-embed fan-out, since a vector belongs to the model
+  that made it), the `.md` mirror itself, and the review on/off toggle (a core preference).
+  Import upserts by the note's slug — never a surrogate key — in a single transaction, never
+  deletes, and a second apply of the same archive is a no-op; a record that omits a column leaves
+  that column alone, so nothing can blank a body it did not carry, and a note with no body at all
+  is refused rather than conjured into the editor as an empty document. `notes` 0.13.0→0.14.0
+  (MINOR).
+
+- **Tasks joins tenant export/import** (#871, part of #866/#867) — `tasks` implements the
+  module half of the portability contract: `portable=True` plus `GET /export` / `POST /import`
+  (schema `tasks/1`) over local tasks, a Google-linked task's recurrence rule (the *only* copy
+  of it — Google Tasks has no recurrence field of its own, ADR-0082), and the operator's
+  `task_due_soon` lead-time preference when set. Each carries its own stable id (a task's own
+  uuid, never the surrogate `pk`; a repeat rule's natural `list_id`/`task_id` pair; a fixed id
+  for the single per-tenant lead-time row) so import is a plain upsert and re-applying the same
+  export is a no-op. The Google task itself is not exported — it lives in the operator's
+  account, not this module's database — and the operator's enabled/active list selection is
+  left to the core's own export (`module_prefs.collections`) rather than duplicated here; the
+  scheduler's fire-once markers are operational and excluded too. `tasks` 0.23.3→0.24.0 (MINOR).
+
+- **Your calendar travels with you** (#870, part of #866) — the tenant archive now carries
+  calendar. Everything the local store owns goes: plain events, all-day events, and a recurring
+  series *whole* — its repeat rule, the wall-clock zone it expands in, an occurrence you moved or
+  retitled, and one you deleted — plus your `event_starting_soon` lead time. Import upserts by
+  each event's own id, so re-importing an archive changes nothing and importing into a calendar
+  you have already started using merges rather than replaces; a dry run tells you what would land
+  before anything does. What is deliberately left behind is everything that describes *this*
+  installation rather than your calendar: the Google mirror and its sync cursors (reconnect the
+  account and the next sync rebuilds them from Google itself, which still holds those events),
+  the fire-once reminder markers (so the new install still tells you about tomorrow's meeting),
+  and — of course — the OAuth token, which never leaves OpenBao. Which calendars are enabled and
+  which one new events land on already travel in the core's own half of the archive (they live in
+  `module_prefs`), so they are not duplicated here. `calendar` 0.20.1→0.21.0 (MINOR).
+
 - **Take everything with you: tenant export and import, from Settings** (#867, part of #866) —
   an operator could stand up a second epicurus but had no way to *move into it*. The volume
   backups in `infra/backups` image one deployment for disaster recovery; nothing carried a

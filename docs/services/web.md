@@ -996,6 +996,29 @@ ordered timeline fall back to a thinking-then-steps render.
 | --- | --- | --- |
 | `CORE_APP_URL` | `http://core-app:8080` | Where nginx proxies `/platform/`. |
 | `WEB_PORT` | `8084` | Host port (loopback-bound by default). |
+| `NGINX_RESOLVER` | the first `nameserver` in the container's `/etc/resolv.conf` | The DNS server nginx resolves the core with (#891). Rarely set by hand — the default is right under Compose (Docker's embedded DNS, `127.0.0.11`) *and* in a Kubernetes pod (the cluster DNS service). An IPv6 address is bracketed automatically. |
+
+### Resolving the core (#891)
+
+Both proxy locations resolve `CORE_APP_URL`'s hostname **at request time**, so nginx starts
+and keeps serving the UI while the core is down or restarting. That requires the config to
+name a resolver, and there is no portable literal: the template used to hardcode `127.0.0.11`
+(Docker's embedded DNS), which does not exist in a cluster — every `/platform/` request would
+have failed at name resolution.
+
+So the image derives it at container start.
+`services/web/docker-entrypoint.d/05-epicurus-resolver.envsh` is *sourced* by the nginx
+entrypoint (hence `.envsh`, and it must stay executable) before the template is rendered: it
+reads the first `nameserver` from `/etc/resolv.conf`, brackets an IPv6 literal, falls back to
+`127.0.0.11` if there is nothing to read, and exports `NGINX_RESOLVER` — which an operator can
+also set outright, in which case it is used as-is.
+
+`NGINX_ENVSUBST_FILTER` (set in the Dockerfile) restricts the template substitution to
+`CORE_APP_URL` and `NGINX_RESOLVER`. That is not cosmetic: unfiltered, envsubst would also
+replace nginx's own `$host`, `$core` and `$proxy_add_x_forwarded_for`, silently emptying the
+proxy headers. `tests/test_nginx_resolver.py` exercises the derivation against fixture
+`resolv.conf` files (the container never boots in the fast gate); `runtime-smoke` proves the
+Docker path end-to-end, where a wrong value stops nginx from starting at all.
 
 ## Data model
 

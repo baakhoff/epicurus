@@ -41,6 +41,14 @@ is not required to install it — is a separate piece of the same epic; the rele
 pipeline overrides `appVersion` with the release's image tag at package time, which
 is why `Chart.yaml` carries a placeholder.
 
+On a first install `core-app` (and `messaging`) sit in `Init:0/1` for the first
+minute: they wait for the OpenBao bootstrap Job to write the app token. That Job
+is a plain revision-named Job rather than a Helm hook precisely so this is a wait
+and not a deadlock — Helm runs post-install hooks only *after* every normal
+resource is ready, so a hook here would make `helm install --wait` (and Argo CD
+and Flux, which wait by default) hang until it timed out. As a normal resource it
+runs alongside the pods that are waiting for it.
+
 > **One release per namespace.** Workloads and Services are named *bare* —
 > `core-app`, `knowledge`, `postgres` — not `<release>-<name>`. That is
 > load-bearing, not a style choice: the core locks a module's file-space folder by
@@ -87,7 +95,9 @@ Secret; a password is never written into a ConfigMap, and `DATABASE_URL` embeds
 `$(POSTGRES_PASSWORD)`, which the kubelet expands from the env var declared above
 it in the same container, so the DSN itself carries no secret.
 
-**The container-runtime seam.** `core-app` gets `CONTAINER_RUNTIME=kubernetes` and
+**The container-runtime seam.** The implementation lives in the core (#891); the
+chart's job is to select it and to grant it exactly what it needs.
+`core-app` gets `CONTAINER_RUNTIME=kubernetes` and
 `KUBERNETES_NAMESPACE` from the downward API (never guessed), plus a Role granting
 `get`/`list`/`patch` on `deployments`, `deployments/scale` and `statefulsets` in
 the release namespace — and nothing else. It can read the workloads, patch a
@@ -178,8 +188,14 @@ The full list is in [`config`](../reference/config.md).
 | `web.podAnnotations` / `.nodeSelector` / `.tolerations` / `.affinity` | empty | |
 | `web.extraEnv` | `{}` | |
 
-The only env the chart sets is `CORE_APP_URL=http://core-app:8080`. The image
-derives its own DNS resolver from `/etc/resolv.conf`, so nothing else is needed.
+The only env the chart sets is `CORE_APP_URL=http://core-app:8080`. The shell's
+nginx proxies `/platform/` through a variable, so it resolves that name at request
+time — and the image derives the resolver it uses from `/etc/resolv.conf` at
+start-up, which is what makes it work in a pod. That is a sibling change to this
+chart (#891); a web image built before it hardcodes Docker's embedded DNS
+(`127.0.0.11`), and against such an image every `/platform/` request 502s while
+both probes stay green, because `/healthz` is a static handler that never touches
+the resolver.
 
 ### `modules` and `moduleDefaults`
 
@@ -305,31 +321,35 @@ cluster points at managed services.
 | `openbao.bootstrap.image.repository` / `.tag` | `curlimages/curl` / `8.11.1` |
 | `openbao.bootstrap.secretName` | `epicurus-openbao` |
 | `openbao.bootstrap.storeNatsPasswords` | `true` |
-| `openbao.bootstrap.activeDeadlineSeconds` | `900` |
+| `openbao.bootstrap.activeDeadlineSeconds` | `1800` |
+| `openbao.bootstrap.ttlSecondsAfterFinished` | `86400` |
 | `openbao.unseal.enabled` / `.intervalSeconds` | `true` / `30` |
 | `openbao.external.url` / `.tokenSecret` / `.tokenSecretKey` | `""` / `""` / `app-token` |
 | `minio.enabled` | **`false`** |
 | `minio.image.repository` / `.tag` | `minio/minio` / `RELEASE.2025-04-22T22-12-26Z` |
 | `minio.initImage.repository` / `.tag` | `minio/mc` / `RELEASE.2025-04-16T18-13-26Z` |
 | `minio.defaultBucket` | `epicurus` |
+| `minio.initJob.ttlSecondsAfterFinished` | `86400` |
 | `minio.persistence.*` | as postgres, `50Gi` |
 | `minio.resources` | `requests: 100m / 256Mi` |
 | `minio.external.url` | `""` |
 | `ollama.enabled` | `true` |
 | `ollama.image.repository` / `.tag` | `ollama/ollama` / `0.30.7` |
 | `ollama.persistence.*` | as postgres, `100Gi` |
-| `ollama.resources` | `requests: 500m / 4Gi` |
+| `ollama.resources` | `requests: 500m / 4Gi` (add `limits` — memory especially) |
 | `ollama.env` | `OLLAMA_KEEP_ALIVE: 5m`, `OLLAMA_FLASH_ATTENTION: "0"`, `OLLAMA_KV_CACHE_TYPE: f16` |
 | `ollama.gpu.enabled` / `.count` / `.resourceName` / `.runtimeClassName` | `false` / `1` / `nvidia.com/gpu` / `""` |
 | `ollama.external.url` | `""` |
 | `searxng.enabled` | `true` |
 | `searxng.image.repository` / `.tag` | `searxng/searxng` / `2026.6.10-de03f4eb1` |
-| `searxng.settings` / `.secretKey` | `""` / `""` |
+| `searxng.settings` | `""` (blank = the compose `settings.yml`) |
 | `searxng.replicas` | `1` |
 | `searxng.resources` | `requests: 50m / 256Mi` |
 | `searxng.external.url` | `""` |
 
-Each data-plane block also takes `nodeSelector`, `tolerations` and `affinity`.
+Every `resources` key in this chart is a standard Kubernetes resources block: the
+defaults set `requests` only, and `limits` are yours to add. Each data-plane block
+also takes `nodeSelector`, `tolerations` and `affinity`.
 Every `external.url` is required once its `enabled` is `false` — Helm fails the
 render with a named message rather than deploying something that cannot connect.
 Postgres is the exception in shape: an external server is addressed by
@@ -345,7 +365,10 @@ after an install that is in that state. Turn MinIO on, or point at your own S3.
 
 ## Data model
 
-**PersistentVolumeClaims.** All ReadWriteOnce; the StatefulSets use
+**PersistentVolumeClaims.** ReadWriteOnce throughout — the data-plane ones
+unconditionally, the core's file claim by default
+(`core.persistence.accessMode`, which you would only raise to ReadWriteMany for
+an experiment the singleton does not need). The StatefulSets use
 `volumeClaimTemplates`, so Helm never deletes them.
 
 | Claim | Owner | Holds |
@@ -360,9 +383,14 @@ after an install that is in that state. Turn MinIO on, or point at your own S3.
 
 **Secrets.** Two, and they are very different animals:
 
-- **`epicurus-secrets`** — Helm-managed. `POSTGRES_PASSWORD`,
-  `NATS_{CORE,MODULE,SYS}_PASSWORD`, `OAUTH_STATE_SECRET`, `MINIO_ROOT_USER`,
-  `MINIO_ROOT_PASSWORD`. Generated on first install and **kept across
+- **`epicurus-secrets`** — Helm-managed. Exactly seven keys:
+  `POSTGRES_PASSWORD`, `NATS_CORE_PASSWORD`, `NATS_MODULE_PASSWORD`,
+  `NATS_SYS_PASSWORD`, `OAUTH_STATE_SECRET`, `MINIO_ROOT_USER`,
+  `MINIO_ROOT_PASSWORD`. A Secret you supply through `secrets.existingSecret` must
+  carry **all seven** — a missing one is not a render error, it is a
+  `CreateContainerConfigError` on the pods that reference it. Keep
+  `POSTGRES_PASSWORD` URL-safe: it is interpolated into a DSN. Generated on first
+  install and **kept across
   `helm upgrade`**: the template reads the live Secret back with `lookup` before
   generating anything, so an upgrade never rotates a password out from under a
   running Postgres. `helm uninstall` **deletes** it while the PVCs survive, and a
@@ -409,10 +437,11 @@ override). Then add the `wants` the module actually uses.
 
 ```bash
 helm lint infra/k8s/epicurus
-helm template epicurus infra/k8s/epicurus | kubeconform -strict -summary
+helm template epicurus infra/k8s/epicurus \
+  | kubeconform -strict -summary -kubernetes-version 1.25.0
 helm template epicurus infra/k8s/epicurus \
   --set ingress.enabled=true,minio.enabled=true,networkPolicy.enabled=true,metrics.podMonitor.enabled=true \
-  | kubeconform -strict -summary -schema-location default \
+  | kubeconform -strict -summary -kubernetes-version 1.25.0 -schema-location default \
       -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 ```
 
@@ -432,11 +461,16 @@ cluster is booted anywhere in CI; a kind-based `k8s-smoke` mirroring
 ### Upgrading
 
 ```bash
-helm upgrade epicurus infra/k8s/epicurus --namespace epicurus --reuse-values
+helm upgrade epicurus infra/k8s/epicurus --namespace epicurus -f my-values.yaml
 ```
 
-What happens: passwords are kept (`lookup`), the OpenBao bootstrap Job re-runs as
-a post-upgrade hook and is a no-op when nothing needs doing, `core-app` uses the
+Keep your values in a file and pass it every time. Avoid `--reuse-values`: it
+overlays the *previous* release's computed values onto the new chart, so keys a
+chart upgrade adds silently keep their old shape. `--reset-then-reuse-values`
+(Helm 3.14+) is the safe version of the same idea.
+
+What happens: passwords are kept (`lookup`), the OpenBao bootstrap Job is recreated
+under the new revision's name and is a no-op when nothing needs doing, `core-app` uses the
 `Recreate` strategy so two replicas never hold the RWO file PVC at once, and a
 `qdrant` image-tag change wipes the vector store on purpose — its on-disk segment
 format is version-bound, a mismatched one panics the server on boot (#229), and
@@ -486,15 +520,19 @@ handoff.
 
 Three pieces, mirroring the compose stack:
 
-1. **The bootstrap Job** (`helm.sh/hook: post-install,post-upgrade`) waits for the
-   API, initialises 1-of-1 Shamir if the vault is uninitialised, stores the unseal
-   key and root token in `epicurus-openbao` *before doing anything else*, unseals,
+1. **The bootstrap Job** — `openbao-bootstrap-<revision>`, a normal resource, not
+   a Helm hook (see the quick start for why). It waits for the API; if the vault is
+   uninitialised it first **proves it can write** `epicurus-openbao` with a
+   throwaway key, because a vault created by a job that then cannot store the key
+   is unrecoverable; initialises 1-of-1 Shamir, stores the unseal key and root
+   token *before doing anything else*, unseals,
    enables KV v2 at `secret/`, writes the `epicurus-core` policy, and mints a
    **periodic** app token (768h period, renewed daily by core-app). Periodic is
    load-bearing: a plain service token silently falls back to the default lease and
    every secret read starts failing about a month after bootstrap (#728). Re-runs
    are no-ops, including the token — it is re-minted only if the stored one no
-   longer authenticates.
+   longer authenticates, and the superseded one is revoked so orphaned periodic
+   tokens cannot pile up across upgrades.
 2. **The unseal Deployment** submits the key again whenever the vault reports
    sealed, so a restarted OpenBao pod comes back on its own. It reads the key from
    the same Secret, mounted `optional`, and waits for the file on a first install.

@@ -1,15 +1,16 @@
 {{- if .Values.searxng.enabled }}
 {{- /*
   The settings.yml the compose stack ships, kept byte-identical to
-  infra/searxng/settings.yml (tests/test_chart_services.py fails on drift) with
-  one templated exception: `searxng.secretKey` replaces the placeholder CSRF key
-  when the operator sets one. SearXNG is never exposed outside the cluster — only
-  the websearch module talks to it.
+  infra/searxng/settings.yml (tests/test_chart_services.py fails on drift).
+
+  It goes into a ConfigMap, which is why the chart offers no "set my secret_key"
+  value: that would put a credential somewhere credentials do not belong. SearXNG
+  is only ever reachable from the websearch module inside the cluster — it has no
+  Service exposure, no Ingress, and the NetworkPolicy fences it — so the shipped
+  placeholder CSRF key is the same trade compose makes. An operator who needs a
+  real one supplies a whole settings file and owns where it lives.
 */}}
 {{- $settings := default (.Files.Get "files/searxng-settings.yml") .Values.searxng.settings }}
-{{- if .Values.searxng.secretKey }}
-{{- $settings = regexReplaceAll "secret_key: \"[^\"]*\"" $settings (printf "secret_key: %q" .Values.searxng.secretKey) }}
-{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

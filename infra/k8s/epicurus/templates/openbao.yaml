@@ -1,5 +1,24 @@
 {{- if .Values.openbao.enabled }}
 {{- $p := .Values.openbao.persistence }}
+{{- /*
+  The compose stack's openbao-config.hcl, addressed at the cluster Service rather
+  than the Docker network. Held in a variable so the StatefulSet below can
+  checksum it and roll the pod when it changes.
+*/}}
+{{- $config := `storage "file" {
+  path = "/openbao/data"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  tls_disable = true
+}
+
+# Cluster-internal address — every service reaches OpenBao at http://openbao:8200.
+api_addr     = "http://openbao:8200"
+cluster_addr = "https://openbao:8201"
+ui           = false
+` }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,19 +27,7 @@ metadata:
     {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
 data:
   config.hcl: |
-    storage "file" {
-      path = "/openbao/data"
-    }
-
-    listener "tcp" {
-      address     = "0.0.0.0:8200"
-      tls_disable = true
-    }
-
-    # Cluster-internal address — every service reaches OpenBao at http://openbao:8200.
-    api_addr     = "http://openbao:8200"
-    cluster_addr = "https://openbao:8201"
-    ui           = false
+{{ $config | indent 4 }}
 ---
 apiVersion: v1
 kind: Service
@@ -34,9 +41,10 @@ metadata:
   {{- end }}
 spec:
   type: ClusterIP
-  # A sealed vault is deliberately NOT ready (see the probe below), and the
-  # bootstrap Job has to reach it precisely while it is sealed — so this Service
-  # must route to the pod before it passes readiness.
+  # The bootstrap Job has to reach the vault precisely while it is uninitialised
+  # or sealed. The readiness probe below already reports both states as healthy;
+  # this makes the Service route to the pod even in the window before its first
+  # probe has succeeded, so the Job never waits on an empty EndpointSlice.
   publishNotReadyAddresses: true
   ports:
     - name: http
@@ -66,6 +74,8 @@ spec:
     metadata:
       labels:
         {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 8 }}
+      annotations:
+        checksum/config: {{ $config | sha256sum }}
     spec:
       containers:
         - name: openbao

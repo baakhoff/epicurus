@@ -108,9 +108,10 @@ core:
     capabilities:
       drop: ["ALL"]
       add: ["CHOWN", "SETUID", "SETGID", "FOWNER", "DAC_OVERRIDE"]
-  # The container-runtime seam (#891). `kubernetes` scales a module's Deployment
-  # to zero on confirmed removal and rollout-restarts Ollama; `none` says so once
-  # instead of logging on every call.
+  # The container-runtime seam. `CONTAINER_RUNTIME=kubernetes` scales a module's
+  # Deployment to zero on confirmed removal and rollout-restarts Ollama's
+  # StatefulSet; `none` says so once instead of logging on every call. The seam
+  # itself accepts other values — see the core's own settings for the full set.
   containerRuntime:
     kind: kubernetes
     rbac:
@@ -406,8 +407,13 @@ openbao:
     # Mirror the compose bootstrap's step 6: record the NATS role passwords in
     # OpenBao as the source of truth. Best-effort — a failure only logs.
     storeNatsPasswords: true
-    # Seconds the Job may run before Kubernetes gives up on it.
-    activeDeadlineSeconds: 900
+    # Seconds the Job may run before Kubernetes gives up on it. Must clear
+    # backoffLimit (3) x the script's five-minute wait for the OpenBao API, or a
+    # slow cold start reads as a permanent failure.
+    activeDeadlineSeconds: 1800
+    # How long a finished bootstrap Job (and its logs) is kept before Kubernetes
+    # garbage-collects it. 24h leaves time to read what it did.
+    ttlSecondsAfterFinished: 86400
   unseal:
     enabled: true
     # Seconds between seal-status checks.
@@ -440,6 +446,10 @@ minio:
     repository: minio/mc
     tag: RELEASE.2025-04-16T18-13-26Z
   defaultBucket: epicurus
+  initJob:
+    # How long the finished bucket-seeding Job is kept before Kubernetes
+    # garbage-collects it.
+    ttlSecondsAfterFinished: 86400
   persistence:
     enabled: true
     existingClaim: ""
@@ -470,6 +480,9 @@ ollama:
     # Models are large. This is the one PVC that regularly needs raising.
     size: 100Gi
     storageClass: ""
+  # Requests only by default. Add `limits` here (memory especially — a model that
+  # does not fit gets the pod OOM-killed rather than failing the request) when the
+  # node is shared.
   resources:
     requests:
       cpu: 500m
@@ -498,10 +511,12 @@ searxng:
     repository: searxng/searxng
     tag: 2026.6.10-de03f4eb1
   # Blank = the settings.yml the compose stack ships, rendered into a ConfigMap.
+  # Whatever you put here lands in a ConfigMap, so do not put a real secret in it:
+  # SearXNG's `secret_key` is a CSRF guard for a service that is only ever reachable
+  # from the websearch module inside the cluster, and the shipped placeholder is
+  # what compose uses too. If your threat model needs a real one, mount your own
+  # settings file instead of using this key.
   settings: ""
-  # SearXNG's CSRF secret. It is never exposed outside the cluster network, so
-  # the shipped placeholder is acceptable; set your own to be safe.
-  secretKey: ""
   replicas: 1
   resources:
     requests:

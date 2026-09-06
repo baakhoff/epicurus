@@ -127,26 +127,24 @@ spec:
 {{- /*
   Seeds the default bucket, the same one-shot compose runs. Per-tenant bucket
   provisioning is the storage module's own concern; this only makes sure it has
-  somewhere to write. A hook, so it re-runs (harmlessly — `mb --ignore-existing`)
-  on every release rather than being a Job that can never be upgraded in place.
+  somewhere to write. Revision-named for the same reason the OpenBao bootstrap is
+  (a Job's pod template is immutable), and its own component label so a finished
+  mc pod can never land in the `minio` Service's EndpointSlice.
 */}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minio-init
+  name: minio-init-{{ .Release.Revision }}
   labels:
-    {{- include "epicurus.labels" (dict "ctx" $ "component" "minio") | nindent 4 }}
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": before-hook-creation
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "minio-init") | nindent 4 }}
 spec:
-  backoffLimit: 6
+  backoffLimit: 3
   activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: {{ .Values.minio.initJob.ttlSecondsAfterFinished }}
   template:
     metadata:
       labels:
-        {{- include "epicurus.labels" (dict "ctx" $ "component" "minio") | nindent 8 }}
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "minio-init") | nindent 8 }}
     spec:
       restartPolicy: Never
       {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}

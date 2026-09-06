@@ -8,7 +8,9 @@
   Needs a CNI that enforces NetworkPolicy (Calico, Cilium, k3s' flannel does NOT).
   Off by default for exactly that reason.
 */}}
-{{- $modules := splitList "," (include "epicurus.enabledModules" .) }}
+{{- $moduleList := include "epicurus.enabledModules" . }}
+{{- $modules := list }}
+{{- if $moduleList }}{{ $modules = splitList "," $moduleList }}{{ end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

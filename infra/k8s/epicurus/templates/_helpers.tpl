@@ -271,8 +271,14 @@ re-reads the file on every re-authentication, so a rotation needs no restart.
     - /bin/sh
     - -c
     - |
-      echo "waiting for the OpenBao app token from the bootstrap job..."
-      while [ ! -s /var/run/secrets/epicurus/openbao-token ]; do sleep 5; done
+      n=0
+      while [ ! -s /var/run/secrets/epicurus/openbao-token ]; do
+        if [ $((n % 12)) -eq 0 ]; then
+          echo "waiting for the OpenBao app token from the bootstrap job (${n}0s)..."
+        fi
+        n=$((n + 1))
+        sleep 10
+      done
       echo "token present."
   volumeMounts:
     {{- include "epicurus.openbaoTokenMount" . | nindent 4 }}

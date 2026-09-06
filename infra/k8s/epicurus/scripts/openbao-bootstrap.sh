@@ -5,8 +5,9 @@
 #
 # What it does, skipping whatever is already done:
 #   1. waits for the OpenBao API;
-#   2. initialises it (1-of-1 Shamir share) if it is uninitialised, storing the
-#      unseal key + root token in a Kubernetes Secret straight away;
+#   2. initialises it (1-of-1 Shamir share) if it is uninitialised — after proving
+#      it can write the Kubernetes Secret, and storing the unseal key + root token
+#      in it straight away;
 #   3. unseals it if it is sealed;
 #   4. enables the KV v2 engine at `secret/`;
 #   5. writes the `epicurus-core` policy;
@@ -161,6 +162,14 @@ store_secret() { # key value — create the Secret, or merge this key into it
 # ── 2. initialise ─────────────────────────────────────────────────────────────
 
 if [ "$INITIALIZED" = "0" ]; then
+    # Prove we can WRITE the Secret *before* creating a vault. An operator-supplied
+    # ServiceAccount, an admission policy or a resource quota can withhold
+    # create/patch while still allowing the `get` above — and if the store fails
+    # after init, the only unseal key that ever existed dies with this pod and the
+    # data on the volume is unreachable. One throwaway key closes that window.
+    echo "Checking that this job can write secret/$SECRET_NAME..."
+    store_secret bootstrap-probe "ok"
+
     echo "Initialising (1-of-1 Shamir shares)..."
     bao_req POST /v1/sys/init '{"secret_shares":1,"secret_threshold":1}'
     [ "$CODE" = "200" ] || fail "init failed (HTTP $CODE)"
@@ -238,6 +247,16 @@ fi
 if [ "$REUSE_TOKEN" = "1" ]; then
     echo "Existing app token still authenticates — keeping it."
 else
+    if [ -n "$APP_TOKEN" ]; then
+        # Best effort: the old token normally failed lookup-self precisely because
+        # it is already gone, but if it failed for some other reason it is orphaned
+        # AND periodic — an unlimited lifetime over secret/data/tenants/* that
+        # nothing would ever clean up. Re-minting on every upgrade would accumulate
+        # them.
+        echo "Revoking the superseded app token..."
+        bao_req POST /v1/auth/token/revoke "{\"token\":\"$APP_TOKEN\"}"
+        echo "  (HTTP $CODE)"
+    fi
     echo "Creating the periodic app token (768h period, renewed by core-app)..."
     bao_req POST /v1/auth/token/create \
         '{"display_name":"epicurus-core-app","policies":["epicurus-core"],"no_default_policy":true,"no_parent":true,"period":"768h"}'

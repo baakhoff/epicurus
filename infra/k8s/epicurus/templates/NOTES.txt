@@ -7,10 +7,10 @@ Images: tag {{ default .Chart.AppVersion .Values.image.tag }} from {{ .Values.im
 
 {{- if and .Values.openbao.enabled .Values.openbao.bootstrap.enabled }}
 
-   core-app{{ if and .Values.modules.messaging .Values.modules.messaging.enabled }} and messaging{{ end }} wait on an init container until the OpenBao
+   core-app{{ if and .Values.modules.messaging .Values.modules.messaging.enabled (get (default (dict) .Values.modules.messaging.wants) "openbao") }} and messaging{{ end }} wait on an init container until the OpenBao
    bootstrap job has written the app token. That is expected on a first install:
 
-     kubectl -n {{ .Release.Namespace }} logs job/openbao-bootstrap
+     kubectl -n {{ .Release.Namespace }} logs job/openbao-bootstrap-{{ .Release.Revision }}
 
 2. THE UNSEAL KEY — BACK IT UP
 
@@ -27,11 +27,12 @@ Images: tag {{ default .Chart.AppVersion .Values.image.tag }} from {{ .Values.im
    submits the key again on its own.
 {{- end }}
 
-{{ if .Values.openbao.enabled }}3{{ else }}2{{ end }}. REACH THE UI
+{{- $bootstrapped := and .Values.openbao.enabled .Values.openbao.bootstrap.enabled }}
+{{ if $bootstrapped }}3{{ else }}2{{ end }}. REACH THE UI
 {{- if .Values.ingress.enabled }}
 
      {{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}{{ .Values.ingress.path }}
-{{- else }}
+{{- else if .Values.web.enabled }}
 
    No ingress is enabled (the default). Port-forward the web shell:
 
@@ -40,9 +41,15 @@ Images: tag {{ default .Chart.AppVersion .Values.image.tag }} from {{ .Values.im
    then open http://localhost:8084. To publish it properly, set
    `ingress.enabled=true` and `ingress.host`. Only `web` is ever exposed — the
    core and the modules stay on the cluster network by design.
+{{- else }}
+
+   `web.enabled` is false, so this release has no UI. Reach the core's platform
+   API directly if you need it:
+
+     kubectl -n {{ .Release.Namespace }} port-forward svc/core-app 8082:8080
 {{- end }}
 
-{{ if .Values.openbao.enabled }}4{{ else }}3{{ end }}. FIRST THINGS TO CHECK
+{{ if $bootstrapped }}4{{ else }}3{{ end }}. FIRST THINGS TO CHECK
 
    Modules discovered by the core:
 

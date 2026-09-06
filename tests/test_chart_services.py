@@ -110,8 +110,12 @@ class _FakeStack:
         self.policies: dict[str, str] = {}
         self.valid_tokens: set[str] = set()
         self.tokens_created = 0
+        self.revoked: list[str] = []
         self.kv: dict[str, Any] = {}
         self.secrets: dict[str, dict[str, str]] = {}
+        # Simulates a namespace where the ServiceAccount may read a Secret but not
+        # write one (an admission policy, a quota, an operator-supplied account).
+        self.deny_secret_writes = False
 
 
 def _handler(stack: _FakeStack) -> type[http.server.BaseHTTPRequestHandler]:
@@ -214,10 +218,17 @@ def _handler(stack: _FakeStack) -> type[http.server.BaseHTTPRequestHandler]:
                         }
                     },
                 )
+            elif self.path == "/v1/auth/token/revoke":
+                stack.revoked.append(str(body.get("token")))
+                stack.valid_tokens.discard(str(body.get("token")))
+                self._send(204)
             elif self.path.startswith("/v1/secret/data/"):
                 stack.kv[self.path] = body.get("data")
                 self._send(200, {"data": {"version": 1}})
             elif self.path == f"/api/v1/namespaces/{NAMESPACE}/secrets":
+                if stack.deny_secret_writes:
+                    self._send(403, {"kind": "Status", "code": 403})
+                    return
                 name = body["metadata"]["name"]
                 if name in stack.secrets:
                     self._send(409, {"kind": "Status", "code": 409})
@@ -238,6 +249,9 @@ def _handler(stack: _FakeStack) -> type[http.server.BaseHTTPRequestHandler]:
         def do_PATCH(self) -> None:
             body = self._body()
             if self.path.startswith(f"/api/v1/namespaces/{NAMESPACE}/secrets/"):
+                if stack.deny_secret_writes:
+                    self._send(403, {"kind": "Status", "code": 403})
+                    return
                 name = self.path.rsplit("/", 1)[-1]
                 if name not in stack.secrets:
                     self._send(404, {"kind": "Status", "code": 404})
@@ -361,6 +375,8 @@ def test_bootstrap_mints_a_new_token_when_the_old_one_stopped_working(
     assert _run_bootstrap(base, sa_dir).returncode == 0
     assert stack.tokens_created == 2
     assert _decoded(stack, "app-token") == "app-token-2"
+    # The superseded token is revoked, not left orphaned-and-periodic forever.
+    assert stack.revoked == ["app-token-1"]
 
 
 def test_bootstrap_refuses_to_guess_when_the_unseal_key_is_gone(
@@ -388,3 +404,22 @@ def test_bootstrap_records_the_nats_passwords_in_openbao(
         "module": "module-pw",
         "sys": "sys-pw",
     }
+
+
+def test_bootstrap_refuses_to_initialise_when_it_cannot_store_the_key(
+    fake_stack: tuple[_FakeStack, str, Path],
+) -> None:
+    """The unrecoverable failure: a vault created whose only unseal key is lost.
+
+    If the Secret write is going to fail, it must fail *before* `/sys/init`, not
+    after — afterwards the key exists only in this pod's memory and the data on the
+    volume is gone for good.
+    """
+    stack, base, sa_dir = fake_stack
+    stack.deny_secret_writes = True
+
+    result = _run_bootstrap(base, sa_dir)
+
+    assert result.returncode != 0
+    assert not stack.initialized, "initialised a vault it could not store the key for"
+    assert "bootstrap-probe" in result.stderr

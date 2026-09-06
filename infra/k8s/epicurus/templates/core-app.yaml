@@ -120,7 +120,9 @@ spec:
       labels:
         {{- include "epicurus.labels" (dict "ctx" $ "component" "core-app") | nindent 8 }}
         epicurus.io/metrics: "true"
-      {{- $podAnnotations := merge (dict) (include "epicurus.metricsAnnotations" $ | fromYaml) .Values.core.podAnnotations }}
+      {{- /* The operator's own annotations win: sprig `merge` gives precedence to the
+       first map, so podAnnotations comes first and can turn scraping off. */}}
+{{- $podAnnotations := merge (dict) .Values.core.podAnnotations (include "epicurus.metricsAnnotations" $ | fromYaml) }}
       {{- with $podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}

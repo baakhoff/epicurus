@@ -5,10 +5,16 @@
   shell-lint job (shellcheck, driven off `git ls-files '*.sh'`) actually parses
   them; an inline command block would be linted by nothing.
 
-  The Job runs as a post-install AND post-upgrade hook: a Job's pod template is
-  immutable, so a plain Job could not be upgraded in place, and the script is
-  idempotent by design (it skips init when initialised, unseal when unsealed, and
-  keeps an app token that still authenticates).
+  The Job is a NORMAL resource named after the release revision, not a Helm hook.
+  A hook would deadlock `helm install --wait` / `--atomic` (and therefore Argo CD
+  and Flux, which wait by default): Helm waits for every normal resource to become
+  ready BEFORE running post-install hooks, and core-app's init container waits for
+  the token this Job writes. As a plain resource it is applied in the same pass, so
+  the two proceed together. A Job's pod template is immutable, hence the
+  `-{{ .Release.Revision }}` suffix — Helm creates the new one and removes the
+  previous revision's on upgrade. The script is idempotent by design (it skips init
+  when initialised, unseal when unsealed, and keeps an app token that still
+  authenticates), so re-running it every release costs nothing.
 */}}
 apiVersion: v1
 kind: ConfigMap
@@ -64,22 +70,22 @@ subjects:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: openbao-bootstrap
+  name: openbao-bootstrap-{{ .Release.Revision }}
   labels:
-    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 4 }}
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "0"
-    # Not `hook-succeeded`: the finished Job (and its logs) is the record of what
-    # the bootstrap did. It is replaced on the next release, not deleted on success.
-    "helm.sh/hook-delete-policy": before-hook-creation
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao-bootstrap") | nindent 4 }}
 spec:
-  backoffLimit: 6
+  # The script waits up to five minutes for the OpenBao API on each attempt, so the
+  # deadline has to clear backoffLimit x that or a slow cold start looks like a
+  # permanent failure — and `activeDeadlineSeconds` cannot be reset once tripped.
+  backoffLimit: 3
   activeDeadlineSeconds: {{ .Values.openbao.bootstrap.activeDeadlineSeconds }}
+  ttlSecondsAfterFinished: {{ .Values.openbao.bootstrap.ttlSecondsAfterFinished }}
   template:
     metadata:
+      # A component of its own: `openbao` is the Service selector, and a finished
+      # bootstrap pod must never end up in the vault's EndpointSlice.
       labels:
-        {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao") | nindent 8 }}
+        {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao-bootstrap") | nindent 8 }}
     spec:
       restartPolicy: Never
       serviceAccountName: openbao-bootstrap

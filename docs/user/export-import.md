@@ -139,6 +139,6 @@ the full table.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `PORTABILITY_MAX_FILE_MB` | `512` | Largest single file an export will carry. Anything bigger is left out and **named** in the job, so you can move it yourself. `0` = no limit. |
-| `PORTABILITY_MAX_ARCHIVE_MB` | `4096` | Largest archive the import will accept. |
+| `PORTABILITY_MAX_ARCHIVE_MB` | `4096` | Largest archive the import will accept. This is the only size limit on the upload: the web shell's own proxy exempts the import route from its 12 MB cap. If you put another proxy or tunnel in front of epicurus, give it the same exemption, or the card will tell you the archive never reached the core. |
 | `PORTABILITY_RETENTION_HOURS` | `24` | How long a finished archive stays downloadable before it is cleaned up. |
 | `PORTABILITY_STAGING_DIR` | `/tmp/epicurus-portability` | Scratch space where archives are built. It is a cache, not storage: a restart may empty it, and a download of a cleaned-up archive tells you to export again rather than pretending. |

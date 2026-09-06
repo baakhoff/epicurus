@@ -25,6 +25,7 @@ vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return {
     ApiError: actual.ApiError,
+    ProxyError: actual.ProxyError,
     api: {
       portabilityJobs: (...a: unknown[]) => mockJobs(...a),
       startPortabilityExport: (...a: unknown[]) => mockStartExport(...a),
@@ -268,6 +269,33 @@ describe("ExportImportCard (#867)", () => {
     pickFile("huge.tar.gz");
 
     expect(await screen.findByText(/exceeds the 4096-byte upload limit/)).toBeInTheDocument();
+  });
+
+  it("points at a proxy when the upload never gets a core answer (#887)", async () => {
+    // A body refused before the core is a bare network error, not an ApiError — the
+    // shape a front proxy's size cap produces when the connection dies mid-body.
+    mockUpload.mockRejectedValue(new TypeError("Failed to fetch"));
+    render(<ExportImportCard />, { wrapper });
+
+    pickFile("huge.tar.gz");
+
+    expect(
+      await screen.findByText(/never reached the core \(Failed to fetch\)/),
+    ).toBeInTheDocument();
+  });
+
+  it("points at a proxy when its own 413 arrives instead of the core's (#887)", async () => {
+    // The other shape: the proxy's HTML 413 reaches the browser. There is no core sentence
+    // in it, so the card must name the proxy rather than print a bare status line (empty
+    // over HTTP/2).
+    const { ProxyError } = await import("@/lib/api");
+    mockUpload.mockRejectedValue(new ProxyError(413, "HTTP 413"));
+    render(<ExportImportCard />, { wrapper });
+
+    pickFile("huge.tar.gz");
+
+    expect(await screen.findByText(/never reached the core \(HTTP 413\)/)).toBeInTheDocument();
+    expect(screen.getByText(/may cap the request size/)).toBeInTheDocument();
   });
 
   it("names the module credentials the archive does not carry", async () => {

@@ -12,6 +12,15 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A real archive can now actually be imported** (#887) — the web shell's proxy capped every
+  `/platform/` request body at 12 MB (right for chat attachments), and the archive upload from
+  the Settings card went through the same block, so any export that carried a knowledge vault
+  or stored objects was refused by nginx before the core saw a byte — with nothing in the job
+  list to say so. The import route now has its own proxy location with no nginx cap and
+  request buffering off, so the archive streams to the core and the core's own
+  `PORTABILITY_MAX_ARCHIVE_MB` ceiling is the only one; and an upload the core never answers
+  is named as "never reached the core" instead of "Failed to fetch". `web` 0.141.0→0.141.1
+  (PATCH).
 - **Your uploads move house too — the tenant archive now carries bytes, not just rows**
   (#876, part of #866) — every other module's data is rows, and `storage`'s is not: the files
   you drop into chat and the objects the agent writes live in a per-tenant object bucket, which

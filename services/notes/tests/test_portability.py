@@ -13,6 +13,7 @@ at once, which is exactly the shape a shared in-memory connection cannot serve.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from epicurus_core import EpicurusModule, PortabilityRecord, add_portability_routes
@@ -281,6 +283,44 @@ async def test_import_updates_a_changed_row_and_never_deletes(
     # Nothing this contract can do deletes: the target's own note is untouched.
     survivor = await notes.get(tenant=TENANT, slug="local-only")
     assert survivor is not None and survivor.content == "mine"
+
+
+async def test_an_update_keeps_the_archives_updated_at_and_then_settles(
+    engine: AsyncEngine, target: AsyncEngine
+) -> None:
+    """A repaired note keeps the date the archive gave it, and the apply after it is a no-op.
+
+    ``notes.updated_at`` carries ``onupdate=func.now()``, which the database applies to any
+    column left *out* of an UPDATE's SET clause. So a record that differs from the target in
+    body while carrying the same ``updated_at`` — the state a partly-diverged install is
+    actually in — would have that timestamp replaced by the moment of the import. Two things
+    break at once: the archive's own timestamp is lost, and the written row no longer matches
+    what the archive says, so every later apply is an "update" and ADR-0133's second-apply
+    no-op never arrives.
+
+    The divergence is made out of band on purpose: going through ``NotesStore`` would bump
+    ``updated_at`` too, which is the case that already worked.
+    """
+    await _seed(engine)
+    exported = await _export(engine)
+    await _import(target, exported)
+    archived = next(r for r in exported if r.kind == NOTE and r.id == "idea")
+
+    async with target.begin() as conn:
+        await conn.execute(text("UPDATE notes SET content = 'edited' WHERE slug = 'idea'"))
+    await asyncio.sleep(1.1)  # SQLite's CURRENT_TIMESTAMP ticks in whole seconds
+
+    report = await _import(target, exported)
+    assert report.counts[NOTE].updated == 1
+
+    restored = next(r for r in await _export(target) if r.kind == NOTE and r.id == "idea")
+    assert restored.data["content"] == "a thought"
+    assert restored.data["updated_at"] == archived.data["updated_at"]
+
+    # And having landed exactly what the archive said, the next apply changes nothing.
+    settled = await _import(target, exported)
+    assert settled.counts[NOTE].updated == 0
+    assert settled.counts[NOTE].skipped == settled.counts[NOTE].total
 
 
 # ── dry run, unknown kinds, malformed records ────────────────────────────────

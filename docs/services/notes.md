@@ -387,6 +387,12 @@ core, or the import ever reads a `.md` file into the `notes` table. A metadata-o
 have landed the operator in a new install with a Files tree full of markdown and a Notes page
 full of empty documents.
 
+The consequence, stated plainly so nobody reads it as a bug: **a note's text is in the archive
+twice** — once as `files/notes/<slug>.md`, carried by the core's file half, and once as the
+`content` column of its `note` record, carried here. Only the record is ever read back; the
+mirror is rebuilt from it afterwards. The duplication is the price of a mirror that cannot be
+read back, and for a text-heavy tenant it roughly doubles what notes contribute to the archive.
+
 | `kind` | Stable id | Columns that travel | Table |
 | --- | --- | --- | --- |
 | `note` | the tenant-unique `slug` | `title`, `content`, `created_at`, `updated_at` | `notes` |
@@ -410,7 +416,8 @@ moment it was resolved; `sid` is 32 hex characters, so the `:` splits back unamb
   in full beside it. The head of that history *is* the note.
 - **Qdrant `<tenant>__notes`** — derived vectors, specific to the embedding model that made
   them; rebuilt after an import by the core's re-embed fan-out calling `POST /reindex` (#332).
-- **The `.md` mirror** — derived output, and the core's file space already carries it as a file.
+- **The `.md` mirror** — derived output. The core's file space carries it as a file, which is
+  why a note's text is in the archive twice; the mirror is never the copy an import reads back.
 - **The review on/off toggle** — a *core* preference
   (`/platform/v1/modules/notes/suggestions-enabled`), carried in the archive's core sets.
 - **`NotesSettings`** — deployment configuration (URLs, chunk size): the new operator's to set.

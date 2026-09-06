@@ -66,6 +66,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from epicurus_core import ImportOutcome, ImportReport, PortabilityRecord, get_logger
 
@@ -366,6 +367,16 @@ class NotesPortability:
             for column, value in present.items():
                 if current[column] != value:
                     setattr(row, column, _from_wire(table, column, value))
+                elif table.model.__table__.columns[column].onupdate is not None:
+                    # ``notes.updated_at`` carries ``onupdate=func.now()``, which the database
+                    # applies to any column *left out* of the SET clause. A record that
+                    # changed a note's title but carried the same ``updated_at`` would
+                    # therefore have that timestamp quietly replaced by the moment of the
+                    # import — and, because the written row then no longer matches the
+                    # archive, the *next* apply would be an "update" too, so a second apply
+                    # would never settle to ``skipped``. Forcing the carried value into the
+                    # statement writes what the archive says and keeps the no-op a no-op.
+                    flag_modified(row, column)
         return "updated"
 
     async def _find(

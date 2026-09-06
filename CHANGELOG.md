@@ -12,6 +12,27 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **An import now shows its work, and the Platform card tells the truth** (#893) — dogfooding a
+  tenant import on a second machine found four things the Settings card never said. The upload
+  was a busy button: `fetch` cannot report upload progress at all, so the archive route is now
+  the app's one `XMLHttpRequest` (its error taxonomy and connectivity evidence reproduced
+  intact) and a multi-gigabyte archive shows a real percentage instead of looking hung. The
+  apply was a bare spinner: the import job now carries the same `progress` list an export does
+  — sets, modules, the file space, then two `rebuild` rows for the forced rescan and the
+  re-embed — seeded from the preview in the apply's own answer, which is also what makes a
+  second Apply press *impossible* rather than merely refused with a red 409 (the card's polled
+  `staged` copy used to outlive the mutation's fresh one). The report never mentioned the
+  commonest reason a clean import still feels broken — **no embedding model on the new box** —
+  because the re-embed fan-out cannot report it: every module accepts the job and parks in
+  `error` minutes later, out of sight. The core now asks the gateway *before* it asks the
+  modules and states the finding plainly, pointing at Models → pull → "Re-embed everything"; a
+  runtime that is down or a vault that will not answer is reported as *unknown*, never as
+  absent. And the Platform card showed `epicurus_core`'s version under the label "core
+  version", so the one number an operator quotes in a bug report named the wrong component:
+  `GET /platform/v1/info` now carries `core_app_version`, `library_version` and the
+  `release_track` actually pulled beside the unchanged `core_version`, and the card renders
+  them apart. `core-app` 0.121.0→0.122.0 (MINOR) · `web` 0.142.0→0.143.0 (MINOR).
+
 - **A real archive can now actually be imported** (#887) — the web shell's proxy capped every
   `/platform/` request body at 12 MB (right for chat attachments), and the archive upload from
   the Settings card went through the same block, so any export that carried a knowledge vault

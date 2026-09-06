@@ -91,6 +91,7 @@ const STAGED_IMPORT = {
   status: "staged",
   created_at: "2026-09-04T09:05:00+00:00",
   updated_at: "2026-09-04T09:05:00+00:00",
+  progress: [],
   preview: {
     manifest: MANIFEST,
     components: [
@@ -110,9 +111,29 @@ const STAGED_IMPORT = {
   error: null,
 };
 
+/** What the apply's own 202 answers (#893): already `running`, already carrying every step. */
+const RUNNING_IMPORT = {
+  ...STAGED_IMPORT,
+  status: "running",
+  progress: [
+    { name: "conversations", kind: "core", state: "running", count: 0 },
+    { name: "calendar", kind: "module", state: "skipped", count: 0, reason: "module is not installed" },
+    { name: "files", kind: "files", state: "pending", count: 0 },
+    { name: "file index", kind: "rebuild", state: "pending", count: 0 },
+    { name: "re-embed", kind: "rebuild", state: "pending", count: 0 },
+  ],
+};
+
 const DONE_IMPORT = {
   ...STAGED_IMPORT,
   status: "done",
+  progress: [
+    { name: "conversations", kind: "core", state: "included", count: 42 },
+    { name: "calendar", kind: "module", state: "skipped", count: 0, reason: "module is not installed" },
+    { name: "files", kind: "files", state: "included", count: 3 },
+    { name: "file index", kind: "rebuild", state: "included", count: 12 },
+    { name: "re-embed", kind: "rebuild", state: "included", count: 1 },
+  ],
   report: {
     components: [
       { name: "conversations", kind: "core", state: "included", created: 42, updated: 0, skipped: 0, warnings: [] },
@@ -124,6 +145,8 @@ const DONE_IMPORT = {
     rescan_forced: true,
     reembed: [{ module: "knowledge", status: "started" }],
     reembed_error: null,
+    embedding_model: "nomic-embed-text",
+    embedding_note: null,
     reenter_secrets: SECRETS,
   },
 };
@@ -212,7 +235,7 @@ describe("ExportImportCard (#867)", () => {
 
   it("previews an uploaded archive and applies nothing until Apply is pressed", async () => {
     mockUpload.mockResolvedValue(STAGED_IMPORT);
-    mockApply.mockResolvedValue({ ...STAGED_IMPORT, status: "running" });
+    mockApply.mockResolvedValue(RUNNING_IMPORT);
     mockImport.mockResolvedValue(DONE_IMPORT);
     render(<ExportImportCard />, { wrapper });
 
@@ -359,6 +382,123 @@ describe("ExportImportCard — re-attaching after a reload (#877)", () => {
     await waitFor(() => expect(mockImport).toHaveBeenCalledWith("imp-1"));
     expect(await screen.findByText(/42 new/, undefined, { timeout: 5000 })).toBeInTheDocument();
     expect(mockUpload).not.toHaveBeenCalled();
+  });
+
+  it("shows an import's own progress, rebuild rows included (#893)", async () => {
+    // The apply used to be one undifferentiated spinner from the first record to the last.
+    mockUpload.mockResolvedValue(STAGED_IMPORT);
+    mockApply.mockResolvedValue(RUNNING_IMPORT);
+    mockImport.mockResolvedValue(DONE_IMPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    pickFile();
+    fireEvent.click(await screen.findByRole("button", { name: /apply import/i }));
+
+    // The two rebuilds are steps the operator waits on, so they are rows like any other.
+    expect(await screen.findByText("file index")).toBeInTheDocument();
+    expect(screen.getByText("re-embed")).toBeInTheDocument();
+    expect(await screen.findByText("files")).toBeInTheDocument();
+  });
+
+  it("renders the core's 'no embedding model' sentence verbatim (#893)", async () => {
+    // The card composes nothing here: the condition is one only the core can detect, and
+    // the words it chose are the words the operator gets (ADR-0018).
+    const note =
+      "No embedding model is installed here: “nomic-embed-text” is not among the 1 model(s) " +
+      "the local runtime holds, so every module's re-embed will fail. Pull one on Models, " +
+      "then run “Re-embed everything” — the imported data is unharmed.";
+    mockUpload.mockResolvedValue(STAGED_IMPORT);
+    mockApply.mockResolvedValue(RUNNING_IMPORT);
+    mockImport.mockResolvedValue({
+      ...DONE_IMPORT,
+      report: { ...DONE_IMPORT.report, embedding_note: note },
+    });
+    render(<ExportImportCard />, { wrapper });
+
+    pickFile();
+    fireEvent.click(await screen.findByRole("button", { name: /apply import/i }));
+
+    expect(await screen.findByText(note)).toBeInTheDocument();
+  });
+
+  it("names the embedding model the re-embed actually used", async () => {
+    mockUpload.mockResolvedValue(STAGED_IMPORT);
+    mockApply.mockResolvedValue(RUNNING_IMPORT);
+    mockImport.mockResolvedValue(DONE_IMPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    pickFile();
+    fireEvent.click(await screen.findByRole("button", { name: /apply import/i }));
+
+    expect(
+      await screen.findByText(/re-embed asked of 1 module\(s\) with nomic-embed-text/),
+    ).toBeInTheDocument();
+  });
+
+  it("makes a second Apply impossible, not merely refused (#893)", async () => {
+    // The bug: the card re-attached to a job from the list, so `polled` held a `staged`
+    // copy that kept winning over the apply's fresh answer — and the button stayed live
+    // until the next poll, where a second press hit the core's 409 in red.
+    mockJobs.mockResolvedValue([
+      {
+        id: "imp-1",
+        kind: "import",
+        status: "staged",
+        created_at: "2026-09-04T09:05:00+00:00",
+        updated_at: "2026-09-04T09:05:00+00:00",
+        archive_available: false,
+        size_bytes: 0,
+      },
+    ]);
+    mockImport.mockResolvedValueOnce(STAGED_IMPORT).mockResolvedValue(DONE_IMPORT);
+    mockApply.mockResolvedValue(RUNNING_IMPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    const apply = await screen.findByRole("button", { name: /apply import/i });
+    fireEvent.click(apply);
+
+    // Gone the instant the apply answers — the stale `staged` copy no longer wins.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /apply import/i })).not.toBeInTheDocument(),
+    );
+    expect(mockApply).toHaveBeenCalledTimes(1);
+    expect(mockApply).toHaveBeenCalledWith("imp-1");
+  });
+
+  it("reports how far the archive's bytes have got", async () => {
+    // `fetch` reports nothing until the response lands, which is why this one request is an
+    // XHR: a ten-minute upload must not look like a hung one.
+    const upload: { finish?: (job: unknown) => void } = {};
+    mockUpload.mockImplementation((_file: unknown, onProgress?: (f: number | null) => void) => {
+      onProgress?.(0.42);
+      return new Promise((resolve) => {
+        upload.finish = resolve;
+      });
+    });
+    render(<ExportImportCard />, { wrapper });
+
+    pickFile();
+
+    expect(await screen.findByText(/uploading… 42%/i)).toBeInTheDocument();
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "42");
+
+    upload.finish?.(STAGED_IMPORT);
+    await waitFor(() =>
+      expect(screen.queryByTestId("portability-upload-progress")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("says 'uploading' rather than a percentage nothing measured", async () => {
+    mockUpload.mockImplementation((_file: unknown, onProgress?: (f: number | null) => void) => {
+      onProgress?.(null); // lengthComputable: false — a real browser state
+      return new Promise(() => {});
+    });
+    render(<ExportImportCard />, { wrapper });
+
+    pickFile();
+
+    expect(await screen.findByText(/uploading…$/i)).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
   it("lists the recent jobs, with a download link only where there is an archive", async () => {

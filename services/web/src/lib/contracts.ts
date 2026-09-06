@@ -1400,9 +1400,21 @@ export const FileText = z.object({
 });
 export type FileText = z.infer<typeof FileText>;
 
+/** What `GET /platform/v1/info` says about the core the shell is talking to.
+ *
+ * `core_version` is the **library** version and always was — the Platform card used to label
+ * it "core version" and so reported `epicurus_core` 0.37.0 for a 0.121.0 core-app (#893). The
+ * field stays (it is part of the module↔core contract) and the card now reads the two
+ * unambiguous ones instead. Both new versions and the track are `.default`ed rather than
+ * required, so this build still parses an older core's answer. */
 export const PlatformInfo = z.object({
   contract_version: z.string(),
   core_version: z.string(),
+  core_app_version: z.string().default(""),
+  library_version: z.string().default(""),
+  // The image tag this deployment pulled (EPICURUS_VERSION), or null where nothing set it —
+  // what the box *is*, as opposed to what its code claims to be.
+  release_track: z.string().nullish(),
   tenant: z.string(),
 });
 export type PlatformInfo = z.infer<typeof PlatformInfo>;
@@ -1819,6 +1831,13 @@ export const PortabilityReport = z.object({
   rescan_forced: z.boolean().default(false),
   reembed: z.array(z.record(z.string(), z.string())).default([]),
   reembed_error: z.string().nullish(),
+  // The embedding model the re-embed resolved to, and — when this install cannot serve it —
+  // the core's own sentence saying so (#893). The fan-out cannot report that condition itself:
+  // every module accepts the job and parks in `error` minutes later, long after the report is
+  // written. The card renders `embedding_note` verbatim; deciding what it means is the core's
+  // job, not the shell's (ADR-0018).
+  embedding_model: z.string().nullish(),
+  embedding_note: z.string().nullish(),
   reenter_secrets: PortabilitySecrets.default(noSecrets),
 });
 export type PortabilityReport = z.infer<typeof PortabilityReport>;
@@ -1829,6 +1848,10 @@ export const PortabilityImportJob = z.object({
   status: z.enum(["staged", "running", "done", "failed"]),
   created_at: z.string(),
   updated_at: z.string(),
+  // The same component list the export half carries (#893) — sets, modules, the file space,
+  // then the two rebuilds — seeded from the preview when Apply is pressed and ticked over as
+  // the job walks it. `.default([])` so an older core, which has none, still parses.
+  progress: z.array(PortabilityComponent).default([]),
   preview: PortabilityPreview.nullish(),
   report: PortabilityReport.nullish(),
   error: z.string().nullish(),

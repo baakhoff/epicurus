@@ -892,6 +892,9 @@ def create_app() -> FastAPI:
         # the existing #332 fan-out, called rather than reimplemented.
         rescan=_rescan_files,
         reembed=registry.reembed,
+        # Asked *before* that fan-out (#893): a box with no embedding model accepts every
+        # re-embed and parks them all in `error` minutes later, where the report cannot see it.
+        embedding_probe=gateway,
         max_file_bytes=settings.portability_max_file_mb * 1024 * 1024,
         retention_hours=settings.portability_retention_hours,
     )

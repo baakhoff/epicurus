@@ -930,10 +930,22 @@ export function SettingsScreen() {
         <Card>
           <h3 className="mb-2 font-serif text-base text-ink">Platform</h3>
           {info.isLoading && <Spinner />}
+          {/* Four facts, each answering a different question about this install (#893). The
+              row used to read "core version: 0.37.0" — the *library*'s version under the
+              service's label, so the one number an operator checks before filing a bug named
+              the wrong component. `track` is the image tag that was actually pulled, which is
+              the fact a semver cannot supply after a reconcile that did not take; an em dash
+              where nothing set it, never an invented "latest". */}
           {info.data && (
             <dl className="grid grid-cols-2 gap-y-1.5 text-sm">
-              <dt className="text-ink-dim">core version</dt>
-              <dd className="font-mono text-ink">{info.data.core_version}</dd>
+              <dt className="text-ink-dim">core-app</dt>
+              <dd className="font-mono text-ink">{info.data.core_app_version || "—"}</dd>
+              <dt className="text-ink-dim">library</dt>
+              <dd className="font-mono text-ink">
+                {info.data.library_version || info.data.core_version}
+              </dd>
+              <dt className="text-ink-dim">track</dt>
+              <dd className="font-mono text-ink">{info.data.release_track ?? "—"}</dd>
               <dt className="text-ink-dim">contract</dt>
               <dd className="font-mono text-ink">{info.data.contract_version}</dd>
               <dt className="text-ink-dim">tenant</dt>

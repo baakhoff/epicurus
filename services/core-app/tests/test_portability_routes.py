@@ -206,6 +206,51 @@ async def test_upload_previews_without_applying_then_apply_reports(tmp_path: Pat
         await engine.dispose()
 
 
+async def test_the_apply_answer_already_carries_its_progress(tmp_path: Path) -> None:
+    """#893: the 202 is the card's first paint — it must not answer an empty list.
+
+    The double-apply this fixes was exactly a *staleness* bug: the card kept showing the
+    `staged` copy until the next poll and so kept offering Apply. The fix on this side is that
+    the apply's own answer is already a complete, non-`staged` job — its status, and every step
+    it is about to take — so the shell has something better than the stale copy to believe.
+    """
+    engine = await _engine(tmp_path)
+    service = await _service(tmp_path, engine)
+    try:
+        async with _client(service) as client:
+            export_id = (await client.post("/platform/v1/portability/exports")).json()["id"]
+            await _ready(client, export_id)
+            archive = (
+                await client.get(f"/platform/v1/portability/exports/{export_id}/archive")
+            ).content
+            staged = await client.post(
+                "/platform/v1/portability/imports",
+                files={"file": ("epicurus.tar.gz", archive, "application/gzip")},
+            )
+            # A staged job has taken no step yet, so it has no progress to show.
+            assert staged.json()["progress"] == []
+            job_id = staged.json()["id"]
+
+            applied = (await client.post(f"/platform/v1/portability/imports/{job_id}/apply")).json()
+            assert applied["status"] == "running"
+            names = [c["name"] for c in applied["progress"]]
+            # Every component of the preview, then the two rebuilds — in the order the apply
+            # walks them, and complete from the very first frame.
+            assert "conversations" in names and "files" in names
+            assert names[-2:] == ["file index", "re-embed"]
+            assert {c["kind"] for c in applied["progress"]} >= {"core", "files", "rebuild"}
+            assert all(c["state"] == "pending" for c in applied["progress"])
+
+            done = await _applied(client, job_id)
+            assert done["status"] == "done", done.get("error")
+            # Nothing is left mid-flight, and the rebuild rows report what they did.
+            assert not any(c["state"] in ("pending", "running") for c in done["progress"])
+            rescan = next(c for c in done["progress"] if c["name"] == "file index")
+            assert rescan["state"] == "skipped"  # no rescan is wired into this bare service
+    finally:
+        await engine.dispose()
+
+
 async def test_applying_twice_is_refused_the_second_time(tmp_path: Path) -> None:
     """An apply is a one-shot on a staged job; re-uploading is the way to do it again."""
     engine = await _engine(tmp_path)

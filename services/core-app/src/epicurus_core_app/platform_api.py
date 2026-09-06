@@ -8,13 +8,17 @@ to call these endpoints without holding provider credentials or SDK dependencies
 
 Endpoints
 ---------
-GET  /platform/v1/info   — discovery: contract version, core version, tenant.
+GET  /platform/v1/info   — discovery: contract, core-app + library versions, release
+                           track, tenant.
 POST /platform/v1/embed  — embed texts via the LLM gateway (returns float vectors).
 POST /platform/v1/chat   — chat completion via the LLM gateway.
 """
 
 from __future__ import annotations
 
+import os
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -40,6 +44,30 @@ VISION_UNSUPPORTED_MESSAGE = (
 # ``_attach_images`` emits); ``image`` is the Anthropic-native spelling. Both are recognised so
 # the gate cannot be sidestepped by picking the other shape.
 _IMAGE_PART_TYPES = frozenset({"image_url", "image"})
+
+
+RELEASE_TRACK_ENV = "EPICURUS_VERSION"
+"""The env var naming the image tag this deployment pulled (``latest`` / ``testing`` / a semver).
+
+Read straight from the environment rather than through ``CoreAppSettings``: it is not a knob
+the core acts on, it is the deployment's label for itself, and a setting with a default would
+invent an answer where the honest one is "nothing said". Unset — a source checkout, a
+`compose` file that does not pass it through — reports ``null``, which the card draws as an
+em dash rather than as a claim.
+"""
+
+
+def _core_app_version() -> str:
+    """The installed ``epicurus-core-app`` distribution version.
+
+    The same read ``app._service_version`` makes for ``/health``, done here rather than
+    imported: ``app`` imports this module, so the arrow only points one way. Both read the
+    package metadata — the single source of truth #854 established — so they cannot drift.
+    """
+    try:
+        return pkg_version("epicurus-core-app")
+    except PackageNotFoundError:
+        return "0.0.0"
 
 
 def _carries_image(messages: list[ChatMessage]) -> bool:
@@ -69,10 +97,28 @@ async def _named_model(gateway: LlmGateway, model: str | None, tenant_id: str | 
 
 
 class PlatformInfo(BaseModel):
-    """What a module learns about the core it is talking to."""
+    """What a module — and the Settings **Platform** card — learns about this core.
+
+    ``core_version`` has always carried the *library* (``epicurus_core``) version while being
+    labelled the core's, which is how the card came to show ``0.37.0`` as "core version" for a
+    ``0.121.0`` core-app (#893). It is **kept, unchanged**: it is part of the module↔core
+    contract, an installed module may read it, and renaming a published field to fix a *label*
+    would break callers to no one's benefit. The two unambiguous fields are added beside it —
+    ``core_app_version`` (the running service) and ``library_version`` (the same value
+    ``core_version`` has always had) — and the card renders those.
+
+    ``release_track`` is the deployment's own answer to "which build is this?": the
+    ``EPICURUS_VERSION`` tag the operator pinned (``latest``, ``testing``, ``0.2.0``), or
+    ``None`` where nothing set it. It is not derived from a version number — a semver says
+    what the code claims to be, a track says what was actually pulled, and after a
+    reconcile-that-did-not-take those are exactly the two facts that disagree.
+    """
 
     contract_version: str
     core_version: str
+    core_app_version: str
+    library_version: str
+    release_track: str | None = None
     tenant: str
 
 
@@ -111,9 +157,13 @@ def create_platform_router(
 
     @router.get("/info", response_model=PlatformInfo)
     def info() -> PlatformInfo:
+        track = os.environ.get(RELEASE_TRACK_ENV, "").strip()
         return PlatformInfo(
             contract_version=CONTRACT_VERSION,
             core_version=__version__,
+            core_app_version=_core_app_version(),
+            library_version=__version__,
+            release_track=track or None,
             tenant=settings.default_tenant_id,
         )
 

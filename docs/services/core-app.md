@@ -21,7 +21,7 @@ plus the shared ops endpoints. All of it is internal/local-only by default.
 | --- | --- |
 | `GET /health` | Liveness + service name + version. |
 | `GET /metrics` | Prometheus metrics. |
-| `GET /platform/v1/info` | Discovery: contract version, core version, tenant. |
+| `GET /platform/v1/info` | Discovery: contract version, `core_app_version` + `library_version` (and the older `core_version`, which is the *library*'s and kept for compatibility — #893), the `release_track` this deployment pulled, and the tenant. |
 
 ### Inference (module-facing — used by the `PlatformClient`)
 
@@ -1156,6 +1156,30 @@ speaking a schema this install cannot read is recorded as `skipped` with its rea
 job carries on — moving house does not cost the operator their conversations because the
 mail container is restarting.
 
+**An apply reports its progress** (#893). The import job carries the same `progress` list the
+export does — one `ComponentEntry` per core set, module and the file space, plus two rows of
+the new kind **`rebuild`** for the forced rescan and the re-embed fan-out, which are work the
+apply does that the archive does not contain. The list is seeded from the preview
+*synchronously*, in the apply request itself, so it is complete from the first frame rather
+than growing a row at a time; the archive stays the authority on what actually exists, and a
+member the seed did not name is appended as it is reached. A component the preview `refused`
+is listed as `skipped` with the preview's reason rather than omitted.
+
+**The re-embed is checked before it is asked** (#893, `portability/embedding.py`). The fan-out
+is fire-and-forget, so the one condition that makes it pointless — no embedding model on this
+box — is the one it cannot report: every module answers "started", retries against a model the
+runtime has never heard of, and parks in `error` long after the report was written. The core
+therefore resolves the tenant's embedding model through the LLM gateway first and asks whether
+this installation can serve it: a local model must be pulled (the runtime's own model list), a
+hosted one's provider must hold a key in OpenBao. The finding lands on the report as
+`embedding_model` plus an `embedding_note` sentence — present only when a re-embed cannot
+succeed, and worded for the operator ("pull one on Models, then run Re-embed everything"),
+because the card renders data and does not decide what a missing model means (ADR-0018). Three
+answers, never collapsed: present, absent, and **unknown** — a runtime that is down or a vault
+that will not answer cannot prove a model absent, and reporting it as absent is precisely the
+#728 mistake. The fan-out runs regardless of the verdict: a probe is a warning, never a veto
+over the operator's own rebuild.
+
 **Staging.** Jobs are durable rows (`portability_jobs`), so an export survives the request
 that started it and stays readable by id; the archive itself lives in
 `PORTABILITY_STAGING_DIR`, a **disposable cache** (constraint #2)
@@ -1549,6 +1573,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `LLM_TOP_P` | — | Nucleus-sampling `top_p` (local + hosted). |
 | `LLM_NUM_CTX` | — | Ollama context window (`num_ctx`); local models only. |
 | `MODULE_URLS` | `http://echo:8080,…` | Module base URLs the host discovers tools from. |
+| `EPICURUS_VERSION` | — | Not a knob the core acts on: the image tag this deployment pulled, reported verbatim as `release_track` on `GET /platform/v1/info` and shown on Settings → Platform (#893). Compose interpolates it into `image:` already; passing it into the container's *environment* is what lets the running core say which build it is. Unset reports `null`, never a guessed `latest`. |
 | `AGENT_MAX_STEPS` | `4` | Max tool-calling rounds per turn. |
 | `MESSAGING_INBOUND_ENABLED` | `true` | Run the inbound-messaging consumer (chat bridges, ADR-0058). |
 | `MESSAGING_MODEL` | — | Optional dedicated model for bridge turns; blank = the default chat model. |

@@ -15,7 +15,13 @@
  *  never offered, and was swept a day later. The job list is now the source of truth — the
  *  card reads it on mount and re-attaches to the newest job of each kind, whatever this tab
  *  did or did not start. Deliberately not `localStorage`: the server's list is right on a
- *  second device and in a different browser, and a remembered id is right in neither. */
+ *  second device and in a different browser, and a remembered id is right in neither.
+ *
+ *  **An import shows its work** (#893). Both halves now render the same component table: the
+ *  upload reports how far the bytes have got, the apply ticks over sets → modules → files →
+ *  the two rebuilds, and Apply is impossible — not merely refused — the moment anything is in
+ *  flight. The one line the card does not compose is the "no embedding model" warning: that
+ *  sentence is written by the core and rendered here verbatim. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Download, Upload } from "lucide-react";
 import { useRef, useState } from "react";
@@ -245,9 +251,20 @@ function ReportView({ report }: { report: PortabilityReport }) {
         {report.reembed_error ? (
           <span className="text-danger">re-embed failed ({report.reembed_error})</span>
         ) : (
-          `re-embed asked of ${report.reembed.length} module(s)`
+          `re-embed asked of ${report.reembed.length} module(s)${
+            report.embedding_model ? ` with ${report.embedding_model}` : ""
+          }`
         )}
       </p>
+      {/* The core's own sentence, rendered verbatim (ADR-0018). It is here because the
+          fan-out above cannot say it: every module accepts the re-embed and fails minutes
+          later, long after this report is written. */}
+      {report.embedding_note && (
+        <p className="flex items-start gap-1.5 text-[11px] text-warn">
+          <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+          {report.embedding_note}
+        </p>
+      )}
       <SecretsNotice secrets={report.reenter_secrets} />
     </div>
   );
@@ -268,17 +285,59 @@ function uploadFailure(error: unknown): string {
   return neverReached(error instanceof Error ? error.message : String(error));
 }
 
+/** How far the archive's bytes have got — the half of an import that used to be a busy button.
+ *
+ *  `fetch` reports nothing at all until the response arrives, so a ten-minute upload of a
+ *  multi-gigabyte archive looked exactly like a hung one; the request is made over `XMLHttp-
+ *  Request` for that one reason (see `api.uploadPortabilityArchive`). A browser that will not
+ *  commit to a total gives `null`, which is said as "uploading…" rather than dressed up as a
+ *  percentage nothing measured. */
+function UploadProgress({ fraction }: { fraction: number | null }) {
+  const percent = fraction === null ? null : Math.round(fraction * 100);
+  return (
+    <div className="flex flex-col gap-1" data-testid="portability-upload-progress">
+      <p className="flex items-center gap-2 text-[11px] text-ink-dim">
+        <Spinner />
+        {percent === null ? "Uploading…" : `Uploading… ${percent}%`}
+      </p>
+      {percent !== null && (
+        <div
+          className="h-1 w-full overflow-hidden rounded-full bg-edge"
+          role="progressbar"
+          aria-label="Archive upload"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+        >
+          <div className="h-full bg-accent" style={{ width: `${percent}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
   const qc = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
   const [job, setJob] = useState<PortabilityImportJob | null>(null);
+  // null while nothing is uploading; a 0–1 fraction, or `null` inside the tuple when the
+  // browser will not commit to a total (`lengthComputable: false` — a real state, and not 0%).
+  const [sent, setSent] = useState<{ fraction: number | null } | null>(null);
 
+  // Both mutations write their answer into the *query cache* as well as component state.
+  // That is the whole of the double-apply fix (#893): the polled query used to keep serving
+  // its stale `staged` copy until the next tick, so the card still offered Apply on a job
+  // that was already running and a second press hit the core's 409. Seeding the cache with
+  // the fresh answer makes the press impossible rather than merely refused.
   const settled = (next: PortabilityImportJob) => {
     setJob(next);
+    qc.setQueryData(["portability-import", next.id], next);
     qc.invalidateQueries({ queryKey: ["portability-jobs"] });
   };
   const upload = useMutation({
-    mutationFn: (file: File) => api.uploadPortabilityArchive(file),
+    mutationFn: (file: File) => api.uploadPortabilityArchive(file, (f) => setSent({ fraction: f })),
+    onMutate: () => setSent({ fraction: 0 }),
+    onSettled: () => setSent(null),
     onSuccess: settled,
   });
   const apply = useMutation({
@@ -297,10 +356,14 @@ function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
     refetchInterval: (query) => (query.state.data?.status === "running" ? POLL_MS : false),
   });
 
-  // The polled copy wins once it exists: it is the one that grows a report.
+  // The polled copy wins once it exists: it is the one that grows a report. `settled` seeds
+  // it, so "the polled copy" is never older than the last answer this tab received.
   const current = polled.data ?? job;
   const preview = current?.preview ?? null;
   const busy = upload.isPending || apply.isPending || current?.status === "running";
+  // Apply is offered only for a job that is still staged, and never while anything is in
+  // flight — including the optimistic window between the press and the mutation resolving.
+  const canApply = current?.status === "staged" && preview?.compatible === true && !busy;
 
   return (
     <div className="flex flex-col gap-2">
@@ -332,16 +395,14 @@ function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
           <Button
             variant="primary"
             busy={apply.isPending}
-            disabled={!preview.compatible}
-            onClick={() => {
-              apply.mutate(current.id);
-              qc.invalidateQueries({ queryKey: ["portability-import"] });
-            }}
+            disabled={!canApply}
+            onClick={() => apply.mutate(current.id)}
           >
             Apply import
           </Button>
         )}
       </div>
+      {sent !== null && <UploadProgress fraction={sent.fraction} />}
       {upload.isError && <p className="text-sm text-danger">{uploadFailure(upload.error)}</p>}
       {apply.isError && <p className="text-sm text-danger">{(apply.error as Error).message}</p>}
       {current?.status === "failed" && <p className="text-sm text-danger">{current.error}</p>}
@@ -379,6 +440,12 @@ function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
         <p className="flex items-center gap-2 text-[11px] text-ink-dim">
           <Spinner /> Applying…
         </p>
+      )}
+      {/* The same table the export half uses, on the same data (#893). It stays up after the
+          job settles: the last thing an operator watched tick over is the first thing they
+          look back at when the report says a component was skipped. */}
+      {current && current.status !== "staged" && current.progress.length > 0 && (
+        <ComponentRows components={current.progress} />
       )}
       {current?.report && current.status === "done" && <ReportView report={current.report} />}
     </div>

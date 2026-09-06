@@ -37,6 +37,13 @@ services:
       OPENBAO_URL: http://openbao:8200
       OPENBAO_TOKEN: ${OPENBAO_TOKEN}
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-local}
+      # The image tag this deployment pulled, reported by GET /platform/v1/info as
+      # `release_track` and shown on the Settings → Platform card (#893). Compose already
+      # interpolates it into `image:` above, but that is a *file*-level substitution the
+      # container never sees — passing it through is what lets the running core say which
+      # build it is, rather than only which version its code claims to be. Unset (a source
+      # checkout) reports null, and the card draws an em dash rather than inventing "latest".
+      EPICURUS_VERSION: ${EPICURUS_VERSION:-}
       # OpenTelemetry tracing (#57). Off by default; set OTEL_TRACES_ENABLED=true with
       # the `observability` profile up to trace the agent loop + event bus to Tempo.
       OTEL_TRACES_ENABLED: ${OTEL_TRACES_ENABLED:-false}

@@ -196,8 +196,9 @@ version, which had drifted to `0.17.0` behind the package.
 Mail now serves `GET /export` / `POST /import` (`MailPortability`, schema `mail/1`) for the
 core's export/import orchestrator, but every table the module persists turns out to be a
 Gmail-derived cache, not source-of-truth data — so it declares `portable=False`, per the
-documented convention for a module with nothing to carry (the core records it as excluded rather
-than listing an always-empty component in every archive). See
+documented convention for a module with nothing to carry (the core records it in the archive
+manifest as a **skipped** component with its reason, rather than writing an always-empty
+`modules/mail.ndjson` member into every export). See
 [Portability](#portability-867874) below for the full excluded list and why.
 
 ---
@@ -292,8 +293,9 @@ the `mailbox` archetype (a non-mailbox page 404s), mirroring the editor doc gate
 `GET /export` / `POST /import` are likewise not shell-proxied, and — unlike every other route on
 this page — are not reached at all in production today: the module declares `portable=False`
 ([Portability](#portability-867874) below), so the core's tenant export/import orchestrator
-(`PortabilityService`, #867) records mail as excluded and never calls these routes. They exist
-so flipping the flag on later is a one-line change.
+(`PortabilityService`, #867) records mail in the manifest as `{"name": "mail", "kind": "module",
+"state": "skipped", "reason": "module does not declare portable data"}` and never calls these
+routes. They exist so flipping the flag on later is a one-line change.
 
 #### `mailbox` archetype shapes (ADR-0087)
 
@@ -762,8 +764,10 @@ cache/mirror — from export, which leaves mail with **no record kind to carry**
 documented convention for exactly this situation
 ([reference contract](../reference/modules.md#portability--get-export--post-import-867):
 "modules that hold nothing worth carrying leave it `False` and are recorded in the archive as
-excluded"), the flag stays off rather than listing an always-empty component the operator has to
-read past on every tenant export.
+excluded"), the flag stays off. Concretely, the archive's `manifest.json` carries mail among its
+`components` as `state: "skipped"` with `reason: "module does not declare portable data"` — it is
+named and explained, not silently missing — and no always-empty `modules/mail.ndjson` member is
+written.
 
 **Excluded** — every persisted table, all for the same reason (a Gmail-derived cache):
 
@@ -788,16 +792,14 @@ in `app.py`) — the module is in exactly the "serving the routes while still sa
 the contract documents. `export` would always yield nothing; `import_` would count every record
 it receives as an unrecognized kind (`skipped`, with a warning), and a second apply of the same
 (always-empty) stream would be the same clean no-op as the first. None of that runs today: with
-`portable=False` the core's orchestrator never calls these routes, and records mail as excluded
-with reason "module does not declare portable data". The day mail gains an actual per-tenant
+`portable=False` the core's orchestrator never calls these routes, and records the module as a
+skipped component with its reason. The day mail gains an actual per-tenant
 setting worth carrying (a signature, a muted-sender list — none exists today), turning it on is a
 one-line flip of the flag.
 
-**Amendment to the epic's starting list.** #866/#874 named `mail_landing`/`mail_category` as
-"landing/category prefs" worth carrying. Reading `epicurus_mail/db.py` shows both are TTL'd
-Gmail-derived caches exactly like `mail_thread`/`mail_label`/`mail_sync` — the module holds no
-genuine per-tenant preference anywhere. The final answer is `portable=False`, contract wired and
-dormant; see the closing issue comment for the paste-ready ADR-0133 amendment.
+`mail_landing` and `mail_category` look like operator preferences and are not: both are TTL'd
+Gmail-derived caches exactly like `mail_thread`/`mail_label`/`mail_sync`, which is why the module
+holds no genuine per-tenant preference anywhere and carries nothing.
 
 ---
 

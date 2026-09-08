@@ -32,4 +32,14 @@
    editor surface fill it flush rather than adding Crepe's own page padding. */
 .ep-wysiwyg .milkdown .ProseMirror {
   padding: 0;
+  /* #904 — the caret otherwise inherits `color` (--ep-text), so it sits at exactly the same
+     lightness as the character it blinks next to and is easy to lose, especially on the dark
+     theme with a long body. --ep-accent gives it a hue that never matches body text, code,
+     blockquote or title colour (none of which override caret-color, so this one declaration
+     reaches every node in the doc by inheritance) and follows both theme axes for free — it
+     is already re-tuned per data-theme and cools to moonlight under data-power="paused".
+     Measured against --ep-surface: ~7.6:1 dark-awake, ~3.4:1 light-awake — both clear WCAG
+     1.4.11's 3:1 non-text floor, so a plain caret-color is enough; a custom draw-your-own-
+     caret ProseMirror decoration (dropping to `caret-color: transparent`) is not justified. */
+  caret-color: var(--ep-accent);
 }

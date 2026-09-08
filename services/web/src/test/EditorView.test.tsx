@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useRef, type ReactNode } from "react";
@@ -1378,5 +1382,37 @@ describe("EditorView — restore last state (#743)", () => {
 
     render(<EditorView module="notes" pageId="notes" />, { wrapper });
     expect(await screen.findByTestId("wysiwyg")).toHaveValue("# Note");
+  });
+});
+
+// ── caret visibility (#904) ────────────────────────────────────────────────────
+//
+// The WYSIWYG surface is mocked out above (a plain <textarea>, no real ProseMirror in
+// jsdom) so a rendered assertion can't reach the caret. Follow contrast.test.ts's pattern
+// instead — parse WysiwygEditor.css directly, the same source the browser loads — and
+// assert the `.ProseMirror` rule sets caret-color rather than leaving it to inherit `color`.
+
+const wysiwygCss = readFileSync(
+  join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "components",
+    "archetypes",
+    "WysiwygEditor.css",
+  ),
+  "utf8",
+);
+
+describe("WYSIWYG editor caret (#904)", () => {
+  it("gives the .ProseMirror surface its own caret-color, distinct from body text", () => {
+    const start = wysiwygCss.indexOf(".ep-wysiwyg .milkdown .ProseMirror {");
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rule = wysiwygCss.slice(start, wysiwygCss.indexOf("}", start));
+
+    // A caret that just inherited `color` (--ep-text) would be indistinguishable from the
+    // characters around it — the reported bug. Pinning it to --ep-accent instead means it
+    // reads in the archetype's accent hue (gold/moon per theme) and reaches code blocks,
+    // blockquotes and the title line too, since none of those override caret-color.
+    expect(rule).toMatch(/caret-color:\s*var\(--ep-accent\)/);
   });
 });

@@ -43,6 +43,14 @@ tracing:
 # Applied to every PVC the chart creates when set; blank = the cluster default.
 storageClass: ""
 
+# The cluster's DNS domain. Exactly one thing needs it: the web shell's nginx
+# resolves the core's name at *request* time, and nginx does not apply
+# /etc/resolv.conf's `search` list — so that single URL has to be fully qualified
+# or every /platform/ request 502s while the probes stay green. Everything else in
+# the stack resolves through the OS resolver and keeps the bare Service name.
+# Change this only if your cluster was installed with a non-default domain.
+clusterDomain: cluster.local
+
 # Extra labels/annotations merged onto every workload the chart renders.
 commonLabels: {}
 commonAnnotations: {}
@@ -154,6 +162,11 @@ web:
   image:
     repository: ""
     tag: ""
+  # What nginx proxies /platform/ to. Blank derives
+  # `http://core-app.<release namespace>.svc.<clusterDomain>:8080` — fully
+  # qualified on purpose (see `clusterDomain` above). Set it only if you front the
+  # core with something else; a bare hostname will not resolve.
+  coreAppUrl: ""
   resources:
     requests:
       cpu: 20m

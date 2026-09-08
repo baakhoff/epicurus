@@ -25,7 +25,7 @@ images to GHCR.
   pod's own DNS, and that a confirmed module removal really does scale that module's
   Deployment to zero through the chart's namespace-scoped Role. Deliberately not a required
   check until it has been green for two weeks. **The first boot immediately earned its
-  keep**, twice. The chart's OpenBao bootstrap read the unseal key out of `/v1/sys/init`
+  keep**, three times over. The chart's OpenBao bootstrap read the unseal key out of `/v1/sys/init`
   under the *CLI's* field name (`unseal_keys_b64`) rather than the HTTP API's
   (`keys_base64`), so it initialised a vault and discarded the only key that could ever open
   it — unrecoverable, and invisible to every existing test because the stub they run against
@@ -33,8 +33,13 @@ images to GHCR.
   `SEARXNG_PORT=tcp://10.96.x.x:8080` service-link variable, SearXNG's entrypoint feeds that
   straight into `GRANIAN_PORT`, and the server dies on a URL where it wanted a port number —
   so the chart now turns that Docker-links injection off on every pod, since nothing in the
-  stack reads those names and they collide with the ones it does. Neither failure is
-  reproducible under Compose. `epicurus` chart 0.1.1→0.1.2 (PATCH).
+  stack reads those names and they collide with the ones it does. And the web UI was broken
+  outright on Kubernetes: nginx resolves the core's name per request and never applies
+  `/etc/resolv.conf`'s `search` list, so the bare `core-app` it was handed SERVFAILed and
+  every `/platform/` call 502'd — while both probes stayed green, because `/healthz` is a
+  static handler that never touches the resolver. The chart now gives the shell a fully
+  qualified core URL (`clusterDomain` / `web.coreAppUrl`). None of the three is reproducible
+  under Compose. `epicurus` chart 0.1.1→0.1.2 (PATCH).
 
 - **An import now shows its work, and the Platform card tells the truth** (#893) — dogfooding a
   tenant import on a second machine found four things the Settings card never said. The upload

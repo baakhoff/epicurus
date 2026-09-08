@@ -139,6 +139,31 @@ http://core-app:8080
 {{- end -}}
 
 {{/*
+The core's URL *as nginx must be given it* — fully qualified, unlike every other
+endpoint in this chart.
+
+The web shell resolves the core at request time (so nginx keeps serving the UI
+while the core restarts), which means a `resolver` directive and a runtime lookup
+rather than a start-up one. nginx's resolver does NOT apply /etc/resolv.conf's
+`search` list: it asks for exactly the name it was given. In a pod, `core-app.`
+is not in the cluster DNS zone, so the query SERVFAILs and every /platform/
+request 502s while both probes stay green — /healthz is a static handler that
+never touches the resolver. The chart's first boot on a cluster (#894) hit exactly
+that; under Compose, Docker's embedded DNS answers bare service names, so nothing
+before could see it.
+
+Every other consumer resolves through the OS resolver, which does apply `search`,
+and keeps the bare Service name the code and docs speak (ADR-0063).
+*/}}
+{{- define "epicurus.webCoreAppUrl" -}}
+{{- if .Values.web.coreAppUrl -}}
+{{- .Values.web.coreAppUrl -}}
+{{- else -}}
+{{- printf "http://core-app.%s.svc.%s:8080" .Release.Namespace .Values.clusterDomain -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 The async Postgres DSN. The password is NEVER templated in: it is referenced as
 `$(POSTGRES_PASSWORD)`, which the kubelet expands from the env var above it in the
 same container — so the credential lives only in the Secret, never in a rendered

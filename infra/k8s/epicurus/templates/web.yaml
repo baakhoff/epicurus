@@ -60,16 +60,17 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
-            # Where the shell's nginx proxies /platform/ — the core, on the
-            # cluster network. nginx resolves that name through a resolver the
-            # image derives from /etc/resolv.conf at start-up (#891, a sibling
-            # change that must be in the web image this chart deploys), so the
-            # chart sets nothing else for it. Against an older image whose
-            # resolver is hardcoded to Docker's 127.0.0.11, every /platform/
-            # request 502s while both probes still pass — /healthz is a static
-            # handler that never touches the resolver.
+            # Where the shell's nginx proxies /platform/ — the core, on the cluster
+            # network, and the ONE endpoint in this chart that must be fully
+            # qualified: nginx resolves it per request through a resolver the image
+            # derives from /etc/resolv.conf (#891) and never applies that file's
+            # `search` list, so a bare `core-app` SERVFAILs inside a pod. See
+            # `epicurus.webCoreAppUrl` in _helpers.tpl. Note also that against a web
+            # image built before #891 — whose resolver is hardcoded to Docker's
+            # 127.0.0.11 — every /platform/ request 502s while both probes still
+            # pass: /healthz is a static handler that never touches the resolver.
             - name: CORE_APP_URL
-              value: {{ include "epicurus.platformUrl" $ | quote }}
+              value: {{ include "epicurus.webCoreAppUrl" $ | quote }}
             {{- range $k, $v := .Values.web.extraEnv }}
             - name: {{ $k }}
               value: {{ $v | quote }}

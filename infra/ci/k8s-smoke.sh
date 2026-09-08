@@ -45,6 +45,7 @@ CREATED_CLUSTER=0
 # shellcheck source=infra/ci/smoke-assert.sh disable=SC1091 # linted on its own; CI lints one file at a time
 . "$ROOT/infra/ci/smoke-assert.sh"
 
+# shellcheck disable=SC2034 # read by smoke_assert in the sourced smoke-assert.sh
 EXPECT_MODULES="$(smoke_modules)"
 # Every first-party image the chart deploys. Derived from the Dockerfiles, exactly
 # as the `images` CI job does, so a new service is built and loaded with no edit.
@@ -95,16 +96,26 @@ dump_diagnostics() {
   kc get jobs 2>&1 || true
   printf '\n--- recent events ---\n'
   kc get events --sort-by=.lastTimestamp 2>&1 | tail -40 || true
-  # Anything not Running/Completed gets a describe — that is where an
-  # ImagePullBackOff, an unschedulable pod or a failing probe explains itself.
-  for p in $(kc get pods -o jsonpath='{range .items[?(@.status.phase!="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
-    printf '\n--- describe: %s ---\n' "$p"
-    kc describe "pod/$p" 2>&1 | tail -40 || true
-  done
-  for c in openbao openbao-unseal openbao-bootstrap core-app web $EXPECT_MODULES; do
-    printf '\n--- logs: %s ---\n' "$c"
-    kc logs --tail=40 --all-containers=true \
-      -l "app.kubernetes.io/component=$c" 2>&1 || true
+  # Every pod, by name — never a hand-kept list of components. The first version of
+  # this dumped a named set and described only pods whose *phase* was not Running,
+  # and the run that found the OpenBao defect said nothing at all about the one
+  # workload that was actually crash-looping: a CrashLoopBackOff pod's phase is
+  # still "Running", and searxng was not on the list. Readiness is the honest
+  # signal, and `--previous` is where a crashed container's real error lives.
+  for p in $(kc get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+    ready="$(kc get "pod/$p" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null || true)"
+    case "$ready" in
+      *false* | '')
+        printf '\n--- describe: %s ---\n' "$p"
+        kc describe "pod/$p" 2>&1 | tail -45 || true
+        ;;
+    esac
+    printf '\n--- logs: %s ---\n' "$p"
+    kc logs "$p" --all-containers=true --tail=40 2>&1 || true
+    if kc logs "$p" --all-containers=true --tail=40 --previous >/dev/null 2>&1; then
+      printf '\n--- logs (previous instance): %s ---\n' "$p"
+      kc logs "$p" --all-containers=true --tail=40 --previous 2>&1 || true
+    fi
   done
 }
 
@@ -160,7 +171,7 @@ helm install "$RELEASE" "$CHART" \
   --namespace "$NS" --create-namespace \
   --values "$VALUES" \
   --set "image.tag=$IMAGE_TAG" \
-  --wait --timeout 10m
+  --wait --timeout 8m
 
 # `helm --wait` waits for workloads, not for Jobs, and core-app's init container
 # waits for the token this Job writes — so a ready core already implies it ran.

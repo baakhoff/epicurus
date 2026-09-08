@@ -38,8 +38,12 @@ images to GHCR.
   `/etc/resolv.conf`'s `search` list, so the bare `core-app` it was handed SERVFAILed and
   every `/platform/` call 502'd — while both probes stayed green, because `/healthz` is a
   static handler that never touches the resolver. The chart now gives the shell a fully
-  qualified core URL (`clusterDomain` / `web.coreAppUrl`). None of the three is reproducible
-  under Compose. `epicurus` chart 0.1.1→0.1.2 (PATCH).
+  qualified core URL (`clusterDomain` / `web.coreAppUrl`). And OpenBao could not survive its
+  own restart: its container drops every capability but four, and `chown -R` on the data
+  directory needs `DAC_OVERRIDE` to descend into the 0700 directories the file backend
+  creates — so a fresh vault booted, a vault holding data crash-looped forever, which is a
+  node drain or an upgrade away from any operator. None of the four is reproducible under
+  Compose. `epicurus` chart 0.1.1→0.1.2 (PATCH).
 
 - **An import now shows its work, and the Platform card tells the truth** (#893) — dogfooding a
   tenant import on a second machine found four things the Settings card never said. The upload

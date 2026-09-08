@@ -12,6 +12,20 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The Helm chart has now actually booted** (#894) — the chart shipped rendered and
+  schema-checked and never once started, which left a whole class of failure (a bad probe, an
+  unwritable mount, an RBAC grant one verb short) uncaught until an operator hit it, and left
+  the Kubernetes half of the container-runtime seam proven against nothing but a mock
+  transport. A new `k8s-smoke` CI job creates a kind cluster, builds the service images from
+  the checkout and loads them into it, `helm install`s the chart, and asserts the integration
+  last mile from a curl pod inside the namespace. The assertions themselves moved into
+  `infra/ci/smoke-assert.sh`, shared verbatim with the Compose gate, so both runtimes are held
+  to one list that cannot drift — and on top of it the Kubernetes gate proves the OpenBao
+  bootstrap Job and its unseal loop work, that the web shell resolves the core through the
+  pod's own DNS, and that a confirmed module removal really does scale that module's
+  Deployment to zero through the chart's namespace-scoped Role. Deliberately not a required
+  check until it has been green for two weeks. No component bump.
+
 - **An import now shows its work, and the Platform card tells the truth** (#893) — dogfooding a
   tenant import on a second machine found four things the Settings card never said. The upload
   was a busy button: `fetch` cannot report upload progress at all, so the archive route is now

@@ -110,8 +110,9 @@ jobs:
   # so the second run adds the CRDs-catalog schema location rather than skipping it
   # (a skip would validate nothing and still report success).
   #
-  # No cluster is booted here: a kind-based k8s-smoke, mirroring infra/ci/smoke.sh's
-  # assertions, is #894.
+  # No cluster is booted here — that is the k8s-smoke job below, which installs this
+  # same chart on kind. The two are complementary: this one renders every optional
+  # surface and every "off" branch in seconds, k8s-smoke boots exactly one shape.
   chart-validate:
     runs-on: ubuntu-latest
     env:
@@ -274,3 +275,55 @@ jobs:
 
       - name: Boot the stack and smoke-test the integration last mile
         run: sh infra/ci/smoke.sh
+
+  # The same last mile, on the other runtime (#894). `chart-validate` proves the
+  # chart renders and schema-validates; it cannot prove the stack comes up, and
+  # until this job existed nothing did — ADR-0135 says so in its own consequences.
+  # This installs the chart on a kind cluster and runs infra/ci/smoke-assert.sh,
+  # the exact assertions runtime-smoke runs, plus the two things only a cluster
+  # can prove: that CONTAINER_RUNTIME=auto resolves to the Kubernetes arm inside a
+  # pod, and that a confirmed module removal scales that module's Deployment to
+  # zero through the namespace-scoped Role the chart renders (#891, ADR-0134).
+  #
+  # NOT a required check yet: the bar in #894 is "required once green two weeks
+  # running". Until then a red here is a signal to investigate, not a merge block —
+  # but never merge one without reading it.
+  k8s-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Eleven service images are built here AND copied into the kind node's own
+      # containerd, so the runner holds two copies of every layer. The stock image
+      # leaves ~21GB free, which is not enough headroom to be comfortable; these
+      # toolchains are worth ~25GB and nothing in this job touches them.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # Installs kind + kubectl and creates the cluster; its post step deletes it.
+      # No node_image pin on purpose: the Kubernetes version must be one this kind
+      # release actually ships, and pinning both invites a mismatch. The chart's
+      # declared floor (Chart.yaml kubeVersion) is schema-checked by chart-validate
+      # instead, which is where a version claim belongs.
+      - name: Create a kind cluster
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          cluster_name: epicurus-ci
+          wait: 180s
+
+      - name: Install Helm (pinned, same version as chart-validate)
+        run: |
+          set -euo pipefail
+          curl -sSL "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" -o helm.tgz
+          tar xzf helm.tgz linux-amd64/helm
+          sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+
+      - name: Boot the chart on kind and smoke-test the integration last mile
+        run: sh infra/ci/k8s-smoke.sh
+        env:
+          KIND_CLUSTER: epicurus-ci

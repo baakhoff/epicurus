@@ -1,0 +1,68 @@
+# Helm values for the kind-based `k8s-smoke` CI gate (infra/ci/k8s-smoke.sh, #894).
+#
+# The point of the gate is to boot the chart *as an operator installs it*, so this
+# file overrides as little as possible. Every key below is here because a GitHub
+# runner cannot honour the default, or because the default would prove nothing —
+# never to make the boot easier.
+#
+#   helm install epicurus infra/k8s/epicurus -f infra/ci/values-ci.yaml \
+#     --set image.tag=ci
+#
+# The first-party images are built from the checkout and `kind load`ed under the
+# chart's own registry/prefix, so `image.registry`/`repositoryPrefix` stay at their
+# defaults and only the tag moves. `pullPolicy` stays `IfNotPresent`: it applies to
+# the third-party images too (postgres, nats, qdrant, openbao, minio, searxng,
+# curl), which really are pulled — `Never` would break them.
+
+# ── No LLM runtime on the runner ─────────────────────────────────────────────
+# The Ollama image is multi-gigabyte and its pod asks for 4Gi before it has done
+# anything; nothing the smoke asserts needs a model (the automations run is
+# asserted for *having run and been recorded*, not for its outcome — same as the
+# Compose gate, which boots Ollama but never pulls weights). Pointing the endpoint
+# at loopback inside the core pod means an accidental inference call is refused in
+# microseconds instead of hanging the gate on a DNS or connect timeout.
+ollama:
+  enabled: false
+  external:
+    url: http://127.0.0.1:11434
+
+core:
+  llm:
+    # First-boot model bootstrap off in the gate: it would pull multi-GB models
+    # from the public registry on every run — slow, flaky, and irrelevant to what
+    # the smoke asserts (the wiring, not the weights). Same as the Compose gate.
+    bootstrapModels: ""
+  # `auto` rather than the chart's explicit `kubernetes`, deliberately: the gate's
+  # job is to prove that `resolve_runtime` picks the Kubernetes arm from inside a
+  # real pod (#891, ADR-0134) — the one thing the mock-transport unit tests cannot
+  # say. Detection subsumes the explicit value; if `auto` resolves, so does
+  # `kubernetes`. The chart's own default is exercised by `chart-validate`.
+  containerRuntime:
+    kind: auto
+  persistence:
+    size: 2Gi
+
+# MinIO stays ON (the chart default). It is not needed for `storage` to become
+# healthy — the module's lifespan touches only Postgres and NATS, its object store
+# creates its bucket lazily on first write, and it declares no `status_url` — but
+# turning it off would boot a shape no operator installs and would leave the bucket
+# Job, its Secret wiring and the object endpoint unproven, for the sake of ~200MB
+# of images. The gate boots the default.
+minio:
+  persistence:
+    size: 2Gi
+
+# kind's default StorageClass (local-path) ignores the requested size, but asking
+# for 20-50Gi apiece still reads as a mistake in `kubectl get pvc` output.
+postgres:
+  persistence:
+    size: 2Gi
+nats:
+  persistence:
+    size: 2Gi
+qdrant:
+  persistence:
+    size: 2Gi
+openbao:
+  persistence:
+    size: 1Gi

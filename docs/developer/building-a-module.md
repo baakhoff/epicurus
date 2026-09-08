@@ -26,6 +26,27 @@ def greet(name: str) -> str:
     return f"Hello, {name}!"
 ```
 
+### Reporting a tool failure
+
+Raise a plain exception for a failure state the model can act on — no need to import
+`ToolError` for the common case:
+
+```python
+@module.tool()
+def get_task(task_id: str) -> dict[str, str]:
+    """Fetch a task by id."""
+    task = tasks.get(task_id)
+    if task is None:
+        raise KeyError(f"task {task_id!r} not found for tenant {tenant_id!r}")
+    return task
+```
+
+`tool()` wraps every registered function so the model sees that message and can correct
+itself — mcp's own SDK would otherwise mask any exception that isn't a `ToolError` behind a
+generic `Error executing tool <name>` (see [the tool-error
+seam](../reference/modules.md#the-tool-error-seam-908) for why, and how the server log still
+tells an anticipated `KeyError`/`ValueError`/etc. apart from a genuine crash).
+
 ### Tools that write a document
 
 If a tool writes a document the user should watch take shape, annotate it with

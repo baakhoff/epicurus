@@ -11,6 +11,17 @@ Two conventions run through this chart and every template depends on them:
     on every workload.** That pair is how the core's Kubernetes container-runtime
     seam (#891) finds a module's Deployment to scale to zero, and Ollama's
     StatefulSet to rollout-restart. Do not rename either label.
+  * **`enableServiceLinks: false` on every pod spec.** Kubernetes otherwise injects a
+    `{SVCNAME}_SERVICE_HOST` and `{SVCNAME}_PORT` env var into every pod for every
+    Service in the namespace — Docker-links compatibility nothing here uses, because
+    every endpoint this chart wires comes from an env var it sets explicitly. It is
+    not merely noise: those generated names land in the same namespace as the stack's
+    own variables, and one of them is fatal. `SEARXNG_PORT` arrives as
+    `tcp://10.96.x.x:8080`; SearXNG's entrypoint does
+    `export GRANIAN_PORT="${SEARXNG_PORT:-$GRANIAN_PORT}"`; the server then dies on a
+    URL where it wanted a port number. The chart's very first boot on a cluster (#894)
+    crash-looped on exactly that, and it is invisible under Compose, which injects
+    nothing of the kind. A new pod spec gets this line too.
 
 Helpers that need more than the root context take a dict, by convention
 `(dict "ctx" $ "component" "web")`.

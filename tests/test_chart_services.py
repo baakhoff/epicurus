@@ -430,3 +430,28 @@ def test_bootstrap_refuses_to_initialise_when_it_cannot_store_the_key(
     assert result.returncode != 0
     assert not stack.initialized, "initialised a vault it could not store the key for"
     assert "bootstrap-probe" in result.stderr
+
+
+def test_every_pod_spec_disables_service_links() -> None:
+    """No pod may inherit Kubernetes' Docker-links env injection (#894).
+
+    Kubernetes hands every pod a `{SVCNAME}_SERVICE_HOST` / `{SVCNAME}_PORT` env var
+    for every Service in the namespace. Nothing in this stack reads them — every
+    endpoint the chart wires is an env var it sets explicitly — but they land in the
+    same name space as the stack's own variables, and one of them is fatal:
+    `SEARXNG_PORT` arrives as `tcp://10.96.x.x:8080` and SearXNG's entrypoint feeds it
+    straight to `GRANIAN_PORT`. That crash-looped the chart's first boot on a real
+    cluster, and Compose can never reproduce it. So the convention is chart-wide, and
+    a new template must not forget it.
+    """
+    missing: list[str] = []
+    for template in sorted((CHART / "templates").glob("*.yaml")):
+        text = template.read_text(encoding="utf-8")
+        pod_specs = text.count("\n      containers:\n")
+        disabled = text.count("\n      enableServiceLinks: false\n")
+        if pod_specs != disabled:
+            missing.append(f"{template.name}: {pod_specs} pod spec(s), {disabled} with the setting")
+    assert not missing, (
+        "every pod spec must set `enableServiceLinks: false` (see _helpers.tpl): "
+        + "; ".join(missing)
+    )

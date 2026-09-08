@@ -44,6 +44,8 @@ spec:
       {{- end }}
     spec:
       {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: web
           image: {{ include "epicurus.image" (dict "ctx" $ "name" "web" "override" .Values.web.image) }}

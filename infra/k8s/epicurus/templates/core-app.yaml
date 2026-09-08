@@ -138,6 +138,8 @@ spec:
       initContainers:
         {{- include "epicurus.waitForOpenbaoToken" $ | nindent 8 }}
       {{- end }}
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: core-app
           image: {{ include "epicurus.image" (dict "ctx" $ "name" "core-app" "override" .Values.core.image) }}

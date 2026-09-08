@@ -45,6 +45,8 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: postgres
           image: {{ include "epicurus.thirdPartyImage" .Values.postgres.image }}

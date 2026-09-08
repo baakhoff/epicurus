@@ -45,6 +45,8 @@ spec:
       labels:
         {{- include "epicurus.labels" (dict "ctx" $ "component" "minio") | nindent 8 }}
     spec:
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: minio
           image: {{ include "epicurus.thirdPartyImage" .Values.minio.image }}
@@ -148,6 +150,8 @@ spec:
     spec:
       restartPolicy: Never
       {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: minio-init
           # The mc client is versioned SEPARATELY from the server — never assume

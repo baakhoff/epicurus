@@ -22,9 +22,15 @@ Docker socket.
 
 ## Quick start
 
+The standard path installs a tagged release straight from GHCR — the chart is a
+release artifact, published as an OCI artifact beside the images by
+`release.yml`, and the GHCR package `charts/epicurus` is public, so no
+`helm registry login` is needed to pull it:
+
 ```bash
-# from a checkout
-helm install epicurus infra/k8s/epicurus --namespace epicurus --create-namespace
+helm install epicurus oci://ghcr.io/baakhoff/charts/epicurus \
+  --version <latest release, e.g. 0.2.0> \
+  --namespace epicurus --create-namespace
 
 # watch it come up (core-app waits on the OpenBao bootstrap job)
 kubectl -n epicurus get pods -w
@@ -36,10 +42,55 @@ kubectl -n epicurus get secret epicurus-openbao -o jsonpath='{.data.unseal-key}'
 kubectl -n epicurus port-forward svc/web 8084:8080
 ```
 
-Publishing the chart to GHCR as an OCI artifact beside the images — so a checkout
-is not required to install it — is a separate piece of the same epic; the release
-pipeline overrides `appVersion` with the release's image tag at package time, which
-is why `Chart.yaml` carries a placeholder.
+A release chart's `appVersion` is already the same tag as its images, so no
+`--set image.tag=` is needed. See [Releases](../developer/releases.md) for the
+list of tags.
+
+### From a checkout (developing the chart)
+
+Installing straight from `infra/k8s/epicurus/` is how you develop the chart
+itself, not the recommended operator path — `Chart.yaml` carries a placeholder
+`appVersion` (`latest`) that no image on GHCR is actually tagged, so pass
+`--set image.tag=<a real tag>` or the pods will fail to pull:
+
+```bash
+helm install epicurus infra/k8s/epicurus --namespace epicurus --create-namespace \
+  --set image.tag=<a release tag, e.g. 0.2.0>
+```
+
+Everything else — the quick-start commands above, the values reference below —
+applies identically to a checkout install.
+
+### Tracking a branch (opt-in)
+
+Occasionally the owner wants a cluster running an exact, unreleased commit —
+not a release, not a checkout. `chart-branch.yml` packages and pushes a chart
+from any ref on a manual dispatch only; it never runs on a push, and it is not
+a supported path for anyone but the owner's own testing clusters:
+
+```bash
+gh workflow run chart-branch.yml -f ref=testing
+# a non-testing ref must also say which tag its images carry:
+gh workflow run chart-branch.yml -f ref=some-branch -f image_tag=testing
+```
+
+The published version is `0.0.0-<branch>.<7-char sha>` (a "/" in the branch
+name is flattened to "-", since semver forbids it in a prerelease identifier).
+That sorts below every real release, so `helm upgrade` from a branch chart back
+onto a tagged release is an ordinary upgrade — nothing about tracking a branch
+leaves the install in a state a release can't supersede:
+
+```bash
+helm install epicurus oci://ghcr.io/baakhoff/charts/epicurus \
+  --version 0.0.0-testing.abc1234 --namespace epicurus --create-namespace
+
+# later, back onto a release
+helm upgrade epicurus oci://ghcr.io/baakhoff/charts/epicurus --version 0.2.0
+```
+
+Before #907, `testing.yml` published `0.0.0-testing.<sha>` automatically on
+every push to `testing`; that automatic job is gone; `chart-branch.yml`
+replaces it as an explicit, on-demand action.
 
 On a first install `core-app` (and `messaging`) sit in `Init:0/1` for the first
 minute: they wait for the OpenBao bootstrap Job to write the app token. That Job

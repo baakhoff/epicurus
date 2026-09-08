@@ -1,0 +1,79 @@
+name: Chart (branch, on demand)
+
+# The published Helm chart is a release artifact — the standard install and
+# upgrade path tracks tagged releases published by release.yml. This
+# workflow is the *opt-in* exception: pack the chart from an exact branch or
+# sha for the owner's own testing clusters. It never runs on a push — only a
+# manual dispatch, naming the ref to build from. See
+# docs/infrastructure/kubernetes.md "Tracking a branch (opt-in)".
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or SHA to package the chart from"
+        required: true
+        type: string
+      image_tag:
+        description: >-
+          Image tag that ref's images carry (e.g. a release tag). Leave
+          blank only when ref is the testing branch, which always carries
+          the :testing tag.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: chart-branch-${{ github.event.inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Resolve the image tag this chart should point at
+        if: hashFiles('infra/k8s/epicurus/Chart.yaml') != ''
+        id: image_tag
+        env:
+          REF: ${{ inputs.ref }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          resolved="${IMAGE_TAG}"
+          if [ -z "${resolved}" ]; then
+            if [ "${REF}" = "testing" ]; then
+              resolved="testing"
+            else
+              echo "::error::image_tag is required unless ref is 'testing' — name the tag ${REF}'s images actually carry"
+              exit 1
+            fi
+          fi
+          echo "value=${resolved}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Helm
+        if: hashFiles('infra/k8s/epicurus/Chart.yaml') != ''
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Package and push the branch chart to GHCR
+        if: hashFiles('infra/k8s/epicurus/Chart.yaml') != ''
+        env:
+          HELM_REGISTRY_USER: ${{ github.actor }}
+          HELM_REGISTRY_PASSWORD: ${{ github.token }}
+          APP_VERSION: ${{ steps.image_tag.outputs.value }}
+          REF: ${{ inputs.ref }}
+        run: |
+          sha="$(git rev-parse --short=7 HEAD)"
+          # Sanitize the ref for use as a semver prerelease identifier — a
+          # branch name may contain "/" (feat/foo), which semver forbids.
+          branch="$(echo "${REF}" | tr -c 'a-zA-Z0-9' '-')"
+          version="0.0.0-${branch}.${sha}"
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          helm package infra/k8s/epicurus --version "${version}" --app-version "${APP_VERSION}" -d /tmp/charts
+          echo "${HELM_REGISTRY_PASSWORD}" | helm registry login ghcr.io -u "${HELM_REGISTRY_USER}" --password-stdin
+          helm push "/tmp/charts/epicurus-${version}.tgz" "oci://ghcr.io/${owner}/charts"
+          echo "::notice::published ${version} (app-version ${APP_VERSION}) from ${REF}@${sha}"

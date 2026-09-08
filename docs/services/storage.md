@@ -68,7 +68,7 @@ the surface that *renders* Files (and the scanner/watcher that fed it) moved to 
 | `storage_list(path="")` | List the direct children of `path` in the file space (dirs before files), via `PlatformClient.files_list`. A hidden subtree (e.g. `notes/`) yields nothing; the root listing also includes any declared external mount as a folder. |
 | `storage_search(query, limit=50)` | Case-insensitive name/path search (max 200) over the core file index, via `PlatformClient.files_search`. Hits under a hidden subtree are filtered out; covers every external mount that opted into indexing. |
 | `storage_read(path)` | Return a text file's contents — a file-space file (via `PlatformClient.files_read`) **or** an agent-written object. Rejects files > **256 KB** and non-UTF-8 (binary) with an explanatory message; a path under a hidden subtree returns `Error: not available`. |
-| `storage_status()` | Object-store counts (catalogued objects), tenant-scoped. No filesystem root. |
+| `storage_status()` | Object-store counts (catalogued objects) for the call's tenant. No filesystem root. |
 | `storage_object_put(key, content)` | Store a text object under `key` (tenant bucket) **and catalogue it** so it appears in the core Files page and is searchable / readable / downloadable; a nested key (`reports/q2.md`) creates the folder tree. Returns the normalised key used. |
 | `storage_object_get(key)` | Retrieve a stored object (or `null`). |
 
@@ -78,9 +78,13 @@ All paths below are object-store-only — they list, read, move, and stream the 
 objects (chat uploads + agent-written files). The core proxies them and **merges** the objects
 into the unified Files page; the operator never calls storage directly.
 
+Every route scopes to the tenant **the caller names** — `tenant_id` on the object surface, the
+`x-epicurus-tenant` header on `/ingest` — falling back to `DEFAULT_TENANT_ID` when the caller
+names none, and answering **400** to a malformed one. See *Tenant scoping* below.
+
 | Method · Path | Purpose |
 | --- | --- |
-| `POST /ingest?filename=…&att_id=…` | **Chat upload sink (ADR-0025).** Body is the raw file bytes; `Content-Type` carries the media type. Stores the bytes in the object store under `uploads/<att_id>-<name>`, catalogues them (browsable + downloadable), and returns `{key, name, size}`. Called by the core's attachment-upload route. |
+| `POST /ingest?filename=…&att_id=…` | **Chat upload sink (ADR-0025).** Body is the raw file bytes; `Content-Type` carries the media type, and `x-epicurus-tenant` (or `tenant_id`) the tenant. Stores the bytes in that tenant's object store under `uploads/<att_id>-<name>`, catalogues them (browsable + downloadable), and returns `{key, name, size}`. Called by the core's attachment-upload route. |
 | `GET /objects?path=…&q=…` | **Object list / search.** Returns `{entries: [{path, name, size, mtime, kind}]}` — the catalogued objects under `path` (empty = root), or a name/path search when `q` is set. The core fetches this to merge objects into `GET /platform/v1/files/page` (and to back object-name results in `GET /platform/v1/files/search`). |
 | `GET /objects/read?path=…` | **Object text read.** Return a UTF-8 text object's contents → `{path, name, content}`. **400** traversal, **404** missing, **413** larger than 256 KB, **415** binary / non-UTF-8. The core calls this when a Files read targets a storage object. |
 | `GET /download?path=…` | **Object-only streaming** (binary-safe) — streams a catalogued object from MinIO with its stored content type. Path-traversal attempts → **HTTP 400**, **404** when the object is not catalogued. The core's `GET /platform/v1/files/download` proxies here for object entries (file-space files stream from the core's own store). |
@@ -121,9 +125,10 @@ When a user attaches a file in chat, the core's upload route keeps its core-side
    and stream / decode it from MinIO; the core proxies both for object entries in the Files
    view.
 
-Tenant scoping holds end to end: the bytes land in the `{tenant}-storage` bucket and the
-catalogue rows are tenant-scoped. The core treats persistence as **best-effort** — a down or
-absent storage module never fails a chat upload.
+Tenant scoping holds end to end: the tenant is the one the core stamps on the request
+(`x-epicurus-tenant`), the bytes land in that tenant's `{tenant}-storage` bucket, and the
+catalogue rows are written under it (#836). The core treats persistence as **best-effort** — a
+down or absent storage module never fails a chat upload.
 
 ### Rename / move objects (#381 / #391)
 
@@ -157,6 +162,36 @@ is not in the core file space:
   `object` rows, so the operator simply deletes again; it never strands live, downloadable bytes.
 - **Idempotent.** Nothing at the path is a clean `{deleted: false}`, not a 404 — matching the
   `FileStore.delete` seam, so the core can tell "nothing here" from a real failure.
+
+## Tenant scoping (#836)
+
+The store was always tenant-*parameterised* — the catalogue rows carry a `tenant`, the bytes
+live in `scope_bucket("storage", tenant)` (`{tenant}-storage`), and every helper in
+`service.py` takes a `tenant`. What was single-tenant was the **resolution**: the HTTP routes
+pinned `DEFAULT_TENANT_ID` and merely *accepted* `tenant_id` "for forward-compatibility", and
+the MCP tools closed over one tenant fixed at build time. They now resolve per call:
+
+- **HTTP.** `tenant_id` decides (`/ingest` also reads the `x-epicurus-tenant` header the core's
+  upload sink has always sent). Absent → `DEFAULT_TENANT_ID`, the same fallback the core's own
+  file routes use, so a single-tenant self-host is byte-for-byte unchanged. Malformed → **400**,
+  never a silent read of another tenant's catalogue.
+- **MCP tools.** The tenant bound to `epicurus_core.tenancy.current_tenant`, else
+  `DEFAULT_TENANT_ID`. Nothing binds that context on a module tool call today — the core
+  dispatches a tool by name and URL (`McpHost.call`) and does not carry a tenant across the MCP
+  hop — so every tool call still resolves to the default. Making the *contract* carry it is a
+  core-side change; this module is ready for it.
+- **The file-space half is the core's.** `storage_list` / `storage_search` / `storage_read`
+  merge in the core file space through a `PlatformClient` built with one identity (this
+  deployment's default tenant). A call resolving to any other tenant therefore answers from the
+  object store alone rather than serving the default tenant's files under another tenant's name.
+- **No backfill was needed.** Every row and object ever written by this module was written under
+  the default tenant and stays exactly where it is; the change is which tenant a *request*
+  resolves to.
+
+What the SaaS fork still owes: per-tenant MinIO credentials. The bucket is already per tenant,
+but `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` are one deployment-wide pair, so isolation here is
+by bucket name, not by credential — the fork fetches per-tenant credentials from OpenBao
+(constraint #4) and the `ObjectStore` session becomes per tenant rather than per process.
 
 ## Configuration
 

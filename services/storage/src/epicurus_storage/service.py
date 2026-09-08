@@ -32,6 +32,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel
 
 from epicurus_core import EpicurusModule, PlatformClient, UiAction, UiSection, get_logger
+from epicurus_core.tenancy import TenantError, current_tenant
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.settings import READ_MAX_BYTES
@@ -42,6 +43,27 @@ log = get_logger(MODULE_NAME)
 
 # Virtual top-level folder under which chat uploads are catalogued and stored.
 UPLOADS_PREFIX = "uploads"
+
+
+def resolve_tenant(default_tenant: str) -> str:
+    """The tenant this call acts for: the one bound to the context, else *default_tenant*.
+
+    The store itself has always been tenant-parameterised — every helper below takes a
+    ``tenant``, the catalogue rows carry one, and the bytes live in ``scope_bucket("storage",
+    tenant)``. What was single-tenant was the *resolution*: the tools closed over one tenant
+    fixed at build time. They now read :func:`epicurus_core.tenancy.current_tenant`, the
+    platform's one tenant-carrying mechanism, so a call made on another tenant's behalf reaches
+    that tenant's catalogue and bucket with nothing else to change here.
+
+    Nothing binds that context on a module tool call today — the core dispatches a tool by name
+    and URL only (``McpHost.call``) — so every tool call resolves to this deployment's default
+    tenant and the single-tenant v1 behaves exactly as it did. Making the core *carry* the
+    tenant across the MCP hop is a core-side change to the contract, not a storage one.
+    """
+    try:
+        return current_tenant()
+    except TenantError:
+        return default_tenant
 
 
 class FileNode(BaseModel):
@@ -300,7 +322,7 @@ def build_module(
     objects: ObjectStore,
     *,
     platform: PlatformClient,
-    tenant: str,
+    default_tenant: str,
     hidden_prefixes: tuple[str, ...] = (),
 ) -> EpicurusModule:
     """Build the storage module and register its MCP tools.
@@ -310,6 +332,10 @@ def build_module(
     in the module's own object store. ``hidden_prefixes`` are top-level subtrees the **agent's**
     file tools never see (e.g. ``notes`` is private/attach-only); the operator still browses them
     in the core Files page, which is unaffected by this gate.
+
+    *default_tenant* is the **fallback**, not the tenant: every tool resolves its own through
+    :func:`resolve_tenant` and falls back to this one when the call carries no tenant context
+    (which, today, is always — see that function).
     """
     hidden = tuple(p.strip("/") for p in hidden_prefixes if p.strip("/"))
 
@@ -317,9 +343,23 @@ def build_module(
         clean = path.replace("\\", "/").strip("/")
         return any(clean == h or clean.startswith(h + "/") for h in hidden)
 
+    def _file_space_readable(tenant: str) -> bool:
+        """Whether the **core** file space may be read on *tenant*'s behalf.
+
+        The object half of every file tool follows the resolved tenant, but the file-space half
+        goes through a :class:`PlatformClient` built with one identity — this deployment's
+        default tenant. A call bound to a different tenant therefore has no client that could
+        read *that* tenant's file space, so the tools answer from the object store alone rather
+        than quietly serving the default tenant's files to someone else (constraint #1). Giving
+        the platform client a per-call tenant is a core-side change (its tenant is baked into
+        the client), so this stays a guard rather than a fallback. Nothing binds a non-default
+        tenant on a tool call today, so this is always true in v1.
+        """
+        return tenant == default_tenant
+
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.10.0",
+        version="0.11.0",
         description=(
             "Agent file tools over the core-owned file space (list, search, read), plus "
             "app-managed object storage via MinIO and durable chat-upload ingest. The Files "
@@ -356,8 +396,10 @@ def build_module(
 
     # ── File-tree tools (over the core-owned file space + the object store) ───
 
-    async def _fs_nodes(path: str) -> list[FileNode]:
+    async def _fs_nodes(path: str, tenant: str) -> list[FileNode]:
         """File-space children of *path*, via the platform API; empty if the core is down."""
+        if not _file_space_readable(tenant):
+            return []
         try:
             return [
                 FileNode(path=e.path, name=e.name, kind=e.kind, size=e.size)
@@ -379,7 +421,8 @@ def build_module(
         """
         if _is_hidden(path):
             return []
-        nodes = await _fs_nodes(path)
+        tenant = resolve_tenant(default_tenant)
+        nodes = await _fs_nodes(path, tenant)
         nodes.extend(
             FileNode(path=o.path, name=o.name, kind=o.kind, size=o.size)
             for o in await index.browse(tenant=tenant, path=path)
@@ -399,16 +442,18 @@ def build_module(
         """
         if not query.strip():
             return []
+        tenant = resolve_tenant(default_tenant)
         capped = max(1, min(limit, 200))
         nodes: list[FileNode] = []
-        try:
-            nodes.extend(
-                FileNode(path=e.path, name=e.name, kind=e.kind, size=e.size)
-                for e in await platform.files_search(query, limit=capped)
-                if not _is_hidden(e.path)
-            )
-        except httpx.HTTPError as exc:
-            log.warning("file-space search failed; returning objects only", error=str(exc))
+        if _file_space_readable(tenant):
+            try:
+                nodes.extend(
+                    FileNode(path=e.path, name=e.name, kind=e.kind, size=e.size)
+                    for e in await platform.files_search(query, limit=capped)
+                    if not _is_hidden(e.path)
+                )
+            except httpx.HTTPError as exc:
+                log.warning("file-space search failed; returning objects only", error=str(exc))
         nodes.extend(
             FileNode(path=o.path, name=o.name, kind=o.kind, size=o.size)
             for o in await index.search(tenant=tenant, query=query, limit=capped)
@@ -429,6 +474,7 @@ def build_module(
         # Private subtrees (e.g. notes) are never readable by the agent (#KB-refactor).
         if _is_hidden(path):
             return "Error: not available"
+        tenant = resolve_tenant(default_tenant)
         # An agent-written object (source="object") lives in MinIO — read it back from the store
         # so a file the agent just saved is readable through the same tool that lists it (#347).
         obj = await load_object_download(index=index, objects=objects, tenant=tenant, path=path)
@@ -442,7 +488,10 @@ def build_module(
                 return obj.data.decode("utf-8")
             except UnicodeDecodeError:
                 return "Error: file is not valid UTF-8 (binary file)"
-        # Otherwise it is a file-space file — read it through the core file API.
+        # Otherwise it is a file-space file — read it through the core file API, which this
+        # module can only address as its own tenant.
+        if not _file_space_readable(tenant):
+            return "Error: file not found"
         try:
             return await platform.files_read(path)
         except httpx.HTTPStatusError as exc:
@@ -463,7 +512,7 @@ def build_module(
     @module.tool()
     async def storage_status() -> dict[str, object]:
         """Return storage-module status: object-store entry counts."""
-        counts = await index.count(tenant=tenant)
+        counts = await index.count(tenant=resolve_tenant(default_tenant))
         return {"object_files": counts["files"], "object_dirs": counts["dirs"]}
 
     # ── Object-store tools ───────────────────────────────────────────────────
@@ -479,7 +528,11 @@ def build_module(
         is the normalised path actually used. Returns ``{"status": "ok", "key": key}``.
         """
         return await put_object(
-            index=index, objects=objects, tenant=tenant, key=key, content=content
+            index=index,
+            objects=objects,
+            tenant=resolve_tenant(default_tenant),
+            key=key,
+            content=content,
         )
 
     @module.tool()
@@ -489,7 +542,9 @@ def build_module(
         Returns ``{"key": key, "content": "..."}`` or
         ``{"key": key, "content": null}`` if the key does not exist.
         """
-        content = await objects.get(tenant=tenant, key=_normalize_key(key) or key)
+        content = await objects.get(
+            tenant=resolve_tenant(default_tenant), key=_normalize_key(key) or key
+        )
         return {"key": key, "content": content}
 
     return module

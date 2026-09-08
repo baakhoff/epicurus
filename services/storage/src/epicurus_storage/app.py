@@ -5,6 +5,12 @@ browser UI; storage owns the object store. So this app no longer mounts ``/data`
 tree — it exposes the object surface the core's Files view proxies (``/objects``, object read /
 download / move) plus the chat-upload sink, and its MCP tools read the file space through the
 core's platform API.
+
+Every route here scopes to the tenant **the caller names** (#836): ``tenant_id`` on the object
+surface, the ``x-epicurus-tenant`` header the core's upload sink already sends on ``/ingest``.
+An unnamed tenant falls back to this deployment's ``DEFAULT_TENANT_ID`` — the convention the
+core's own file routes use, and what keeps the single-tenant self-host case unchanged — while a
+malformed one is a 400 rather than a silent read of somebody else's catalogue.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
+from epicurus_core.tenancy import TenantError, validate_tenant_id
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.portability import StoragePortability
@@ -40,6 +47,10 @@ from epicurus_storage.service import (
     move_item,
 )
 from epicurus_storage.settings import READ_MAX_BYTES, StorageSettings
+
+#: Header the core's upload sink stamps with the tenant a chat upload belongs to. ``/ingest``
+#: takes the bytes as its body, so the tenant travels beside them rather than in the body.
+TENANT_HEADER = "x-epicurus-tenant"
 
 
 def _attachment_disposition(name: str) -> str:
@@ -92,12 +103,27 @@ def create_app() -> FastAPI:
         tenant_id=settings.default_tenant_id,
         module=MODULE_NAME,
     )
-    _tenant = settings.default_tenant_id
+    _default_tenant = settings.default_tenant_id
+
+    def _tenant_of(tenant_id: str | None) -> str:
+        """The tenant a request acts for: the one it names, else the deployment's default.
+
+        Mirrors the core's file routes (``files_routes._tenant``): an absent ``tenant_id``
+        means this deployment's default — the single-tenant self-host case, unchanged — and a
+        malformed one is a clean 400. What it never does is ignore a named tenant and answer
+        from the default's catalogue, which is what the routes did while the ``tenant_id``
+        query was accepted "for forward-compatibility" (#836).
+        """
+        try:
+            return validate_tenant_id(tenant_id or _default_tenant)
+        except TenantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     module = build_module(
         index,
         objects,
         platform=platform,
-        tenant=_tenant,
+        default_tenant=_default_tenant,
         hidden_prefixes=tuple(
             p.strip() for p in settings.agent_hidden_prefixes.split(",") if p.strip()
         ),
@@ -109,7 +135,7 @@ def create_app() -> FastAPI:
         async with module.mcp.session_manager.run():
             await index.init()
             await bus.connect()
-            log.info("storage service ready", tenant=_tenant)
+            log.info("storage service ready", default_tenant=_default_tenant)
             try:
                 yield
             finally:
@@ -130,6 +156,7 @@ def create_app() -> FastAPI:
         request: Request,
         filename: str = Query(..., description="Original filename of the uploaded file"),
         att_id: str = Query(default="", description="Core attachment id (uniqueness token)"),
+        tenant_id: str | None = Query(default=None),
     ) -> dict[str, object]:
         """Durably persist an uploaded file's bytes — the chat upload sink (ADR-0025).
 
@@ -137,13 +164,18 @@ def create_app() -> FastAPI:
         header carries the media type) so the upload is kept in the object store and
         becomes browsable in the core Files page. Returns the stored object's
         ``{key, name, size}``.
+
+        The upload lands in the bucket and catalogue of the tenant the core names — the
+        ``x-epicurus-tenant`` header it has always sent, which this route now honours instead
+        of filing every upload under the deployment default (#836). ``tenant_id`` is accepted
+        too, so the sink and the object surface below name their tenant the same way.
         """
         data = await request.body()
         content_type = request.headers.get("content-type") or "application/octet-stream"
         return await ingest_object(
             index=index,
             objects=objects,
-            tenant=_tenant,
+            tenant=_tenant_of(tenant_id or request.headers.get(TENANT_HEADER)),
             att_id=att_id,
             filename=filename,
             content_type=content_type,
@@ -161,13 +193,13 @@ def create_app() -> FastAPI:
         """List/search object-store entries for the core's unified Files view.
 
         Returns ``{entries:[{path,name,size,mtime,kind}]}`` — browse under *path* when *q* is
-        empty, otherwise search. The store is single-tenant (this module's default tenant); the
-        ``tenant_id`` query is accepted for forward-compatibility.
+        empty, otherwise search — for the tenant ``tenant_id`` names (default when absent).
         """
+        tenant = _tenant_of(tenant_id)
         if q.strip():
-            entries = await index.search(tenant=_tenant, query=q.strip(), limit=200)
+            entries = await index.search(tenant=tenant, query=q.strip(), limit=200)
         else:
-            entries = await index.browse(tenant=_tenant, path=path)
+            entries = await index.browse(tenant=tenant, path=path)
         return {
             "entries": [
                 ObjectEntryOut(path=e.path, name=e.name, size=e.size, mtime=e.mtime, kind=e.kind)
@@ -181,7 +213,9 @@ def create_app() -> FastAPI:
         tenant_id: str | None = Query(default=None),
     ) -> dict[str, object]:
         """Return an object's text for the Files split-screen reader. 404/413/415 on error."""
-        obj = await load_object_download(index=index, objects=objects, tenant=_tenant, path=path)
+        obj = await load_object_download(
+            index=index, objects=objects, tenant=_tenant_of(tenant_id), path=path
+        )
         if obj is None:
             raise HTTPException(status_code=404, detail="not found")
         if len(obj.data) > READ_MAX_BYTES:
@@ -198,7 +232,9 @@ def create_app() -> FastAPI:
         tenant_id: str | None = Query(default=None),
     ) -> Response:
         """Stream a catalogued object from MinIO (the core proxies file-space files itself)."""
-        obj = await load_object_download(index=index, objects=objects, tenant=_tenant, path=path)
+        obj = await load_object_download(
+            index=index, objects=objects, tenant=_tenant_of(tenant_id), path=path
+        )
         if obj is None:
             raise HTTPException(status_code=404, detail="not found")
         return Response(
@@ -215,7 +251,7 @@ def create_app() -> FastAPI:
         return await move_item(
             index=index,
             objects=objects,
-            tenant=_tenant,
+            tenant=_tenant_of(tenant_id),
             from_path=body.from_path,
             to_path=body.to_path,
         )
@@ -231,7 +267,9 @@ def create_app() -> FastAPI:
         a chat upload or agent-written object. Returns ``{"deleted": bool}`` (idempotent 404 →
         ``False``); 400 for the root or a read-only entry.
         """
-        return await delete_item(index=index, objects=objects, tenant=_tenant, path=path)
+        return await delete_item(
+            index=index, objects=objects, tenant=_tenant_of(tenant_id), path=path
+        )
 
     return app
 

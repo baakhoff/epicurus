@@ -585,3 +585,85 @@ describe("ExportImportCard — letting go of a settled job (#903)", () => {
     expect(screen.getByText(/recent jobs \(1\)/i)).toBeInTheDocument();
   });
 });
+
+describe("ExportImportCard — a module's bytes in the report (#905)", () => {
+  /** `storage` is the one module that carries bytes, so it is the one the report shape is
+   *  about: a few objects written, one left alone because it differs here, one whose record
+   *  arrived without its file. */
+  const storage = {
+    name: "storage",
+    kind: "module",
+    state: "included",
+    created: 61,
+    updated: 0,
+    skipped: 0,
+    blobs: {
+      written: 57,
+      skipped: 2,
+      bytes_written: 3_145_728,
+      conflicts: ["uploads/edited.pdf"] as string[],
+      missing: ["uploads/film.mov"] as string[],
+    },
+    warnings: [] as string[],
+  };
+
+  const doneWith = (component: typeof storage) => ({
+    ...DONE_IMPORT,
+    report: {
+      ...DONE_IMPORT.report,
+      components: [...DONE_IMPORT.report.components, component],
+    },
+  });
+
+  const withBlobs = doneWith(storage);
+
+  async function renderDone(job: unknown): Promise<void> {
+    mockJobs.mockResolvedValue([{ ...READY_EXPORT_ROW, id: "imp-1", kind: "import", status: "done" }]);
+    mockImport.mockResolvedValue(job);
+    render(<ExportImportCard />, { wrapper });
+    await waitFor(() => expect(mockImport).toHaveBeenCalled());
+  }
+
+  it("counts the bytes a module carried, apart from its records", async () => {
+    await renderDone(withBlobs);
+    // Records and objects are different quantities of different things; the card says both.
+    expect(await screen.findByText(/61 new/)).toBeInTheDocument();
+    expect(await screen.findByText(/57 written · 2 skipped · 3\.0 MB/)).toBeInTheDocument();
+  });
+
+  it("names a conflicting object and says what was done about it", async () => {
+    await renderDone(withBlobs);
+    expect(
+      await screen.findByText(/already here with different content — left untouched/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("uploads/edited.pdf")).toBeInTheDocument();
+  });
+
+  it("names a missing object and says what to do about it", async () => {
+    await renderDone(withBlobs);
+    expect(
+      await screen.findByText(
+        /bytes not in the archive — copy the file across, its download answers 404 until then/i,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("uploads/film.mov")).toBeInTheDocument();
+  });
+
+  it("collapses a list past five entries instead of burying the report", async () => {
+    const many = Array.from({ length: 7 }, (_, i) => `uploads/${i}.bin`);
+    await renderDone(
+      doneWith({ ...storage, blobs: { ...storage.blobs, conflicts: many, missing: [] } }),
+    );
+    const summary = await screen.findByText(/7 already here with different content/i);
+    expect(summary.tagName.toLowerCase()).toBe("summary");
+    // Collapsed, not truncated: every id is still reachable, none of them is thrown away.
+    expect(screen.getByText("uploads/6.bin")).toBeInTheDocument();
+  });
+
+  it("says nothing at all for a component that carried no bytes", async () => {
+    await renderDone(DONE_IMPORT);
+    expect(await screen.findByText(/42 new/)).toBeInTheDocument();
+    expect(screen.queryByText(/^bytes: /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/already here with different content/i)).not.toBeInTheDocument();
+  });
+});

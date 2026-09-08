@@ -12,6 +12,19 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The import report shows what happened to your files, not just your records** (#905) — a
+  module that keeps files of its own (`storage`, where every chat attachment lives) has always
+  answered an import with a byte-level result: how many objects were written, which ones were
+  **left untouched because the bytes here differ**, and which arrived as a record whose file the
+  archive did not carry — the entry is findable and its download answers 404 until the operator
+  copies it across. None of that was rendered anywhere (#886), so the one component where it
+  matters most reported only record counts and the operator had to read the JSON to learn that
+  a file had not come with them. Export & import now shows a `bytes` line under the component's
+  own row and both id lists, each headed with what it means and what to do about it, collapsed
+  past five entries so a module with forty conflicts cannot push the rest of the report off the
+  card. Plain rows in the shell's own style; the core decides what they mean and the card shows
+  them (ADR-0018). `web` 0.144.0→0.145.0 (MINOR).
+
 - **A `NULL` no longer costs the operator a whole data set, and a failed import can be thrown
   away** (#903) — dogfooding the tenant import on a second machine lost the entire `prefs` set
   to a single row. A column added after its table's first release with no `server_default` is

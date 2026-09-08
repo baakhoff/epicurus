@@ -150,7 +150,21 @@ leaves a newer setting unset, and the import simply fills it with that setting's
 ### After an apply
 
 The report shows what each component did, which files were written, and the two rebuilds the
-import runs for you:
+import runs for you.
+
+**Your uploads are reported too.** A module that keeps files of its own — `storage`, where
+everything you attach to a chat ends up — gets a **bytes** line under its row saying how many
+objects were written and how much that was, and, when there is anything to say, two lists:
+
+* **already here with different content** — the bytes here differ from the archive's, so they
+  were left exactly as they are. Nothing was overwritten; it is yours to reconcile.
+* **record imported, bytes not in the archive** — the entry is there and findable, but the
+  file itself was not carried (it was over the per-file ceiling, or already gone on the old
+  machine). Its download answers 404 until you copy the file across yourself.
+
+A list longer than five folds up; open it to read every id.
+
+The two rebuilds:
 
 1. a **forced re-scan** of your file space, rebuilding the Files index and search;
 2. the **re-embed** fan-out, asking each module to rebuild its vectors with *this*

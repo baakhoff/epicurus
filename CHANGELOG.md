@@ -24,7 +24,12 @@ images to GHCR.
   bootstrap Job and its unseal loop work, that the web shell resolves the core through the
   pod's own DNS, and that a confirmed module removal really does scale that module's
   Deployment to zero through the chart's namespace-scoped Role. Deliberately not a required
-  check until it has been green for two weeks. No component bump.
+  check until it has been green for two weeks. **The first boot immediately earned its
+  keep**: the chart's OpenBao bootstrap read the unseal key out of `/v1/sys/init` under the
+  *CLI's* field name (`unseal_keys_b64`) rather than the HTTP API's (`keys_base64`), so it
+  initialised a vault and discarded the only key that could ever open it — unrecoverable, and
+  invisible to every existing test because the stub they run against mirrored the same
+  mistake. Both are fixed. `epicurus` chart 0.1.1→0.1.2 (PATCH).
 
 - **An import now shows its work, and the Platform card tells the truth** (#893) — dogfooding a
   tenant import on a second machine found four things the Settings card never said. The upload

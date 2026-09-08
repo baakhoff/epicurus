@@ -180,11 +180,18 @@ def _handler(stack: _FakeStack) -> type[http.server.BaseHTTPRequestHandler]:
                     return
                 stack.initialized = True
                 stack.sealed = True
+                # The **HTTP API's** shape, verbatim: `keys` (hex) and
+                # `keys_base64`. This stub used to answer with `unseal_keys_b64`,
+                # which is what the *CLI* (`bao operator init -format=json`) emits —
+                # so the script's matching mistake was invisible here and only
+                # surfaced on the first real cluster boot (#894), after it had
+                # initialised a vault and discarded its only unseal key. A stub that
+                # mirrors the code under test proves nothing; this one mirrors OpenBao.
                 self._send(
                     200,
                     {
                         "keys": ["hexkey"],
-                        "unseal_keys_b64": [UNSEAL_KEY],
+                        "keys_base64": [UNSEAL_KEY],
                         "root_token": ROOT_TOKEN,
                     },
                 )

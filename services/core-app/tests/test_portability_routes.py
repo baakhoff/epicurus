@@ -462,3 +462,100 @@ async def test_the_job_list_is_capped(tmp_path: Path) -> None:
             assert [job["id"] for job in listed] == list(reversed(ids))[:20]
     finally:
         await engine.dispose()
+
+
+# ── removing a settled job (#903) ─────────────────────────────────────────────
+
+
+async def test_a_failed_import_can_be_removed_from_the_list(tmp_path: Path) -> None:
+    """The defect this closes: a failed import used to be unclearable until the next sweep."""
+    engine = await _engine(tmp_path)
+    service = await _service(tmp_path, engine)
+    store = PortabilityJobStore(engine)
+    try:
+        job = await store.create(tenant=TENANT, kind="import", status="failed")
+        directory = service.job_dir(TENANT, job.id)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "archive.tar.gz").write_bytes(b"staged bytes")
+
+        async with _client(service) as client:
+            assert [
+                j["id"] for j in (await client.get("/platform/v1/portability/jobs")).json()
+            ] == [job.id]
+            removed = await client.delete(f"/platform/v1/portability/imports/{job.id}")
+            assert removed.status_code == 204
+            assert (await client.get("/platform/v1/portability/jobs")).json() == []
+            assert (
+                await client.get(f"/platform/v1/portability/imports/{job.id}")
+            ).status_code == 404
+        # The staged archive goes with the row: staging is a cache, and the row that pointed
+        # at it was the only thing that would ever have swept it.
+        assert not directory.exists()
+    finally:
+        await engine.dispose()
+
+
+async def test_a_finished_export_can_be_removed_with_its_archive(tmp_path: Path) -> None:
+    """The symmetric half — Recent jobs lists both kinds, so Remove must work on both."""
+    engine = await _engine(tmp_path)
+    service = await _service(tmp_path, engine)
+    try:
+        async with _client(service) as client:
+            job_id = (await client.post("/platform/v1/portability/exports")).json()["id"]
+            assert (await _ready(client, job_id))["status"] == "ready"
+            staged = await service.job(tenant=TENANT, job_id=job_id)
+            assert staged is not None
+            archive = Path(staged.archive_path or "")
+            assert archive.exists()
+
+            assert (
+                await client.delete(f"/platform/v1/portability/exports/{job_id}")
+            ).status_code == 204
+            assert (await client.get("/platform/v1/portability/jobs")).json() == []
+            assert (
+                await client.get(f"/platform/v1/portability/exports/{job_id}/archive")
+            ).status_code == 404
+        assert not archive.exists()
+    finally:
+        await engine.dispose()
+
+
+async def test_a_running_job_cannot_be_removed(tmp_path: Path) -> None:
+    """A delete is not a cancel: the background task still owns the staging directory."""
+    engine = await _engine(tmp_path)
+    service = await _service(tmp_path, engine)
+    store = PortabilityJobStore(engine)
+    try:
+        job = await store.create(tenant=TENANT, kind="import", status="running")
+        async with _client(service) as client:
+            refused = await client.delete(f"/platform/v1/portability/imports/{job.id}")
+            assert refused.status_code == 409
+            assert "running" in refused.json()["detail"]
+            assert (await client.get("/platform/v1/portability/jobs")).json() != []
+    finally:
+        await engine.dispose()
+
+
+async def test_removing_the_wrong_kind_or_another_tenants_job_is_a_404(tmp_path: Path) -> None:
+    """A foreign id reads as absent, never as forbidden — one tenant learns nothing (#1)."""
+    engine = await _engine(tmp_path)
+    service = await _service(tmp_path, engine)
+    store = PortabilityJobStore(engine)
+    try:
+        theirs = await store.create(tenant="other", kind="import", status="failed")
+        mine = await store.create(tenant=TENANT, kind="import", status="failed")
+        async with _client(service) as client:
+            assert (
+                await client.delete(f"/platform/v1/portability/imports/{theirs.id}")
+            ).status_code == 404
+            # An import id offered to the export route is just as absent.
+            assert (
+                await client.delete(f"/platform/v1/portability/exports/{mine.id}")
+            ).status_code == 404
+            assert (await client.delete("/platform/v1/portability/imports/nope")).status_code == 404
+            # Neither refusal removed anything.
+            assert [
+                j["id"] for j in (await client.get("/platform/v1/portability/jobs")).json()
+            ] == [mine.id]
+    finally:
+        await engine.dispose()

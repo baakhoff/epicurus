@@ -1235,6 +1235,32 @@ staging, was never offered, and was swept a day later.
 one would succeed. The listing never sweeps: a read must not cost the operator their last
 archive.
 
+**And removable on demand** (#903). `DELETE /platform/v1/portability/exports/{id}` and
+`…/imports/{id}` drop the row and its staging directory (`204`; `404` for another tenant's id
+or the wrong kind; `409` while the job is running — a delete is not a cancel, and the
+background task still owns the directory). Sweeping alone was not enough: it runs only when the
+*next* job starts and only past the retention window, so a failed import sat on the Settings
+card with its report for a day and the operator's only way to clear it was to start another
+job. Both kinds, because the job list is not split by kind and a Remove that appeared on some
+rows only would read as a broken button.
+
+**A `NULL` costs one row, never a set** (#903). `import_set` applies a whole set in one
+transaction — the right trade for ten thousand `agent_messages`, and a trap for anything that
+raises mid-stream. A record can carry `null` for a column the model declares `NOT NULL`,
+legitimately: the additive reconcile (#249, ADR-0067) adds a post-release column *nullable*
+when the model gives it no `server_default`, because there is nothing to backfill a populated
+table with, and each store's row-reader coerces the `NULL` to the model's Python-side default
+on every read. Portability read it verbatim, and an explicit `None` in an `insert()` bypasses
+the ORM default — so on a fresh target, where `create_all` made the column `NOT NULL` for
+real, one `module_prefs` row took the operator's entire `prefs` set with it.
+`TableSpec.encode` now normalises on the way out and `TableSpec.normalize` on the way in, from
+the column's own metadata rather than a hand-kept list, so a column added tomorrow inherits the
+rule; the comparison that decides `skipped` vs `updated` runs against the *normalised* record,
+so re-applying an archive written before this is still a no-op. A null with no default to fill
+it (`maintenance_schedule_prefs.cadence`, `agent_messages.content`) is refused before the
+statement is built: `skipped`, with a warning naming the column, and the rest of the set lands.
+The same rule binds every module's own import (ADR-0133).
+
 ### Chat bridges (ADR-0062)
 
 The connect/manage surface behind the web shell's **Settings → Chat bridges** (#369). The core

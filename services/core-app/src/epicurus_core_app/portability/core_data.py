@@ -23,6 +23,17 @@ Two rules make that safe:
   database; each spec names the *natural* key that identifies the row across installations,
   and the upsert matches on that. This is what makes a second apply a no-op instead of a
   duplicate.
+* **A ``NULL`` that the model has a default for never travels as ``NULL``** (#903). The
+  additive reconcile (:mod:`epicurus_core.db`) adds a post-release column *nullable* when the
+  model gives it no ``server_default``, because there is nothing to backfill a populated table
+  with — so a long-lived source carries ``NULL`` in a column the model declares ``NOT NULL``,
+  and its row-reader coerces that to the Python-side default on every read. A fresh target
+  never went through that reconcile: ``create_all`` made the column ``NOT NULL``, and an
+  explicit ``None`` in an ``insert()`` bypasses the ORM default and violates the constraint.
+  Both ends therefore normalise here — :meth:`TableSpec.encode` on the way out and
+  :meth:`TableSpec.normalize` on the way in — so an archive is portable regardless of which
+  reconcile its source went through, and a null that *cannot* be defaulted costs one row
+  rather than the whole set.
 """
 
 from __future__ import annotations
@@ -36,6 +47,7 @@ from typing import Any, cast
 from sqlalchemy import (
     Boolean,
     Column,
+    ColumnDefault,
     DateTime,
     LargeBinary,
     Table,
@@ -117,8 +129,12 @@ class TableSpec:
         return "|".join(str(data.get(name)) for name in self.key)
 
     def encode(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        """A JSON-safe mapping of the travelling columns of *row*."""
-        return {c.name: _encode_value(c, row[c.name]) for c in self.columns if c.name in row}
+        """A JSON-safe mapping of the travelling columns of *row*, nulls defaulted (#903)."""
+        return {
+            c.name: _encode_value(c, _defaulted(c, row[c.name]))
+            for c in self.columns
+            if c.name in row
+        }
 
     def decode(self, data: Mapping[str, Any]) -> dict[str, Any]:
         """Python values for the travelling columns present in *data* (unknown keys dropped)."""
@@ -128,6 +144,30 @@ class TableSpec:
             for name, value in data.items()
             if name in by_name
         }
+
+    def normalize(self, data: Mapping[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+        """*data* with every fillable ``NULL`` replaced, plus the ones that could not be.
+
+        The import-side twin of :meth:`encode`, and the reason an archive written *before*
+        this rule existed still applies cleanly: the normalisation is what the reader does,
+        not only what the writer did. Returns the JSON-side mapping (unknown keys kept — the
+        caller still has to notice them) and the names of columns the model marks ``NOT NULL``
+        that carry a ``NULL`` with no default to fill it. That second list is what turns a
+        set-level ``IntegrityError`` into one skipped row with the column named.
+        """
+        by_name = {c.name: c for c in self.columns}
+        normalized: dict[str, Any] = {}
+        undefaultable: list[str] = []
+        for name, value in data.items():
+            column = by_name.get(name)
+            if column is None:
+                normalized[name] = value
+                continue
+            filled = _defaulted(column, value)
+            if filled is None and not column.nullable:
+                undefaultable.append(name)
+            normalized[name] = filled
+        return normalized, tuple(sorted(undefaultable))
 
 
 def _table(model: Any) -> Table:
@@ -312,6 +352,44 @@ def _canonical_dt(value: datetime) -> str:
     return aware.isoformat()
 
 
+_NO_DEFAULT = object()
+"""Sentinel — a column has no Python-side scalar default. ``None`` cannot say this: a
+``default=None`` and a missing default are different facts, and so are ``default=False``
+and no default at all."""
+
+
+def _scalar_default(column: Column[Any]) -> Any:
+    """*column*'s Python-side scalar default, or :data:`_NO_DEFAULT`.
+
+    Only a plain value counts. A callable (``default=uuid4``) or a SQL expression
+    (``server_default=func.now()``) is evaluated by the ``insert`` itself, which already
+    happens for a column the record omits entirely — there is no value to write into a
+    *record* here, and inventing one at export time would freeze one installation's clock
+    into the archive.
+    """
+    default = column.default
+    # ``ColumnDefault`` is the plain-value branch of SQLAlchemy's default hierarchy; a
+    # ``CallableColumnDefault`` / ``Sequence`` has no ``arg`` to read, which is the same
+    # answer as having none.
+    if not isinstance(default, ColumnDefault) or not default.is_scalar:
+        return _NO_DEFAULT
+    return default.arg
+
+
+def _defaulted(column: Column[Any], value: Any) -> Any:
+    """*value*, with a ``NULL`` in a ``NOT NULL`` column replaced by the column's default.
+
+    A **nullable** column is left alone: its ``NULL`` is data (``recurrence`` on a plain
+    event, ``lead_minutes`` meaning "use the fallback"), and defaulting it would rewrite the
+    operator's rows. Only a column the model declares ``NOT NULL`` can be carrying an
+    impossible value, and only the reconcile (#249, ADR-0067) can have put it there.
+    """
+    if value is not None or column.nullable:
+        return value
+    default = _scalar_default(column)
+    return None if default is _NO_DEFAULT else default
+
+
 def _encode_value(column: Column[Any], value: Any) -> Any:
     """One column value, JSON-safe."""
     if value is None:
@@ -368,6 +446,13 @@ async def import_set(
     (``skipped``); present and different → overwritten (``updated``). That third case is
     what makes an import *merge* rather than duplicate, and the second is what makes
     applying the same archive twice a no-op.
+
+    A record the set cannot accept is a fourth case, and it costs **one row** (#903). The set
+    runs in one transaction, so an exception raised mid-stream loses everything the set had
+    already written — the operator's whole `prefs` set, for one bad `module_prefs` row. The
+    two shapes that can do that are both answered before a statement is built: a kind this
+    version has no table for, and a ``NULL`` in a ``NOT NULL`` column with no default to fill
+    it. Both are ``skipped`` with a warning naming what was dropped.
     """
     by_kind = {spec.kind: spec for spec in CORE_SETS[set_name]}
     report = ImportReport(schema_name=CORE_SCHEMA)
@@ -434,8 +519,23 @@ async def _upsert(
     dry_run: bool,
 ) -> tuple[ImportOutcome, set[str], str | None]:
     """Apply one record; return its outcome, unknown fields, and any warning it earned."""
-    values = spec.decode(record.data)
+    data, undefaultable = spec.normalize(record.data)
+    values = spec.decode(data)
     unknown = set(record.data) - set(values)
+    if undefaultable:
+        # A null this version cannot fill. It would fail the target's NOT NULL constraint and
+        # take the *whole set* with it (one transaction), so it is refused here, before the
+        # statement is built: one row lost, named, and the other ten thousand still land.
+        # Deliberately not naming the record id: warnings are de-duplicated by text, and a
+        # source that lost a column lost it on every row — an id per line would put ten
+        # thousand near-identical sentences in the report. The kind and the column say what
+        # to look at; ``counts[kind].skipped`` says how many.
+        return (
+            "skipped",
+            unknown,
+            f"{record.kind}: no value for {', '.join(undefaultable)} and no default to fill "
+            "it; the affected row(s) were skipped and the rest of the set still landed",
+        )
     key_conditions = [spec.table.c[name] == values.get(name) for name in spec.key]
     conditions = [spec.table.c.tenant == tenant, *key_conditions]
     existing = (await conn.execute(select(spec.table).where(*conditions))).mappings().first()
@@ -458,7 +558,10 @@ async def _upsert(
     encoded = spec.encode(dict(existing))
     # Compare only the columns this record actually carries: a column added after the
     # archive was written is absent here, and its default is not a difference to overwrite.
-    if all(encoded.get(name) == record.data[name] for name in values):
+    # Against the *normalised* record, never the raw one: an archive's `null` and the target's
+    # already-defaulted row are the same value, and reading them as a difference would report
+    # `updated` on every re-apply of a pre-#903 archive.
+    if all(encoded.get(name) == data[name] for name in values):
         return "skipped", unknown, None
     if not dry_run:
         await conn.execute(update(spec.table).where(*conditions).values(**values))

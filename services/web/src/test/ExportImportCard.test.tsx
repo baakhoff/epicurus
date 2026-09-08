@@ -20,6 +20,7 @@ const mockUpload = vi.fn();
 const mockApply = vi.fn();
 const mockImport = vi.fn();
 const mockJobs = vi.fn();
+const mockRemove = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -34,6 +35,7 @@ vi.mock("@/lib/api", async () => {
       uploadPortabilityArchive: (...a: unknown[]) => mockUpload(...a),
       applyPortabilityImport: (...a: unknown[]) => mockApply(...a),
       portabilityImport: (...a: unknown[]) => mockImport(...a),
+      removePortabilityJob: (...a: unknown[]) => mockRemove(...a),
     },
   };
 });
@@ -175,6 +177,8 @@ beforeEach(() => {
   mockApply.mockReset();
   mockImport.mockReset();
   mockJobs.mockReset();
+  mockRemove.mockReset();
+  mockRemove.mockResolvedValue(undefined);
   mockJobs.mockResolvedValue([]);
 });
 
@@ -517,5 +521,67 @@ describe("ExportImportCard — re-attaching after a reload (#877)", () => {
       screen.queryByRole("link", { name: /\/exports\/job-0\/archive/ }),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/archive cleaned up/i)).toBeInTheDocument();
+  });
+});
+
+describe("ExportImportCard — letting go of a settled job (#903)", () => {
+  it("removes a failed import and clears its report from the card", async () => {
+    const failed = { ...DONE_IMPORT, status: "failed", error: "calendar import returned 500" };
+    mockUpload.mockResolvedValue(STAGED_IMPORT);
+    mockApply.mockResolvedValue(failed);
+    mockImport.mockResolvedValue(failed);
+    render(<ExportImportCard />, { wrapper });
+
+    await waitFor(() => expect(mockJobs).toHaveBeenCalled());
+    pickFile();
+    fireEvent.click(await screen.findByRole("button", { name: /apply import/i }));
+    expect(await screen.findByText(/calendar import returned 500/i)).toBeInTheDocument();
+
+    fireEvent.click((await screen.findAllByRole("button", { name: /remove/i }))[0]);
+    await waitFor(() => expect(mockRemove).toHaveBeenCalledWith("import", "imp-1"));
+    // The whole point: the report goes with the row, not on the next reload.
+    await waitFor(() =>
+      expect(screen.queryByText(/calendar import returned 500/i)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("offers Remove on every settled row of the job list, both kinds", async () => {
+    mockJobs.mockResolvedValue([
+      READY_EXPORT_ROW,
+      { ...READY_EXPORT_ROW, id: "imp-9", kind: "import", status: "done" },
+    ]);
+    mockExport.mockResolvedValue(READY_EXPORT);
+    mockImport.mockResolvedValue(DONE_IMPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    expect(await screen.findByText(/recent jobs \(2\)/i)).toBeInTheDocument();
+    const buttons = screen.getAllByRole("button", { name: /remove/i });
+    fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() => expect(mockRemove).toHaveBeenCalledWith("import", "imp-9"));
+    await waitFor(() => expect(screen.getByText(/recent jobs \(1\)/i)).toBeInTheDocument());
+  });
+
+  it("never offers Remove for a job that is still running", async () => {
+    mockJobs.mockResolvedValue([RUNNING_EXPORT_ROW]);
+    mockExport.mockResolvedValue(RUNNING_EXPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    expect(await screen.findByText(/recent jobs \(1\)/i)).toBeInTheDocument();
+    // The core answers 409 for a running job — a delete is not a cancel — so the shell must
+    // not offer the press at all rather than let it earn a refusal.
+    expect(screen.queryByRole("button", { name: /remove/i })).not.toBeInTheDocument();
+  });
+
+  it("renders the core's refusal when a remove is rejected", async () => {
+    mockJobs.mockResolvedValue([READY_EXPORT_ROW]);
+    mockExport.mockResolvedValue(READY_EXPORT);
+    mockRemove.mockRejectedValue(new Error("job is running; it cannot be removed"));
+    render(<ExportImportCard />, { wrapper });
+
+    expect(await screen.findByText(/recent jobs \(1\)/i)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: /remove/i })[0]);
+    expect(await screen.findByText(/cannot be removed/i)).toBeInTheDocument();
+    // Nothing was hidden on a failed removal — the row is still there.
+    expect(screen.getByText(/recent jobs \(1\)/i)).toBeInTheDocument();
   });
 });

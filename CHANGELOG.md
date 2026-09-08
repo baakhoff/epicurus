@@ -12,6 +12,27 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A `NULL` no longer costs the operator a whole data set, and a failed import can be thrown
+  away** (#903) — dogfooding the tenant import on a second machine lost the entire `prefs` set
+  to a single row. A column added after its table's first release with no `server_default` is
+  reconciled in **nullable** (there is nothing to backfill a populated table with), so a
+  long-lived source carries `NULL` where the model says `NOT NULL` — and a fresh target, whose
+  `create_all` made the column `NOT NULL` for real, refused the insert. One row took
+  `llm_prefs`, `saved_models`, `model_settings`, the timezone, the page order, push and the
+  maintenance schedule with it, because a set is one transaction. Both ends now normalise a
+  `NULL` to the column's own default, on export *and* on import, so an archive is portable
+  whichever reconcile its source went through and archives already written apply cleanly; a
+  null that genuinely cannot be defaulted costs **one row**, named with its column in the
+  report, and the rest of the set still lands. The same shape was what made `calendar` answer
+  the import with a 500 and lose the calendar — `all_day` and `excluded` are exactly that kind
+  of column — and it is fixed the same way at both ends. And a job can now be **removed**:
+  `DELETE /platform/v1/portability/{exports,imports}/{id}` drops the row and its staged
+  archive (409 while it is running — a delete is not a cancel), with Remove on the import half
+  and on every settled row of Recent jobs. Until now jobs left only through the retention
+  sweep, which runs when the *next* job starts, so a failed import sat on the card with its
+  report for a day and the only way to clear it was to cause another one. `core-app`
+  0.122.0→0.123.0 (MINOR) · `web` 0.143.1→0.144.0 (MINOR) · `calendar` 0.21.0→0.21.1 (PATCH).
+
 - **An import now shows its work, and the Platform card tells the truth** (#893) — dogfooding a
   tenant import on a second machine found four things the Settings card never said. The upload
   was a busy button: `fetch` cannot report upload progress at all, so the archive route is now

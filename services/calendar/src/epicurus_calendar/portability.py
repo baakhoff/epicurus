@@ -42,7 +42,7 @@ round-trip built on them would have to reconstruct a raw row from a resolved ``E
 losing exactly the columns that make a series a series. Reading the columns also means a
 column added tomorrow travels tomorrow, with no edit here.
 
-Two rules make that safe, and they are the contract's (ADR-0133), not this module's:
+Three rules make that safe, and they are the contract's (ADR-0133), not this module's:
 
 * **``tenant`` never travels.** Stripped on export, re-applied from the *target* tenant on
   import — the archive is data, the tenant is context (constraint #1).
@@ -51,6 +51,12 @@ Two rules make that safe, and they are the contract's (ADR-0133), not this modul
   ``<series>_<original start>`` for an exception — see :func:`~epicurus_calendar.db.instance_id`),
   and the upsert matches on it. That is what makes a second apply a no-op rather than a
   second copy of everybody's calendar.
+* **A ``NULL`` the model has a default for never travels as ``NULL``** (#903). ``all_day``
+  and ``excluded`` postdate this table's first release and carry no ``server_default``, so
+  the additive reconcile added them nullable on every install provisioned before them; a
+  fresh target's ``create_all`` makes them ``NOT NULL``. Both ends normalise
+  (:func:`_defaulted`), so an archive from a reconciled source lands on a fresh schema
+  instead of 500-ing the import and taking the whole calendar with it.
 """
 
 from __future__ import annotations
@@ -60,7 +66,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import Boolean, Column, DateTime, Table, insert, select, update
+from sqlalchemy import (
+    Boolean,
+    Column,
+    ColumnDefault,
+    DateTime,
+    Table,
+    insert,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from epicurus_calendar.db import _StoredEvent
@@ -117,8 +132,12 @@ class _TableSpec:
         return "|".join(str(data.get(name)) for name in self.key)
 
     def encode(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        """A JSON-safe mapping of the travelling columns of *row*."""
-        return {c.name: _encode_value(c, row[c.name]) for c in self.columns if c.name in row}
+        """A JSON-safe mapping of the travelling columns of *row*, nulls defaulted (#903)."""
+        return {
+            c.name: _encode_value(c, _defaulted(c, row[c.name]))
+            for c in self.columns
+            if c.name in row
+        }
 
     def decode(self, data: Mapping[str, Any]) -> dict[str, Any]:
         """Python values for the travelling columns present in *data* (unknown keys dropped)."""
@@ -128,6 +147,29 @@ class _TableSpec:
             for name, value in data.items()
             if name in by_name
         }
+
+    def normalize(self, data: Mapping[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+        """*data* with every fillable ``NULL`` replaced, plus the ones that could not be.
+
+        The import-side twin of :meth:`encode`, and the reason an archive written by a
+        calendar that never had this rule still applies cleanly: the normalisation is what
+        the *reader* does, not only what the writer did. The second half of the answer names
+        the ``NOT NULL`` columns still carrying a ``NULL`` — one skipped row rather than an
+        ``IntegrityError`` that takes the whole calendar with it.
+        """
+        by_name = {c.name: c for c in self.columns}
+        normalized: dict[str, Any] = {}
+        undefaultable: list[str] = []
+        for name, value in data.items():
+            column = by_name.get(name)
+            if column is None:
+                normalized[name] = value
+                continue
+            filled = _defaulted(column, value)
+            if filled is None and not column.nullable:
+                undefaultable.append(name)
+            normalized[name] = filled
+        return normalized, tuple(sorted(undefaultable))
 
 
 def _table(model: Any) -> Table:
@@ -160,6 +202,49 @@ def _canonical_dt(value: datetime) -> str:
     """
     aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
     return aware.isoformat()
+
+
+_NO_DEFAULT = object()
+"""Sentinel — a column has no Python-side scalar default. ``None`` cannot say this: a
+``default=None`` and a missing default are different facts, and so are ``default=False``
+and no default at all."""
+
+
+def _scalar_default(column: Column[Any]) -> Any:
+    """*column*'s Python-side scalar default, or :data:`_NO_DEFAULT`.
+
+    Only a plain value counts: a callable or SQL-expression default is evaluated by the
+    ``insert`` itself — which is already what happens for a column a record omits entirely —
+    and there is no value to write into a *record* here.
+    """
+    default = column.default
+    # ``ColumnDefault`` is the plain-value branch of SQLAlchemy's default hierarchy; a
+    # ``CallableColumnDefault`` / ``Sequence`` has no ``arg`` to read, which is the same
+    # answer as having none.
+    if not isinstance(default, ColumnDefault) or not default.is_scalar:
+        return _NO_DEFAULT
+    return default.arg
+
+
+def _defaulted(column: Column[Any], value: Any) -> Any:
+    """*value*, with a ``NULL`` in a ``NOT NULL`` column replaced by the column's default.
+
+    ``all_day`` and ``excluded`` are ``Boolean, default=False`` with no ``server_default``,
+    so the additive reconcile (#249, ADR-0067) added them **nullable** to every database
+    provisioned before they existed — there is nothing to backfill a populated table with —
+    and ``_row_to_event`` coerces the resulting ``NULL`` to ``False`` on every read. A fresh
+    target never went through that reconcile: ``create_all`` made both columns ``NOT NULL``,
+    and an explicit ``None`` in an ``insert()`` bypasses the ORM default and violates the
+    constraint. That is the calendar half of #903 — a 500 on ``POST /import``, and the whole
+    calendar lost with it. Normalising at both ends is the fix.
+
+    A **nullable** column is left alone: its ``NULL`` is data (``recurrence`` on a plain
+    event, ``timezone`` on a pre-#446 master), and defaulting it would rewrite real rows.
+    """
+    if value is not None or column.nullable:
+        return value
+    default = _scalar_default(column)
+    return None if default is _NO_DEFAULT else default
 
 
 def _encode_value(column: Column[Any], value: Any) -> Any:
@@ -251,13 +336,15 @@ class CalendarPortability:
                     report.record(record.kind, "skipped")
                     report.warn(f"unknown record kind {record.kind!r}; skipped")
                     continue
-                outcome, unknown = await _upsert(conn, spec, record, tenant_id, dry_run)
+                outcome, unknown, warning = await _upsert(conn, spec, record, tenant_id, dry_run)
                 report.record(record.kind, outcome)
                 if unknown:
                     report.warn(
                         f"{record.kind}: ignored unknown field(s) {sorted(unknown)} "
                         "written by a different schema"
                     )
+                if warning:
+                    report.warn(warning)
         return report
 
 
@@ -267,15 +354,28 @@ async def _upsert(
     record: PortabilityRecord,
     tenant: str,
     dry_run: bool,
-) -> tuple[ImportOutcome, set[str]]:
-    """Apply one record; return its outcome and any fields this version does not know.
+) -> tuple[ImportOutcome, set[str], str | None]:
+    """Apply one record; return its outcome, unknown fields, and any warning it earned.
 
     Every lookup is tenant-scoped, and both tables' uniqueness is per tenant
     (``uq_calendar_tenant_event``; the prefs table's tenant primary key), so one tenant's
     import can never collide with — or reach — another's rows.
     """
-    values = spec.decode(record.data)
+    data, undefaultable = spec.normalize(record.data)
+    values = spec.decode(data)
     unknown = set(record.data) - set(values)
+    if undefaultable:
+        # A null this version cannot fill. It would fail the target's NOT NULL constraint and
+        # take the whole stream with it (one transaction), so it is refused before the
+        # statement is built: one event lost, named, and the rest of the calendar still lands.
+        # No record id in the sentence — warnings de-duplicate by text, and a source that lost
+        # a column lost it on every row (#903).
+        return (
+            "skipped",
+            unknown,
+            f"{record.kind}: no value for {', '.join(undefaultable)} and no default to fill "
+            "it; the affected row(s) were skipped and the rest of the stream still landed",
+        )
     conditions = [
         spec.table.c.tenant == tenant,
         *[spec.table.c[name] == values.get(name) for name in spec.key],
@@ -284,12 +384,15 @@ async def _upsert(
     if existing is None:
         if not dry_run:
             await conn.execute(insert(spec.table).values(tenant=tenant, **values))
-        return "created", unknown
+        return "created", unknown, None
     encoded = spec.encode(dict(existing))
     # Compare only the columns this record actually carries: a column added after the archive
     # was written is absent here, and its default is not a difference worth overwriting.
-    if all(encoded.get(name) == record.data[name] for name in values):
-        return "skipped", unknown
+    # Against the *normalised* record, never the raw one: an archive's `null` and the target's
+    # already-defaulted row are the same value, and reading them as a difference would report
+    # `updated` on every re-apply of an archive written before #903.
+    if all(encoded.get(name) == data[name] for name in values):
+        return "skipped", unknown, None
     if not dry_run:
         await conn.execute(update(spec.table).where(*conditions).values(**values))
-    return "updated", unknown
+    return "updated", unknown, None

@@ -12,6 +12,17 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The published Helm chart is a release artifact, not a nightly one** (#907, part of #889) —
+  `testing.yml` published a chart on every push to `testing`, which made the on-demand
+  `0.0.0-testing.<sha>` build look like a supported second track when the standard install and
+  upgrade path is, and always was, a tagged release pulled straight from
+  `oci://ghcr.io/baakhoff/charts/epicurus`. `testing.yml` no longer packages a chart at all;
+  `release.yml` is unchanged. A new `chart-branch.yml` packages and pushes a chart from any
+  branch or sha on a manual dispatch only — `0.0.0-<branch>.<7-char sha>`, with the dispatch
+  naming the image tag that ref's images actually carry (`testing` is the one ref that can
+  infer it) — for the owner's own testing clusters, never automatic and never the documented
+  path. `docs/infrastructure/kubernetes.md` now leads with the OCI release install and gives the
+  checkout path its honest name, "developing the chart." No component bump.
 - **A tool's failure message reaches the model again under mcp 2.1** (#908) — mcp 2.1
   started masking any tool exception other than `ToolError`/`ResourceError`/`MCPError` as
   a bare `Error executing tool <name>`, dropping the model-actionable text every module's

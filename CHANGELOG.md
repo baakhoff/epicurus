@@ -12,6 +12,17 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A tool's failure message reaches the model again under mcp 2.1** (#908) — mcp 2.1
+  started masking any tool exception other than `ToolError`/`ResourceError`/`MCPError` as
+  a bare `Error executing tool <name>`, dropping the model-actionable text every module's
+  `KeyError`/`ValueError`/`LookupError` failures rely on (37 tests across every module
+  caught it). `EpicurusModule.tool()` now wraps the registered function so any exception
+  it raises reaches the SDK already as a `ToolError` carrying the original message,
+  chained — restoring the mcp 2.0 contract exactly. The wrapper logs an anticipated
+  exception (`KeyError`/`LookupError`/`ValueError`/`PermissionError`/`FileNotFoundError`)
+  at WARNING and everything else at ERROR with a traceback, so a genuine crash still
+  stands out to the operator even though the model still gets a readable message. `mcp`'s
+  floor moves to `>=2.1,<3`. `epicurus-core` 0.37.0→0.38.0 (MINOR).
 - **An import now shows its work, and the Platform card tells the truth** (#893) — dogfooding a
   tenant import on a second machine found four things the Settings card never said. The upload
   was a busy button: `fetch` cannot report upload progress at all, so the archive route is now

@@ -689,7 +689,11 @@ saved* (*saved · not indexed* if the re-index round-trip failed); a **read-only
 watched Obsidian mount (ADR-0035) — never saves. The list and editor panes are each width-
 and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bearing
 toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
-bar.
+bar. The `.ProseMirror` surface sets `caret-color: var(--ep-accent)` (#904) rather than
+leaving the text cursor to inherit `color`, so it reads in the archetype's accent hue instead
+of blending into the surrounding text — dark theme especially, where the two used to sit at
+the same lightness; the rule inherits into code blocks, blockquotes and the title line too,
+since none of them set their own `caret-color`.
 
 When the page is **`versioned`** (notes, knowledge — ADR-0046), a **History** control lists
 past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh

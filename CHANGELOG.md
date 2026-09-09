@@ -12,6 +12,14 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The editor's text cursor now reads in the accent colour, not body text** (#904) —
+  dogfooding turned up a `.ProseMirror` caret that inherited `color` and so sat at exactly
+  the same lightness as the character next to it, easy to lose in a long note, worst on the
+  dark theme. `caret-color: var(--ep-accent)` fixes it with one inherited declaration —
+  it reaches code blocks, blockquotes and the title line too, since none of them set their
+  own `caret-color` — and needs no custom ProseMirror decoration: the accent clears WCAG
+  1.4.11's 3:1 non-text floor against the editor surface on every theme/power combination.
+  `web` 0.143.0→0.143.1 (PATCH).
 - **The published Helm chart is a release artifact, not a nightly one** (#907, part of #889) —
   `testing.yml` published a chart on every push to `testing`, which made the on-demand
   `0.0.0-testing.<sha>` build look like a supported second track when the standard install and

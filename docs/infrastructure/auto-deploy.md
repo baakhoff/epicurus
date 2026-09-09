@@ -181,30 +181,34 @@ new one in-place — no compose restart needed.
 
 ## Helm chart
 
-Both `release.yml` and `testing.yml` publish the in-repo chart
-(`infra/k8s/epicurus/`, name `epicurus`) to GHCR as an OCI artifact **alongside**
-the images built in the same run — no separate chart repo or index to host.
-This is a second distribution channel for the same images, for operators
-running Kubernetes instead of (or beside) Docker Compose; it does not change
-anything about the Compose flow described above.
+The published Helm chart is a **release artifact** (#907): `release.yml`
+publishes the in-repo chart (`infra/k8s/epicurus/`, name `epicurus`) to GHCR as
+an OCI artifact **alongside** the images built in the same run, on every
+`vX.Y.Z` tag — no separate chart repo or index to host. This is a second
+distribution channel for the same images, for operators running Kubernetes
+instead of (or beside) Docker Compose; it does not change anything about the
+Compose flow described above. `testing.yml` no longer publishes a chart on
+every push — that was the pre-#907 behavior.
 
 | Track | Chart version | `appVersion` | Pushed to |
 | --- | --- | --- | --- |
 | Release (`vX.Y.Z` tag) | `X.Y.Z` (matches the tag) | `X.Y.Z` | `oci://ghcr.io/baakhoff/charts/epicurus` |
-| `testing` branch | `0.0.0-testing.<7-char sha>` | `testing` | `oci://ghcr.io/baakhoff/charts/epicurus` |
+| A branch, on-demand only (`chart-branch.yml`, manual dispatch) | `0.0.0-<branch>.<7-char sha>` | the dispatch's `image_tag` input (`testing` if `ref` is the `testing` branch) | `oci://ghcr.io/baakhoff/charts/epicurus` |
 
-The chart version tracks the release tag one-for-one, so there is only one
-number to reason about. Pulling and installing needs no separate registry
-login step beyond what OCI-aware Helm already does for a public GHCR package:
+The release chart version tracks the release tag one-for-one, so there is only
+one number to reason about for the standard path. Pulling and installing needs
+no registry login — the GHCR package is public:
 
 ```bash
 # latest release
 helm pull oci://ghcr.io/baakhoff/charts/epicurus --version 0.2.0
 helm install epicurus oci://ghcr.io/baakhoff/charts/epicurus --version 0.2.0
-
-# a testing-branch build, e.g. from the workflow run's short sha
-helm install epicurus oci://ghcr.io/baakhoff/charts/epicurus --version 0.0.0-testing.abcdef1
 ```
+
+A branch chart is an on-demand, opt-in path for the owner's own testing
+clusters — dispatched by hand, never automatic. See
+[Kubernetes → Tracking a branch (opt-in)](kubernetes.md) for how to dispatch it
+and why `0.0.0-<branch>.<sha>` always sorts below a real release.
 
 Both publish steps are guarded so they no-op (skip, not fail) on any commit
 where `infra/k8s/epicurus/Chart.yaml` doesn't exist yet — the chart and the

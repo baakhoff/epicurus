@@ -1799,6 +1799,23 @@ export const PortabilityPreview = z.object({
 });
 export type PortabilityPreview = z.infer<typeof PortabilityPreview>;
 
+/** A module's *byte* half of an import (#876) — the object store's answer, not the rows'.
+ *
+ * `conflicts` are ids that already held **different** bytes here; import is additive, so they
+ * were left exactly as they are. `missing` are ids the archive *listed* but whose bytes it does
+ * not carry — omitted at export by the per-blob ceiling, or already gone on the source: the
+ * catalogue record still landed, so the entry is there and its download 404s until the operator
+ * copies the file across. `null` on a component says that module carried no bytes at all, which
+ * is a different fact from carrying none successfully. */
+export const PortabilityBlobTransfer = z.object({
+  written: z.number().default(0),
+  skipped: z.number().default(0),
+  bytes_written: z.number().default(0),
+  conflicts: z.array(z.string()).default([]),
+  missing: z.array(z.string()).default([]),
+});
+export type PortabilityBlobTransfer = z.infer<typeof PortabilityBlobTransfer>;
+
 /** What one component did on apply. */
 export const PortabilityComponentResult = z.object({
   name: z.string(),
@@ -1807,6 +1824,9 @@ export const PortabilityComponentResult = z.object({
   created: z.number().default(0),
   updated: z.number().default(0),
   skipped: z.number().default(0),
+  // Only a module that carried bytes has one; `.nullish()` so an older core, which never sends
+  // the field, parses the same as a module with no object store.
+  blobs: PortabilityBlobTransfer.nullish(),
   warnings: z.array(z.string()).default([]),
   reason: z.string().nullish(),
   error: z.string().nullish(),

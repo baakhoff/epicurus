@@ -28,14 +28,22 @@
  *  on screen for a day, and the only way to clear it was to start another job. Remove is
  *  offered on any job that is not running, in the import half and on every row of the job
  *  list; a running one is refused by the core (a delete is not a cancel) and so is not
- *  offered here either. */
+ *  offered here either.
+ *
+ *  **A module's bytes are part of the report** (#905). The `blobs` half of a component result
+ *  (#876) used to be rendered nowhere, so an object left untouched because its bytes differ
+ *  here, or one whose record arrived without its file, was visible only in the JSON — for the
+ *  one component (`storage`) where an operator most needs to know. It is now a `bytes` line and
+ *  the two id lists under the component's own row, in the same plain style as everything else
+ *  here. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Download, Trash2, Upload } from "lucide-react";
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 
 import { Badge, Button, Card, Dot, Spinner } from "@/components/ui";
 import { api, ApiError, ProxyError } from "@/lib/api";
 import type {
+  PortabilityBlobTransfer,
   PortabilityComponent,
   PortabilityImportJob,
   PortabilityJobSummary,
@@ -271,23 +279,97 @@ function PreviewRows({ components }: { components: PortabilityPreviewComponent[]
   );
 }
 
+/** One of a component's two blob id lists, collapsed past five (#905).
+ *
+ *  A `<details>` rather than a truncating "…and 40 more": the ids are what the operator has to
+ *  act on — copy those files across, reconcile those conflicts — so the list has to be readable
+ *  in full, and a storage module with forty conflicts must not push the rest of the report off
+ *  the card to say so. The one-line meaning sits on the summary, because a bare list of object
+ *  ids under the word "missing" tells nobody what to do about them. */
+function BlobIdList({ label, meaning, ids }: { label: string; meaning: string; ids: string[] }) {
+  if (ids.length === 0) return null;
+  const heading = `${ids.length} ${label} — ${meaning}`;
+  if (ids.length <= 5) {
+    return (
+      <li className="ml-4 flex flex-col gap-0.5 text-warn">
+        <span>{heading}</span>
+        <ul className="ml-3 flex flex-col gap-0.5 text-ink-dim">
+          {ids.map((id) => (
+            <li key={id} className="font-mono break-all">
+              {id}
+            </li>
+          ))}
+        </ul>
+      </li>
+    );
+  }
+  return (
+    <li className="ml-4">
+      <details className="text-warn">
+        <summary className="cursor-pointer">{heading}</summary>
+        <ul className="mt-0.5 ml-3 flex flex-col gap-0.5 text-ink-dim">
+          {ids.map((id) => (
+            <li key={id} className="font-mono break-all">
+              {id}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </li>
+  );
+}
+
+/** A module's byte half, under its component row (#905, the report shape from #876).
+ *
+ *  Rendered nowhere until now: the card showed record counts and the file space's conflicts, so
+ *  a blob **conflict** (bytes already here that differ, left untouched) or a **missing** object
+ *  (its catalogue row landed, its bytes did not — its download 404s) was invisible unless the
+ *  operator read the JSON. Counted apart from the records above because a hundred rows and a
+ *  hundred objects are the same number and wildly different imports. Nothing at all when
+ *  `blobs` is `null`: that module has no object store, which is not the same as having carried
+ *  nothing. Plain rows in the shell's own style — the core decides what these mean, the card
+ *  shows them (ADR-0018). */
+function BlobRows({ blobs }: { blobs: PortabilityBlobTransfer }) {
+  return (
+    <>
+      <li className="ml-4 text-ink-dim">
+        bytes: {blobs.written.toLocaleString()} written · {blobs.skipped.toLocaleString()} skipped
+        · {formatBytes(blobs.bytes_written)}
+      </li>
+      <BlobIdList
+        label="already here with different content"
+        meaning="left untouched"
+        ids={blobs.conflicts}
+      />
+      <BlobIdList
+        label="record imported, bytes not in the archive"
+        meaning="copy the file across, its download answers 404 until then"
+        ids={blobs.missing}
+      />
+    </>
+  );
+}
+
 function ReportView({ report }: { report: PortabilityReport }) {
   return (
     <div className="flex flex-col gap-2">
       <ul className="flex flex-col gap-0.5 text-[11px] text-ink-dim">
         {report.components.map((component) => (
-          <li key={`${component.kind}-${component.name}`} className="flex items-center gap-1.5">
-            <Dot tone={stateTone(component.state)} />
-            <span className="text-ink">{component.name}</span>
-            {component.state === "included" ? (
-              <span>
-                · {component.created} new · {component.updated} updated · {component.skipped}{" "}
-                unchanged
-              </span>
-            ) : (
-              <span className="text-warn">· {component.reason ?? component.error}</span>
-            )}
-          </li>
+          <Fragment key={`${component.kind}-${component.name}`}>
+            <li className="flex items-center gap-1.5">
+              <Dot tone={stateTone(component.state)} />
+              <span className="text-ink">{component.name}</span>
+              {component.state === "included" ? (
+                <span>
+                  · {component.created} new · {component.updated} updated · {component.skipped}{" "}
+                  unchanged
+                </span>
+              ) : (
+                <span className="text-warn">· {component.reason ?? component.error}</span>
+              )}
+            </li>
+            {component.blobs && <BlobRows blobs={component.blobs} />}
+          </Fragment>
         ))}
       </ul>
       <p className="text-[11px] text-ink-dim">

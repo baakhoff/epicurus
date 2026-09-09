@@ -765,9 +765,9 @@ that already held **different** bytes here and were left untouched; `missing` ar
 archive listed but whose bytes it does not carry (omitted at export by the per-blob ceiling) —
 their catalogue records still landed, so the entry is listed and its download 404s until the
 operator copies those bytes across by hand. Both are repeated in `warnings` so a reader that
-only shows warnings still sees them. The Settings card renders neither list today (#886): it
-shows per-component record counts and the file-space conflicts, so a blob conflict or a missing
-object is visible only in this response.
+only shows warnings still sees them. Since #905 the Settings card renders all of it — a `bytes`
+line and both id lists under the component's own row, collapsed past five entries — so this
+response is no longer the only place a blob conflict or a missing object can be seen.
 
 `conflicts` names files that exist here with **different bytes** — never overwritten. After
 the components land, the core runs the file rescan for **this import's tenant** with the

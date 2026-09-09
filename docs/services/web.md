@@ -439,12 +439,19 @@ card also holds the ids it has removed for the life of the page, so the row *and
 own copy of the job — the thing actually rendering the report — go at the press rather than
 whenever the invalidated list comes back.
 
-Deliberately **not** rendered (#886): a module's byte half. `ImportComponentResult.blobs` —
-how many objects were written, and the `conflicts` / `missing` id lists — and the
-per-component `warnings` that repeat them are in the report the API returns but have no row
-in this card; an operator who needs them reads
-`GET /platform/v1/portability/imports/{id}`. The same holds on the way out: the export
-progress list shows a component's record `count`, not its `blobs` / `blob_bytes`.
+**A module's bytes are in the report** (#905, the shape from #876). Under a component's own
+row, when `ImportComponentResult.blobs` is not `null`: a `bytes` line
+(`N written · M skipped · X MB`), then the `conflicts` and `missing` id lists, each headed with
+its one-line meaning — "already here with different content — left untouched", and "record
+imported, bytes not in the archive — copy the file across, its download answers 404 until then".
+Counted apart from the records above because a hundred rows and a hundred objects are the same
+number and wildly different imports. A list past five entries is a `<details>` rather than a
+truncation: the ids are what the operator has to act on, so all of them stay reachable, and a
+`storage` module with forty conflicts must not push the rest of the report off the card to say
+so. Nothing at all when `blobs` is `null` — that module has no object store, which is not the
+same fact as having carried nothing. Until this the whole byte half was visible only in
+`GET /platform/v1/portability/imports/{id}` (#886). The export half is unchanged: its progress
+list still shows a component's record `count`, not its `blobs` / `blob_bytes`.
 
 Both halves poll only while a job is in flight and stop the moment it settles — as does the
 job list itself — so an idle Settings page settles back to no requests. Every verdict,

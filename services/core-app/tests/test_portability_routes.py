@@ -557,5 +557,9 @@ async def test_removing_the_wrong_kind_or_another_tenants_job_is_a_404(tmp_path:
             assert [
                 j["id"] for j in (await client.get("/platform/v1/portability/jobs")).json()
             ] == [mine.id]
+        # The listing above is tenant-scoped, so it can never show `theirs` either way —
+        # which means it cannot tell "refused" from "deleted, then reported absent". Read
+        # the other tenant's row back through the store to say which one happened.
+        assert await store.get(tenant="other", job_id=theirs.id) is not None
     finally:
         await engine.dispose()

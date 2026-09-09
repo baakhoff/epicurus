@@ -1206,7 +1206,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-storage"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "services/storage" }
 dependencies = [
     { name = "aioboto3" },

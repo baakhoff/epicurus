@@ -378,7 +378,7 @@ async def test_agent_reads_back_an_object_it_saved(
 ) -> None:
     # storage_read serves source="object" entries from the store, so a file the agent saved
     # via storage_object_put reads back through the same tool that now lists it.
-    module = build_module(index, objects, platform=_NoFilesPlatform(), tenant=TENANT)  # type: ignore[arg-type]
+    module = build_module(index, objects, platform=_NoFilesPlatform(), default_tenant=TENANT)  # type: ignore[arg-type]
     await module.call_tool("storage_object_put", {"key": "memo.md", "content": "agent wrote it"})
     _content, structured = await module.call_tool("storage_read", {"path": "memo.md"})
     assert isinstance(structured, dict)

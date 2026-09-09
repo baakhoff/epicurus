@@ -12,6 +12,19 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Storage honours the tenant the caller names** (#836) — the object store's rows and buckets
+  were always tenant-scoped, but the module resolved the tenant for you: its HTTP routes pinned
+  `DEFAULT_TENANT_ID` and merely *accepted* a `tenant_id` "for forward-compatibility", so a
+  request that named a tenant was answered from the default's catalogue — the tenant-first
+  constraint honoured everywhere except at the door. Browse, search, read, download, move and
+  delete now scope to the `tenant_id` the caller sends; `/ingest` files an upload under the
+  `x-epicurus-tenant` header the core's upload sink has always stamped on it; an unnamed tenant
+  still means the deployment default, so a single-tenant self-host is unchanged; and a malformed
+  one is a 400 rather than a silent cross-tenant read. The MCP tools resolve the bound tenant
+  context instead of one fixed at build time — nothing carries a tenant across the MCP hop yet,
+  so today they still land on the default. No backfill: every existing row and object was
+  written under the default tenant and stays exactly where it is. `storage` 0.10.0→0.11.0
+  (MINOR).
 - **The import report shows what happened to your files, not just your records** (#905) — a
   module that keeps files of its own (`storage`, where every chat attachment lives) has always
   answered an import with a byte-level result: how many objects were written, which ones were

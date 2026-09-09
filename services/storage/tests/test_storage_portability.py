@@ -149,7 +149,7 @@ async def test_the_module_declares_portable_and_serves_all_five_routes(
         FileIndex(create_async_engine("sqlite+aiosqlite:///:memory:")),
         MemObjectStore(),
         platform=None,  # type: ignore[arg-type]
-        tenant=TENANT,
+        default_tenant=TENANT,
     )
     assert (await module.manifest()).portable is True
 

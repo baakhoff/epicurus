@@ -74,8 +74,9 @@ gh workflow run chart-branch.yml -f ref=testing
 gh workflow run chart-branch.yml -f ref=some-branch -f image_tag=testing
 ```
 
-The published version is `0.0.0-<branch>.<7-char sha>` (a "/" in the branch
-name is flattened to "-", since semver forbids it in a prerelease identifier).
+The published version is `0.0.0-<branch>.<7-char sha>` (anything in the branch
+name that is not a letter or a digit — the "/" in `feat/foo`, an "_" — is
+flattened to "-", since a semver prerelease identifier allows only those three).
 That sorts below every real release, so `helm upgrade` from a branch chart back
 onto a tagged release is an ordinary upgrade — nothing about tracking a branch
 leaves the install in a state a release can't supersede:

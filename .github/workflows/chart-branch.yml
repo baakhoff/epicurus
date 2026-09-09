@@ -69,8 +69,12 @@ jobs:
         run: |
           sha="$(git rev-parse --short=7 HEAD)"
           # Sanitize the ref for use as a semver prerelease identifier — a
-          # branch name may contain "/" (feat/foo), which semver forbids.
-          branch="$(echo "${REF}" | tr -c 'a-zA-Z0-9' '-')"
+          # branch name may contain "/" (feat/foo) or "_", which semver forbids.
+          # `printf` rather than `echo`: `tr -c` translates the trailing newline
+          # too, so `echo testing` would yield "testing-" and publish
+          # 0.0.0-testing-.<sha> instead of the documented 0.0.0-testing.<sha>
+          # — valid semver, so helm would accept it silently.
+          branch="$(printf '%s' "${REF}" | tr -c 'a-zA-Z0-9' '-')"
           version="0.0.0-${branch}.${sha}"
           owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           helm package infra/k8s/epicurus --version "${version}" --app-version "${APP_VERSION}" -d /tmp/charts

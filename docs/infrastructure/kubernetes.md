@@ -124,6 +124,7 @@ Every value, with its default. Anything not listed is not a key.
 | `defaultTenantId` | `local` | `DEFAULT_TENANT_ID`. Tenant is first-class even at one tenant. |
 | `logLevel` | `info` | `LOG_LEVEL`. |
 | `appEnv` | `production` | `APP_ENV`. Anything but `local` renders JSON logs. |
+| `clusterDomain` | `cluster.local` | The cluster's DNS suffix. Only the web shell needs it: nginx resolves the core at request time and never applies `/etc/resolv.conf`'s `search` list, so that one name has to be fully qualified (#894). |
 | `tracing.enabled` | `false` | `OTEL_TRACES_ENABLED`. |
 | `tracing.endpoint` | `http://tempo:4318` | `OTEL_EXPORTER_OTLP_ENDPOINT`. The chart ships no collector. |
 | `storageClass` | `""` | Applied to every PVC the chart creates; blank = cluster default. |
@@ -188,15 +189,20 @@ The full list is in [`config`](../reference/config.md).
 | `web.resources` | `requests: 20m / 64Mi` | |
 | `web.podAnnotations` / `.nodeSelector` / `.tolerations` / `.affinity` | empty | |
 | `web.extraEnv` | `{}` | |
+| `web.coreAppUrl` | `""` | Blank derives `http://core-app.<release namespace>.svc.<clusterDomain>:8080`. Set it only if you front the core with something else. |
 
-The only env the chart sets is `CORE_APP_URL=http://core-app:8080`. The shell's
+The only env the chart sets is `CORE_APP_URL`, and it is the one **fully qualified**
+endpoint in the chart: `http://core-app.<namespace>.svc.<clusterDomain>:8080`, from
+`clusterDomain` above, or `web.coreAppUrl` verbatim when you set it. The shell's
 nginx proxies `/platform/` through a variable, so it resolves that name at request
 time — and the image derives the resolver it uses from `/etc/resolv.conf` at
 start-up, which is what makes it work in a pod. That is a sibling change to this
 chart (#891); a web image built before it hardcodes Docker's embedded DNS
 (`127.0.0.11`), and against such an image every `/platform/` request 502s while
 both probes stay green, because `/healthz` is a static handler that never touches
-the resolver.
+the resolver. The **name** has to be qualified for the same reason the resolver
+address did: nginx applies no `search` list of its own, so a bare `core-app`
+SERVFAILs in a pod — which is exactly how the `k8s-smoke` gate found it (#894).
 
 ### `modules` and `moduleDefaults`
 
@@ -458,9 +464,16 @@ The OpenBao bootstrap script is exercised for real in
 `tests/test_chart_services.py`, against a stub of the OpenBao and Kubernetes APIs:
 fresh init, a re-run that changes nothing, a restarted (re-sealed) vault, a
 revoked app token, and the refusal when the unseal key is gone. It is also
-shellchecked by the `shell-lint` gate like every other script in the repo. No
-cluster is booted anywhere in CI; a kind-based `k8s-smoke` mirroring
-`infra/ci/smoke.sh` is filed as a follow-up.
+shellchecked by the `shell-lint` gate like every other script in the repo.
+
+**Proven by the [`k8s-smoke` gate](../developer/testing.md#kubernetes-smoke-gate).**
+Every push installs this chart on a kind cluster and runs `infra/ci/smoke-assert.sh`
+— the same assertions the Compose `runtime-smoke` gate runs — plus the OpenBao
+bootstrap Job and unseal loop, the web shell's `/platform/` proxy,
+`CONTAINER_RUNTIME=auto` resolving to the Kubernetes arm inside a pod, and a
+confirmed module removal scaling that module's Deployment to zero through the
+chart's Role. It is not a required check until it has been green for two weeks
+(#894).
 
 ### Upgrading
 
@@ -581,9 +594,12 @@ See [Secrets (OpenBao)](secrets.md) for what lives in the vault.
   `epicurus-openbao` and snapshot the PVCs with your cluster's own tooling.
 - **No `/ready` distinct from `/health`.** Both probes hit the same endpoint, so a
   service that is up but not yet warm still reports ready.
-- **No kind-based smoke gate yet.** `chart-validate` proves the chart renders and
-  schema-validates; it does not prove the stack boots. `runtime-smoke` still does
-  that for compose, and the same assertions on a kind cluster are filed.
+- **No `helm upgrade` proof.** The [`k8s-smoke`](../developer/testing.md#kubernetes-smoke-gate)
+  gate boots this chart on a kind cluster on every push, so the stack is known to
+  come up — but only ever as a *fresh* install. A second install into the same
+  cluster (`helm upgrade`, or a reinstall over surviving PVCs) is still unproven,
+  and the OpenBao `DAC_OVERRIDE` defect was exactly that class: fine on a fresh
+  volume, a crash-loop on a populated one.
 
 ## What is *not* in the chart, on purpose
 

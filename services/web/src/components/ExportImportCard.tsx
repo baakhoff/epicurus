@@ -21,14 +21,29 @@
  *  upload reports how far the bytes have got, the apply ticks over sets → modules → files →
  *  the two rebuilds, and Apply is impossible — not merely refused — the moment anything is in
  *  flight. The one line the card does not compose is the "no embedding model" warning: that
- *  sentence is written by the core and rendered here verbatim. */
+ *  sentence is written by the core and rendered here verbatim.
+ *
+ *  **A settled job can be let go of** (#903). Jobs used to leave only through the retention
+ *  sweep, which runs when the *next* job starts — so a failed import sat here with its report
+ *  on screen for a day, and the only way to clear it was to start another job. Remove is
+ *  offered on any job that is not running, in the import half and on every row of the job
+ *  list; a running one is refused by the core (a delete is not a cancel) and so is not
+ *  offered here either.
+ *
+ *  **A module's bytes are part of the report** (#905). The `blobs` half of a component result
+ *  (#876) used to be rendered nowhere, so an object left untouched because its bytes differ
+ *  here, or one whose record arrived without its file, was visible only in the JSON — for the
+ *  one component (`storage`) where an operator most needs to know. It is now a `bytes` line and
+ *  the two id lists under the component's own row, in the same plain style as everything else
+ *  here. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Download, Upload } from "lucide-react";
-import { useRef, useState } from "react";
+import { AlertTriangle, Download, Trash2, Upload } from "lucide-react";
+import { Fragment, useRef, useState } from "react";
 
 import { Badge, Button, Card, Dot, Spinner } from "@/components/ui";
 import { api, ApiError, ProxyError } from "@/lib/api";
 import type {
+  PortabilityBlobTransfer,
   PortabilityComponent,
   PortabilityImportJob,
   PortabilityJobSummary,
@@ -84,6 +99,51 @@ function ComponentRows({ components }: { components: PortabilityComponent[] }) {
   );
 }
 
+/** "Remove" — forget one settled job and the archive staged for it (#903).
+ *
+ *  A failed import used to be permanent furniture: jobs leave the list only through the
+ *  retention sweep, which runs when the *next* job starts, so the operator's only way to
+ *  clear a failure was to cause another one and wait a day. Offered on both kinds because
+ *  "Recent jobs" lists both, and never while a job is running — the core refuses that with a
+ *  409 (a delete is not a cancel), and offering a button that cannot work is worse than not
+ *  offering it. `onRemoved` is what lets the half that is *displaying* the job let go of it;
+ *  invalidating the list alone would leave a removed job's report on screen. */
+function RemoveJob({
+  kind,
+  jobId,
+  onRemoved,
+}: {
+  kind: "export" | "import";
+  jobId: string;
+  onRemoved: (jobId: string) => void;
+}) {
+  const qc = useQueryClient();
+  const remove = useMutation({
+    mutationFn: () => api.removePortabilityJob(kind, jobId),
+    onSuccess: () => {
+      onRemoved(jobId);
+      qc.removeQueries({ queryKey: [`portability-${kind}`, jobId] });
+      qc.invalidateQueries({ queryKey: ["portability-jobs"] });
+    },
+  });
+  return (
+    <>
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 text-ink-faint underline hover:text-ink-dim disabled:opacity-50"
+        disabled={remove.isPending}
+        onClick={() => remove.mutate()}
+      >
+        <Trash2 size={11} />
+        Remove
+      </button>
+      {remove.isError && (
+        <span className="text-danger">· {(remove.error as Error).message}</span>
+      )}
+    </>
+  );
+}
+
 /** `messaging/discord` → `discord`: the module's name is already the line's subject, so
  *  repeating it in every path turns "messaging — discord, telegram" into noise. */
 function secretLabel(module: string, path: string): string {
@@ -118,7 +178,13 @@ function SecretsNotice({ secrets }: { secrets: PortabilitySecrets }) {
   );
 }
 
-function ExportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
+function ExportHalf({
+  jobs,
+  removed,
+}: {
+  jobs: PortabilityJobSummary[];
+  removed: string[];
+}) {
   const qc = useQueryClient();
   const [jobId, setJobId] = useState<string | null>(null);
   const start = useMutation({
@@ -132,7 +198,10 @@ function ExportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
   // What this tab started, else the newest export the server knows about (the list is
   // newest-first). That second clause is the whole of #877: after a reload there is no
   // `jobId`, and without it a finished archive is never offered to anyone.
-  const activeId = jobId ?? jobs.find((entry) => entry.kind === "export")?.id ?? null;
+  // …unless it has since been removed from the list (#903): a job id this tab is still
+  // holding must not outlive the row it names, or the half keeps polling a 404.
+  const own = jobId !== null && !removed.includes(jobId) ? jobId : null;
+  const activeId = own ?? jobs.find((entry) => entry.kind === "export")?.id ?? null;
   const summary = jobs.find((entry) => entry.id === activeId) ?? null;
   const job = useQuery({
     queryKey: ["portability-export", activeId],
@@ -146,7 +215,7 @@ function ExportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
   // Until the list has caught up with a job we just started, assume the archive we are
   // about to stage will be there — the alternative is hiding a live download link for a
   // second. A resumed job is only ever trusted to the server's answer.
-  const archiveAvailable = summary ? summary.archive_available : jobId !== null;
+  const archiveAvailable = summary ? summary.archive_available : own !== null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -210,23 +279,97 @@ function PreviewRows({ components }: { components: PortabilityPreviewComponent[]
   );
 }
 
+/** One of a component's two blob id lists, collapsed past five (#905).
+ *
+ *  A `<details>` rather than a truncating "…and 40 more": the ids are what the operator has to
+ *  act on — copy those files across, reconcile those conflicts — so the list has to be readable
+ *  in full, and a storage module with forty conflicts must not push the rest of the report off
+ *  the card to say so. The one-line meaning sits on the summary, because a bare list of object
+ *  ids under the word "missing" tells nobody what to do about them. */
+function BlobIdList({ label, meaning, ids }: { label: string; meaning: string; ids: string[] }) {
+  if (ids.length === 0) return null;
+  const heading = `${ids.length} ${label} — ${meaning}`;
+  if (ids.length <= 5) {
+    return (
+      <li className="ml-4 flex flex-col gap-0.5 text-warn">
+        <span>{heading}</span>
+        <ul className="ml-3 flex flex-col gap-0.5 text-ink-dim">
+          {ids.map((id) => (
+            <li key={id} className="font-mono break-all">
+              {id}
+            </li>
+          ))}
+        </ul>
+      </li>
+    );
+  }
+  return (
+    <li className="ml-4">
+      <details className="text-warn">
+        <summary className="cursor-pointer">{heading}</summary>
+        <ul className="mt-0.5 ml-3 flex flex-col gap-0.5 text-ink-dim">
+          {ids.map((id) => (
+            <li key={id} className="font-mono break-all">
+              {id}
+            </li>
+          ))}
+        </ul>
+      </details>
+    </li>
+  );
+}
+
+/** A module's byte half, under its component row (#905, the report shape from #876).
+ *
+ *  Rendered nowhere until now: the card showed record counts and the file space's conflicts, so
+ *  a blob **conflict** (bytes already here that differ, left untouched) or a **missing** object
+ *  (its catalogue row landed, its bytes did not — its download 404s) was invisible unless the
+ *  operator read the JSON. Counted apart from the records above because a hundred rows and a
+ *  hundred objects are the same number and wildly different imports. Nothing at all when
+ *  `blobs` is `null`: that module has no object store, which is not the same as having carried
+ *  nothing. Plain rows in the shell's own style — the core decides what these mean, the card
+ *  shows them (ADR-0018). */
+function BlobRows({ blobs }: { blobs: PortabilityBlobTransfer }) {
+  return (
+    <>
+      <li className="ml-4 text-ink-dim">
+        bytes: {blobs.written.toLocaleString()} written · {blobs.skipped.toLocaleString()} skipped
+        · {formatBytes(blobs.bytes_written)}
+      </li>
+      <BlobIdList
+        label="already here with different content"
+        meaning="left untouched"
+        ids={blobs.conflicts}
+      />
+      <BlobIdList
+        label="record imported, bytes not in the archive"
+        meaning="copy the file across, its download answers 404 until then"
+        ids={blobs.missing}
+      />
+    </>
+  );
+}
+
 function ReportView({ report }: { report: PortabilityReport }) {
   return (
     <div className="flex flex-col gap-2">
       <ul className="flex flex-col gap-0.5 text-[11px] text-ink-dim">
         {report.components.map((component) => (
-          <li key={`${component.kind}-${component.name}`} className="flex items-center gap-1.5">
-            <Dot tone={stateTone(component.state)} />
-            <span className="text-ink">{component.name}</span>
-            {component.state === "included" ? (
-              <span>
-                · {component.created} new · {component.updated} updated · {component.skipped}{" "}
-                unchanged
-              </span>
-            ) : (
-              <span className="text-warn">· {component.reason ?? component.error}</span>
-            )}
-          </li>
+          <Fragment key={`${component.kind}-${component.name}`}>
+            <li className="flex items-center gap-1.5">
+              <Dot tone={stateTone(component.state)} />
+              <span className="text-ink">{component.name}</span>
+              {component.state === "included" ? (
+                <span>
+                  · {component.created} new · {component.updated} updated · {component.skipped}{" "}
+                  unchanged
+                </span>
+              ) : (
+                <span className="text-warn">· {component.reason ?? component.error}</span>
+              )}
+            </li>
+            {component.blobs && <BlobRows blobs={component.blobs} />}
+          </Fragment>
         ))}
       </ul>
       <p className="text-[11px] text-ink-dim">
@@ -316,7 +459,15 @@ function UploadProgress({ fraction }: { fraction: number | null }) {
   );
 }
 
-function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
+function ImportHalf({
+  jobs,
+  removed,
+  onRemoved,
+}: {
+  jobs: PortabilityJobSummary[];
+  removed: string[];
+  onRemoved: (jobId: string) => void;
+}) {
   const qc = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
   const [job, setJob] = useState<PortabilityImportJob | null>(null);
@@ -346,19 +497,23 @@ function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
   });
   // This tab's own job, else the newest import on the server — so a reload lands back on
   // the preview it was about to apply, or the report of the apply it started.
-  const activeId = job?.id ?? jobs.find((entry) => entry.kind === "import")?.id ?? null;
+  // …unless it has since been removed (#903). Dropping it here rather than only invalidating
+  // the list is what makes Remove *clear the card*: this tab's own copy is the thing on
+  // screen, and a report whose job no longer exists would otherwise stay up until a reload.
+  const own = job !== null && !removed.includes(job.id) ? job : null;
+  const activeId = own?.id ?? jobs.find((entry) => entry.kind === "import")?.id ?? null;
   const polled = useQuery({
     queryKey: ["portability-import", activeId],
     queryFn: () => api.portabilityImport(activeId as string),
     // Fetch once to re-attach to a job this tab did not start; after that, only while the
     // apply is actually in flight (an upload's answer is already the whole preview).
-    enabled: activeId !== null && (job === null || job.status === "running"),
+    enabled: activeId !== null && (own === null || own.status === "running"),
     refetchInterval: (query) => (query.state.data?.status === "running" ? POLL_MS : false),
   });
 
   // The polled copy wins once it exists: it is the one that grows a report. `settled` seeds
   // it, so "the polled copy" is never older than the last answer this tab received.
-  const current = polled.data ?? job;
+  const current = polled.data ?? own;
   const preview = current?.preview ?? null;
   const busy = upload.isPending || apply.isPending || current?.status === "running";
   // Apply is offered only for a job that is still staged, and never while anything is in
@@ -400,6 +555,13 @@ function ImportHalf({ jobs }: { jobs: PortabilityJobSummary[] }) {
           >
             Apply import
           </Button>
+        )}
+        {/* A settled import can be cleared straight from the half that is showing it (#903) —
+            a failed one especially, since its report is what the operator is looking at. */}
+        {current && !busy && (
+          <span className="flex items-center gap-1.5 text-[11px] text-ink-dim">
+            <RemoveJob kind="import" jobId={current.id} onRemoved={onRemoved} />
+          </span>
         )}
       </div>
       {sent !== null && <UploadProgress fraction={sent.fraction} />}
@@ -463,7 +625,13 @@ function jobTone(status: string): "ok" | "danger" | "accent" | "dim" {
  *
  *  The halves already show the newest of each kind in full; this is the rest, so a second
  *  export started an hour ago is still downloadable rather than merely swept. */
-function RecentJobs({ jobs }: { jobs: PortabilityJobSummary[] }) {
+function RecentJobs({
+  jobs,
+  onRemoved,
+}: {
+  jobs: PortabilityJobSummary[];
+  onRemoved: (jobId: string) => void;
+}) {
   if (jobs.length === 0) return null;
   return (
     <details className="text-[11px] text-ink-dim" data-testid="portability-jobs">
@@ -484,6 +652,9 @@ function RecentJobs({ jobs }: { jobs: PortabilityJobSummary[] }) {
                 <span className="text-warn">· archive cleaned up</span>
               )
             )}
+            {job.status !== "running" && (
+              <RemoveJob kind={job.kind} jobId={job.id} onRemoved={onRemoved} />
+            )}
           </li>
         ))}
       </ul>
@@ -501,7 +672,13 @@ export function ExportImportCard() {
     refetchInterval: (query) =>
       query.state.data?.some((job) => job.status === "running") ? POLL_MS : false,
   });
-  const list = jobs.data ?? [];
+  // What this tab has removed, held here rather than left to the list's next refetch (#903).
+  // The delete answers 204 and the invalidated list arrives a moment later; without this the
+  // row — and, worse, the report the half is rendering from its own copy — would linger in
+  // between, so a press would look like it had done nothing.
+  const [removed, setRemoved] = useState<string[]>([]);
+  const forget = (jobId: string) => setRemoved((ids) => [...ids, jobId]);
+  const list = (jobs.data ?? []).filter((job) => !removed.includes(job.id));
 
   return (
     <Card>
@@ -513,13 +690,13 @@ export function ExportImportCard() {
         archive twice changes nothing.
       </p>
       <div className="flex flex-col gap-4">
-        <ExportHalf jobs={list} />
+        <ExportHalf jobs={list} removed={removed} />
         <div className="border-t border-edge pt-3">
-          <ImportHalf jobs={list} />
+          <ImportHalf jobs={list} removed={removed} onRemoved={forget} />
         </div>
         {list.length > 0 && (
           <div className="border-t border-edge pt-3">
-            <RecentJobs jobs={list} />
+            <RecentJobs jobs={list} onRemoved={forget} />
           </div>
         )}
       </div>

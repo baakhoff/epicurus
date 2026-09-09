@@ -6,9 +6,12 @@ client that returns a canned tool listing (tool-filter tests), so ``discover``
 exercises filtering logic without a live server.
 
 The transport-hardening tests at the bottom (#472) are the exception — they run a *real*
-MCPServer streamable-HTTP server, because the behavior they pin (a tool's ``is_error``, a
+module streamable-HTTP server, because the behavior they pin (a tool's ``is_error``, a
 refused connection, and an RPC read timeout) only manifests through the live anyio task
-group the mocks bypass.
+group the mocks bypass. The server is built through ``EpicurusModule`` rather than a bare
+``MCPServer`` (#908) — a bare server no longer matches production behavior under mcp
+>=2.1, which masks a tool's plain exception unless it passes through the wrapper every
+real module registers through.
 """
 
 from __future__ import annotations
@@ -21,11 +24,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import uvicorn
-from mcp.server.mcpserver import MCPServer
 from mcp.types import TextContent
 from starlette.applications import Starlette
 
 import epicurus_core_app.agent.mcp_host as mcp_host
+from epicurus_core import EpicurusModule
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 
 
@@ -306,11 +309,12 @@ async def test_builtin_respects_disabled_filter() -> None:
 # its transport in an anyio task group, so a failure raised *inside* the ``async with`` — a
 # refused/dropped socket, an RPC read timeout, *or* a tool's ``is_error`` — can escape
 # wrapped in a (possibly nested) ``ExceptionGroup``, never a bare exception. These tests
-# run a real MCPServer so the host's contract is verified against production behavior: a
-# tool error surfaces as a bare ``ToolCallError`` (raised after the block, so it is never
-# wrapped), while a genuinely unreachable module normalizes to ``ModuleUnreachableError`` —
-# the structured signal ``ModuleRegistry.invoke`` maps to a controlled 502 instead of a raw
-# ``NetworkError``.
+# run a real module (built through ``EpicurusModule``, #908 — a bare ``MCPServer`` no
+# longer matches production behavior under mcp >=2.1) so the host's contract is verified
+# against production behavior: a tool error surfaces as a bare ``ToolCallError`` (raised
+# after the block, so it is never wrapped), while a genuinely unreachable module
+# normalizes to ``ModuleUnreachableError`` — the structured signal ``ModuleRegistry.invoke``
+# maps to a controlled 502 instead of a raw ``NetworkError``.
 
 
 def _free_port() -> int:
@@ -324,18 +328,25 @@ def _free_port() -> int:
 
 
 def _live_module_app() -> Starlette:
-    """An MCPServer streamable-HTTP app with a ``echo`` tool and a raising ``boom`` tool."""
-    mcp = MCPServer("test-module")
+    """An ``EpicurusModule`` streamable-HTTP app with an ``echo`` tool and a raising ``boom`` tool.
 
-    @mcp.tool()
+    Registered through ``EpicurusModule.tool()`` — not a bare ``MCPServer`` — because that
+    wrapper is the seam every real module's tools pass through (#908): it turns a tool's
+    plain exception into a ``ToolError`` before mcp's own ``Tool.run()`` can mask it under
+    mcp >=2.1. ``module.mcp.streamable_http_app()`` (not ``module.http_app()``) keeps the
+    SDK's default ``/mcp`` path, matching the URL this fixture's caller already builds.
+    """
+    module = EpicurusModule("test-module")
+
+    @module.tool()
     def echo(message: str) -> str:
         return f"echo: {message}"
 
-    @mcp.tool()
+    @module.tool()
     def boom() -> str:
         raise ValueError("event 'e1' not found")
 
-    return mcp.streamable_http_app()
+    return module.mcp.streamable_http_app()
 
 
 @contextlib.asynccontextmanager

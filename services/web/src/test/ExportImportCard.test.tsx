@@ -20,6 +20,7 @@ const mockUpload = vi.fn();
 const mockApply = vi.fn();
 const mockImport = vi.fn();
 const mockJobs = vi.fn();
+const mockRemove = vi.fn();
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -34,6 +35,7 @@ vi.mock("@/lib/api", async () => {
       uploadPortabilityArchive: (...a: unknown[]) => mockUpload(...a),
       applyPortabilityImport: (...a: unknown[]) => mockApply(...a),
       portabilityImport: (...a: unknown[]) => mockImport(...a),
+      removePortabilityJob: (...a: unknown[]) => mockRemove(...a),
     },
   };
 });
@@ -175,6 +177,8 @@ beforeEach(() => {
   mockApply.mockReset();
   mockImport.mockReset();
   mockJobs.mockReset();
+  mockRemove.mockReset();
+  mockRemove.mockResolvedValue(undefined);
   mockJobs.mockResolvedValue([]);
 });
 
@@ -517,5 +521,149 @@ describe("ExportImportCard — re-attaching after a reload (#877)", () => {
       screen.queryByRole("link", { name: /\/exports\/job-0\/archive/ }),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/archive cleaned up/i)).toBeInTheDocument();
+  });
+});
+
+describe("ExportImportCard — letting go of a settled job (#903)", () => {
+  it("removes a failed import and clears its report from the card", async () => {
+    const failed = { ...DONE_IMPORT, status: "failed", error: "calendar import returned 500" };
+    mockUpload.mockResolvedValue(STAGED_IMPORT);
+    mockApply.mockResolvedValue(failed);
+    mockImport.mockResolvedValue(failed);
+    render(<ExportImportCard />, { wrapper });
+
+    await waitFor(() => expect(mockJobs).toHaveBeenCalled());
+    pickFile();
+    fireEvent.click(await screen.findByRole("button", { name: /apply import/i }));
+    expect(await screen.findByText(/calendar import returned 500/i)).toBeInTheDocument();
+
+    fireEvent.click((await screen.findAllByRole("button", { name: /remove/i }))[0]);
+    await waitFor(() => expect(mockRemove).toHaveBeenCalledWith("import", "imp-1"));
+    // The whole point: the report goes with the row, not on the next reload.
+    await waitFor(() =>
+      expect(screen.queryByText(/calendar import returned 500/i)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("offers Remove on every settled row of the job list, both kinds", async () => {
+    mockJobs.mockResolvedValue([
+      READY_EXPORT_ROW,
+      { ...READY_EXPORT_ROW, id: "imp-9", kind: "import", status: "done" },
+    ]);
+    mockExport.mockResolvedValue(READY_EXPORT);
+    mockImport.mockResolvedValue(DONE_IMPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    expect(await screen.findByText(/recent jobs \(2\)/i)).toBeInTheDocument();
+    const buttons = screen.getAllByRole("button", { name: /remove/i });
+    fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() => expect(mockRemove).toHaveBeenCalledWith("import", "imp-9"));
+    await waitFor(() => expect(screen.getByText(/recent jobs \(1\)/i)).toBeInTheDocument());
+  });
+
+  it("never offers Remove for a job that is still running", async () => {
+    mockJobs.mockResolvedValue([RUNNING_EXPORT_ROW]);
+    mockExport.mockResolvedValue(RUNNING_EXPORT);
+    render(<ExportImportCard />, { wrapper });
+
+    expect(await screen.findByText(/recent jobs \(1\)/i)).toBeInTheDocument();
+    // The core answers 409 for a running job — a delete is not a cancel — so the shell must
+    // not offer the press at all rather than let it earn a refusal.
+    expect(screen.queryByRole("button", { name: /remove/i })).not.toBeInTheDocument();
+  });
+
+  it("renders the core's refusal when a remove is rejected", async () => {
+    mockJobs.mockResolvedValue([READY_EXPORT_ROW]);
+    mockExport.mockResolvedValue(READY_EXPORT);
+    mockRemove.mockRejectedValue(new Error("job is running; it cannot be removed"));
+    render(<ExportImportCard />, { wrapper });
+
+    expect(await screen.findByText(/recent jobs \(1\)/i)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: /remove/i })[0]);
+    expect(await screen.findByText(/cannot be removed/i)).toBeInTheDocument();
+    // Nothing was hidden on a failed removal — the row is still there.
+    expect(screen.getByText(/recent jobs \(1\)/i)).toBeInTheDocument();
+  });
+});
+
+describe("ExportImportCard — a module's bytes in the report (#905)", () => {
+  /** `storage` is the one module that carries bytes, so it is the one the report shape is
+   *  about: a few objects written, one left alone because it differs here, one whose record
+   *  arrived without its file. */
+  const storage = {
+    name: "storage",
+    kind: "module",
+    state: "included",
+    created: 61,
+    updated: 0,
+    skipped: 0,
+    blobs: {
+      written: 57,
+      skipped: 2,
+      bytes_written: 3_145_728,
+      conflicts: ["uploads/edited.pdf"] as string[],
+      missing: ["uploads/film.mov"] as string[],
+    },
+    warnings: [] as string[],
+  };
+
+  const doneWith = (component: typeof storage) => ({
+    ...DONE_IMPORT,
+    report: {
+      ...DONE_IMPORT.report,
+      components: [...DONE_IMPORT.report.components, component],
+    },
+  });
+
+  const withBlobs = doneWith(storage);
+
+  async function renderDone(job: unknown): Promise<void> {
+    mockJobs.mockResolvedValue([{ ...READY_EXPORT_ROW, id: "imp-1", kind: "import", status: "done" }]);
+    mockImport.mockResolvedValue(job);
+    render(<ExportImportCard />, { wrapper });
+    await waitFor(() => expect(mockImport).toHaveBeenCalled());
+  }
+
+  it("counts the bytes a module carried, apart from its records", async () => {
+    await renderDone(withBlobs);
+    // Records and objects are different quantities of different things; the card says both.
+    expect(await screen.findByText(/61 new/)).toBeInTheDocument();
+    expect(await screen.findByText(/57 written · 2 skipped · 3\.0 MB/)).toBeInTheDocument();
+  });
+
+  it("names a conflicting object and says what was done about it", async () => {
+    await renderDone(withBlobs);
+    expect(
+      await screen.findByText(/already here with different content — left untouched/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("uploads/edited.pdf")).toBeInTheDocument();
+  });
+
+  it("names a missing object and says what to do about it", async () => {
+    await renderDone(withBlobs);
+    expect(
+      await screen.findByText(
+        /bytes not in the archive — copy the file across, its download answers 404 until then/i,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("uploads/film.mov")).toBeInTheDocument();
+  });
+
+  it("collapses a list past five entries instead of burying the report", async () => {
+    const many = Array.from({ length: 7 }, (_, i) => `uploads/${i}.bin`);
+    await renderDone(
+      doneWith({ ...storage, blobs: { ...storage.blobs, conflicts: many, missing: [] } }),
+    );
+    const summary = await screen.findByText(/7 already here with different content/i);
+    expect(summary.tagName.toLowerCase()).toBe("summary");
+    // Collapsed, not truncated: every id is still reachable, none of them is thrown away.
+    expect(screen.getByText("uploads/6.bin")).toBeInTheDocument();
+  });
+
+  it("says nothing at all for a component that carried no bytes", async () => {
+    await renderDone(DONE_IMPORT);
+    expect(await screen.findByText(/42 new/)).toBeInTheDocument();
+    expect(screen.queryByText(/^bytes: /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/already here with different content/i)).not.toBeInTheDocument();
   });
 });

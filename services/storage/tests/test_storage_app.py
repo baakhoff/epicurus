@@ -26,6 +26,8 @@ from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore, StoredObject
 
 TENANT = "local"
+# A second tenant for the isolation tests (#836) — never this deployment's default.
+OTHER = "other"
 
 
 class _MemObjectStore(ObjectStore):
@@ -320,3 +322,139 @@ def test_settings_platform_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert s.platform_url == "http://core-app:8080"
     # The removed filesystem setting is truly gone.
     assert not hasattr(s, "storage_root")
+
+
+# ── Tenant scoping on the HTTP surface (#836) ───────────────────────────────────
+
+
+async def _seed_object_for(h: _Harness, tenant: str, key: str, content: str) -> None:
+    """Catalogue an object under an explicit tenant (the harness default is ``TENANT``)."""
+    from epicurus_storage.service import put_object
+
+    await put_object(index=h.index, objects=h.objects, tenant=tenant, key=key, content=content)
+
+
+async def test_browse_and_search_are_scoped_to_the_named_tenant(harness: _Harness) -> None:
+    await _seed_object_for(harness, TENANT, "ours.md", "ours")
+    await _seed_object_for(harness, OTHER, "theirs.md", "theirs")
+    async with _client(harness) as client:
+        default_browse = await client.get("/objects")
+        other_browse = await client.get("/objects", params={"tenant_id": OTHER})
+        other_search = await client.get("/objects", params={"tenant_id": OTHER, "q": "ours"})
+    # An unnamed tenant is still the deployment default — the single-tenant case, unchanged.
+    assert {e["name"] for e in default_browse.json()["entries"]} == {"ours.md"}
+    assert {e["name"] for e in other_browse.json()["entries"]} == {"theirs.md"}
+    assert other_search.json()["entries"] == []
+
+
+async def test_read_and_download_do_not_cross_tenants(harness: _Harness) -> None:
+    await _seed_object_for(harness, OTHER, "theirs.md", "theirs")
+    async with _client(harness) as client:
+        as_default_read = await client.get("/objects/read", params={"path": "theirs.md"})
+        as_default_dl = await client.get("/download", params={"path": "theirs.md"})
+        as_other_read = await client.get(
+            "/objects/read", params={"path": "theirs.md", "tenant_id": OTHER}
+        )
+        as_other_dl = await client.get(
+            "/download", params={"path": "theirs.md", "tenant_id": OTHER}
+        )
+    assert as_default_read.status_code == 404
+    assert as_default_dl.status_code == 404
+    assert as_other_read.json()["content"] == "theirs"
+    assert as_other_dl.content == b"theirs"
+
+
+async def test_move_is_scoped_to_the_named_tenant(harness: _Harness) -> None:
+    await _seed_object_for(harness, TENANT, "same.md", "ours")
+    await _seed_object_for(harness, OTHER, "same.md", "theirs")
+    async with _client(harness) as client:
+        resp = await client.post(
+            "/objects/move",
+            params={"tenant_id": OTHER},
+            json={"from_path": "same.md", "to_path": "moved.md"},
+        )
+    assert resp.status_code == 200 and resp.json() == {"path": "moved.md"}
+    # Only the named tenant's object moved; the other tenant's identically-pathed one did not.
+    assert await harness.objects.get(tenant=OTHER, key="moved.md") == "theirs"
+    assert await harness.index.get(tenant=OTHER, path="same.md") is None
+    assert await harness.objects.get(tenant=TENANT, key="same.md") == "ours"
+    assert await harness.index.get(tenant=TENANT, path="same.md") is not None
+
+
+async def test_delete_is_scoped_to_the_named_tenant(harness: _Harness) -> None:
+    await _seed_object_for(harness, OTHER, "theirs.md", "theirs")
+    async with _client(harness) as client:
+        as_default = await client.request("DELETE", "/objects", params={"path": "theirs.md"})
+    # The default tenant has nothing at that path — an idempotent miss, and crucially not
+    # another tenant's bytes being dropped.
+    assert as_default.json() == {"deleted": False}
+    assert await harness.objects.get(tenant=OTHER, key="theirs.md") == "theirs"
+
+    async with _client(harness) as client:
+        as_other = await client.request(
+            "DELETE", "/objects", params={"path": "theirs.md", "tenant_id": OTHER}
+        )
+    assert as_other.json() == {"deleted": True}
+    assert await harness.objects.get(tenant=OTHER, key="theirs.md") is None
+
+
+async def test_ingest_honours_the_tenant_header_the_core_sends(harness: _Harness) -> None:
+    """The core's upload sink has always stamped ``x-epicurus-tenant``; it now decides."""
+    async with _client(harness) as client:
+        resp = await client.post(
+            "/ingest",
+            params={"filename": "note.txt", "att_id": "a1"},
+            content=b"bytes",
+            headers={"content-type": "text/plain", "x-epicurus-tenant": OTHER},
+        )
+        listed_default = await client.get("/objects", params={"path": "uploads"})
+        listed_other = await client.get("/objects", params={"path": "uploads", "tenant_id": OTHER})
+    assert resp.status_code == 200
+    assert await harness.objects.get(tenant=OTHER, key="uploads/a1-note.txt") == "bytes"
+    assert await harness.objects.get(tenant=TENANT, key="uploads/a1-note.txt") is None
+    assert listed_default.json()["entries"] == []
+    assert {e["name"] for e in listed_other.json()["entries"]} == {"note.txt"}
+
+
+async def test_ingest_without_a_tenant_header_uses_the_default(harness: _Harness) -> None:
+    """No-regression: an older core that sends no tenant still files under the default."""
+    async with _client(harness) as client:
+        resp = await client.post(
+            "/ingest",
+            params={"filename": "note.txt", "att_id": "a1"},
+            content=b"bytes",
+            headers={"content-type": "text/plain"},
+        )
+    assert resp.status_code == 200
+    assert await harness.objects.get(tenant=TENANT, key="uploads/a1-note.txt") == "bytes"
+
+
+async def test_a_malformed_tenant_is_a_400_on_every_route(harness: _Harness) -> None:
+    """A bad tenant id is refused, never quietly answered from the default's catalogue."""
+    bad = "Not A Tenant"
+    async with _client(harness) as client:
+        assert (await client.get("/objects", params={"tenant_id": bad})).status_code == 400
+        assert (
+            await client.get("/objects/read", params={"path": "x.md", "tenant_id": bad})
+        ).status_code == 400
+        assert (
+            await client.get("/download", params={"path": "x.md", "tenant_id": bad})
+        ).status_code == 400
+        assert (
+            await client.post(
+                "/objects/move",
+                params={"tenant_id": bad},
+                json={"from_path": "a.md", "to_path": "b.md"},
+            )
+        ).status_code == 400
+        assert (
+            await client.request("DELETE", "/objects", params={"path": "x.md", "tenant_id": bad})
+        ).status_code == 400
+        assert (
+            await client.post(
+                "/ingest",
+                params={"filename": "n.txt"},
+                content=b"x",
+                headers={"content-type": "text/plain", "x-epicurus-tenant": bad},
+            )
+        ).status_code == 400

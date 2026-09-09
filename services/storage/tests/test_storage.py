@@ -25,11 +25,14 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_core import EpicurusModule, FileEntry, FileKind, PlatformClient
+from epicurus_core.tenancy import reset_current_tenant, set_current_tenant
 from epicurus_storage.db import FileIndex
 from epicurus_storage.object_store import ObjectStore, StoredObject
 from epicurus_storage.service import build_module
 
 TENANT = "test"
+# A second tenant for the isolation tests (#836) — never the module's default.
+OTHER_TENANT = "other"
 
 
 def _build(
@@ -37,7 +40,7 @@ def _build(
     objects: ObjectStore,
     *,
     platform: object,
-    tenant: str = TENANT,
+    default_tenant: str = TENANT,
     hidden_prefixes: tuple[str, ...] = (),
 ) -> EpicurusModule:
     """Build the module with a duck-typed platform stub (cast at the seam, per repo convention)."""
@@ -45,7 +48,7 @@ def _build(
         index,
         objects,
         platform=cast(PlatformClient, platform),
-        tenant=tenant,
+        default_tenant=default_tenant,
         hidden_prefixes=hidden_prefixes,
     )
 
@@ -221,7 +224,7 @@ async def test_list_merges_filespace_and_objects(
         listing={"": [_entry("knowledge", "dir"), _entry("z-top.md", "file", 4)]}
     )
     await _seed_objects(tmp_index, fake_objects, "uploads/report.md", "hi")
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
 
     _c, s = await module.call_tool("storage_list", {"path": ""})
     # Both sources are present.
@@ -235,7 +238,7 @@ async def test_list_default_path_is_root(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform(listing={"": [_entry("a.md", "file")]})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_list", {})  # default path=""
     assert _names(s) == {"a.md"}
     assert platform.list_calls == [""]
@@ -245,7 +248,7 @@ async def test_list_subdir_forwards_path(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform(listing={"docs": [_entry("docs/guide.md", "file")]})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_list", {"path": "docs"})
     assert _names(s) == {"guide.md"}
     assert platform.list_calls == ["docs"]
@@ -257,7 +260,7 @@ async def test_list_tolerates_core_down_returns_objects_only(
     # The platform raises a transport error → the tool degrades to object rows, never errors.
     platform = _FakePlatform(raise_on={"list"})
     await _seed_objects(tmp_index, fake_objects, "uploads/x.md", "x")
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_list", {"path": ""})
     assert _names(s) == {"uploads"}
 
@@ -268,7 +271,7 @@ async def test_list_tolerates_core_down_returns_objects_only(
 async def test_search_merges_and_caps(tmp_index: FileIndex, fake_objects: _FakeObjectStore) -> None:
     platform = _FakePlatform(search_hits=[_entry("docs/quarterly.md", "file")])
     await _seed_objects(tmp_index, fake_objects, "quarterly-upload.md", "x")
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
 
     _c, s = await module.call_tool("storage_search", {"query": "quarterly"})
     assert _names(s) == {"quarterly.md", "quarterly-upload.md"}
@@ -280,7 +283,7 @@ async def test_search_limit_is_clamped_to_200(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform()
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     await module.call_tool("storage_search", {"query": "q", "limit": 9999})
     assert platform.search_calls == [("q", 200)]
 
@@ -289,7 +292,7 @@ async def test_search_empty_query_returns_empty(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform(search_hits=[_entry("x.md")])
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_search", {"query": "   "})
     assert _result(s) == []
     assert platform.search_calls == []  # short-circuits before hitting the core
@@ -300,7 +303,7 @@ async def test_search_tolerates_core_down(
 ) -> None:
     platform = _FakePlatform(raise_on={"search"})
     await _seed_objects(tmp_index, fake_objects, "obj-hit.md", "x")
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_search", {"query": "hit"})
     assert _names(s) == {"obj-hit.md"}
 
@@ -310,7 +313,7 @@ async def test_search_tolerates_core_down(
 
 async def test_read_filespace_text(tmp_index: FileIndex, fake_objects: _FakeObjectStore) -> None:
     platform = _FakePlatform(reads={"docs/readme.txt": "0123456789"})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "docs/readme.txt"})
     assert _result(s) == "0123456789"
     assert platform.read_calls == ["docs/readme.txt"]
@@ -323,7 +326,7 @@ async def test_read_prefers_object_over_filespace(
     # core file API is never consulted.
     await _seed_objects(tmp_index, fake_objects, "report.md", "from-object")
     platform = _FakePlatform(reads={"report.md": "from-filespace"})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "report.md"})
     assert _result(s) == "from-object"
     assert platform.read_calls == []  # object short-circuits the file-space read
@@ -342,7 +345,7 @@ async def test_read_object_binary_rejected(
         entries=[{"path": "blob.bin", "name": "blob.bin", "size": 3, "mtime": 0.0, "kind": "file"}],
     )
     platform = _FakePlatform()
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "blob.bin"})
     assert str(_result(s)).startswith("Error:")
     assert "UTF-8" in str(_result(s))
@@ -361,7 +364,7 @@ async def test_read_object_too_large_rejected(
         ],
     )
     platform = _FakePlatform()
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "big.txt"})
     assert str(_result(s)).startswith("Error:")
     assert "too large" in str(_result(s))
@@ -371,7 +374,7 @@ async def test_read_maps_filespace_404(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform(read_errors={"docs/nope.txt": 404})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "docs/nope.txt"})
     assert _result(s) == "Error: file not found"
 
@@ -380,7 +383,7 @@ async def test_read_maps_filespace_413(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform(read_errors={"docs/huge.txt": 413})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "docs/huge.txt"})
     payload = str(_result(s))
     assert payload.startswith("Error:") and "too large" in payload
@@ -390,7 +393,7 @@ async def test_read_maps_filespace_415(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform(read_errors={"docs/blob.bin": 415})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "docs/blob.bin"})
     payload = str(_result(s))
     assert payload.startswith("Error:") and "UTF-8" in payload
@@ -400,7 +403,7 @@ async def test_read_maps_other_status_code(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform(read_errors={"docs/x.txt": 500})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "docs/x.txt"})
     assert _result(s) == "Error: read failed (HTTP 500)"
 
@@ -409,7 +412,7 @@ async def test_read_maps_transport_error_to_unavailable(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform(raise_on={"read"})
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_read", {"path": "docs/x.txt"})
     assert _result(s) == "Error: file space unavailable"
 
@@ -423,7 +426,7 @@ async def test_status_reports_object_counts(
     await _seed_objects(tmp_index, fake_objects, "docs/a.md", "x")  # 1 dir + 1 file
     await _seed_objects(tmp_index, fake_objects, "b.md", "y")  # 1 file
     platform = _FakePlatform()
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, s = await module.call_tool("storage_status", {})
     payload = _result(s)
     assert isinstance(payload, dict)
@@ -435,7 +438,7 @@ async def test_status_reports_object_counts(
 
 async def test_object_put_then_get(tmp_index: FileIndex, fake_objects: _FakeObjectStore) -> None:
     platform = _FakePlatform()
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
 
     _c, put_result = await module.call_tool(
         "storage_object_put", {"key": "report.txt", "content": "hello world"}
@@ -454,7 +457,7 @@ async def test_object_get_missing_is_null(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     platform = _FakePlatform()
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     _c, get_result = await module.call_tool("storage_object_get", {"key": "does-not-exist.txt"})
     get_payload = _result(get_result)
     assert isinstance(get_payload, dict)
@@ -466,7 +469,7 @@ async def test_object_put_appears_in_list_and_reads_back(
 ) -> None:
     # End-to-end through the tools: put an object, then it lists and reads back.
     platform = _FakePlatform()
-    module = _build(tmp_index, fake_objects, platform=platform, tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
     await module.call_tool("storage_object_put", {"key": "memo.md", "content": "agent wrote it"})
 
     _c, listed = await module.call_tool("storage_list", {"path": ""})
@@ -533,7 +536,7 @@ async def test_read_refuses_hidden_prefix(
 async def test_manifest_declares_the_tools(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
-    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), default_tenant=TENANT)
     manifest = await module.manifest()
     tool_names = {t.name for t in manifest.tools}
     assert tool_names == {
@@ -550,7 +553,7 @@ async def test_manifest_declares_no_pages_or_events(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     # The Files page moved to the core (ADR-0063); the module no longer ships a page or events.
-    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), default_tenant=TENANT)
     manifest = await module.manifest()
     assert manifest.pages == []
     assert manifest.events_emitted == []
@@ -560,7 +563,7 @@ async def test_manifest_status_action_present(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
     # The UI keeps a single "Show status" action; the old "Re-scan now" action is gone.
-    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), default_tenant=TENANT)
     manifest = await module.manifest()
     assert manifest.ui is not None
     action_tools = {a.tool for a in manifest.ui.actions}
@@ -580,6 +583,103 @@ async def test_manifest_version_matches_the_packaged_version(
 
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     declared = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
-    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), tenant=TENANT)
+    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), default_tenant=TENANT)
     manifest = await module.manifest()
     assert manifest.version == declared
+
+
+# ── Tenant resolution on a tool call (#836) ─────────────────────────────────────
+
+
+async def test_tools_act_on_the_default_tenant_when_no_context_is_bound(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore
+) -> None:
+    """The single-tenant v1 path: nothing binds a tenant, so every tool uses the default.
+
+    This is the no-regression assertion for the whole change — the core does not carry a
+    tenant across the MCP hop today, so an unbound call must still land exactly where it
+    always did.
+    """
+    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), default_tenant=TENANT)
+    await module.call_tool("storage_object_put", {"key": "memo.md", "content": "default"})
+    assert await fake_objects.get(tenant=TENANT, key="memo.md") == "default"
+    assert (await tmp_index.get(tenant=TENANT, path="memo.md")) is not None
+
+
+async def test_tools_follow_the_bound_tenant(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore
+) -> None:
+    """A call bound to another tenant writes into *that* tenant's bucket and catalogue."""
+    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), default_tenant=TENANT)
+    token = set_current_tenant(OTHER_TENANT)
+    try:
+        await module.call_tool("storage_object_put", {"key": "memo.md", "content": "theirs"})
+    finally:
+        reset_current_tenant(token)
+
+    assert await fake_objects.get(tenant=OTHER_TENANT, key="memo.md") == "theirs"
+    # The default tenant is untouched: no bytes, no catalogue row.
+    assert await fake_objects.get(tenant=TENANT, key="memo.md") is None
+    assert await tmp_index.get(tenant=TENANT, path="memo.md") is None
+
+
+async def test_two_tenants_never_see_each_others_objects_through_the_tools(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore
+) -> None:
+    """Browse, read, get and status are each confined to the tenant the call resolves to."""
+    module = _build(tmp_index, fake_objects, platform=_FakePlatform(), default_tenant=TENANT)
+    await module.call_tool("storage_object_put", {"key": "ours.md", "content": "ours"})
+    token = set_current_tenant(OTHER_TENANT)
+    try:
+        await module.call_tool("storage_object_put", {"key": "theirs.md", "content": "theirs"})
+        _c, listing = await module.call_tool("storage_list", {})
+        assert _names(listing) == {"theirs.md"}
+        _c, read = await module.call_tool("storage_read", {"path": "ours.md"})
+        # Not their object and — with no client for another tenant's file space — not a
+        # file-space read either: a clean miss, never the default tenant's bytes.
+        assert _result(read) == "Error: file not found"
+        _c, got = await module.call_tool("storage_object_get", {"key": "ours.md"})
+        assert _result(got) == {"key": "ours.md", "content": None}
+        _c, status = await module.call_tool("storage_status", {})
+        assert _result(status) == {"object_files": 1, "object_dirs": 0}
+    finally:
+        reset_current_tenant(token)
+
+    _c, listing = await module.call_tool("storage_list", {})
+    assert _names(listing) == {"ours.md"}
+    _c, found = await module.call_tool("storage_search", {"query": "theirs"})
+    assert _names(found) == set()
+
+
+async def test_the_file_space_is_not_read_for_a_foreign_tenant(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore
+) -> None:
+    """The platform client carries one identity, so a foreign tenant gets no file space.
+
+    Serving it anyway would leak the default tenant's files under another tenant's name —
+    the file-space half is the core's to scope, and this module cannot ask for it as anyone
+    but itself.
+    """
+    platform = _FakePlatform(
+        listing={"": [_entry("core.md")]},
+        search_hits=[_entry("core.md")],
+        reads={"core.md": "core bytes"},
+    )
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
+    _c, listing = await module.call_tool("storage_list", {})
+    assert _names(listing) == {"core.md"}  # the module's own tenant still sees it
+
+    token = set_current_tenant(OTHER_TENANT)
+    try:
+        _c, listing = await module.call_tool("storage_list", {})
+        assert _names(listing) == set()
+        _c, found = await module.call_tool("storage_search", {"query": "core"})
+        assert _names(found) == set()
+        _c, read = await module.call_tool("storage_read", {"path": "core.md"})
+        assert _result(read) == "Error: file not found"
+    finally:
+        reset_current_tenant(token)
+    # The core was asked exactly once — by the module's own tenant, never for the other one.
+    assert platform.list_calls == [""]
+    assert platform.search_calls == []
+    assert platform.read_calls == []

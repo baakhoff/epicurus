@@ -66,9 +66,11 @@ uv run mypy
 uv run pytest
 ```
 
-CI additionally runs a secret scan (gitleaks), validates the compose file, lints
-every shell script (see below), checks every docs cross-reference (see below),
-lints the observability config (see below), and boots the whole stack (see below).
+CI additionally runs a secret scan (gitleaks), validates the compose file, renders
+and schema-checks the Helm chart, lints every shell script (see below), checks
+every docs cross-reference (see below), lints the observability config (see
+below), and boots the whole stack — twice, once on Docker Compose and once on
+Kubernetes (see below).
 
 ## Observability lint gate
 
@@ -176,3 +178,63 @@ task smoke        # or: sh infra/ci/smoke.sh
 It runs in its own compose project, network, and volumes with no published host
 ports, so it is safe to run next to a dev stack and tears itself down at the end
 (`KEEP_UP=1` leaves it up to inspect).
+
+### One set of assertions, two runtimes
+
+The integration last mile is written **once**, in `infra/ci/smoke-assert.sh`, and
+sourced by both smoke gates. That file holds everything that is true of an
+epicurus deployment whatever it is deployed on — module discovery, status through
+the core, an MCP round-trip, the attachment picker, the event spine, automations,
+and a secret surviving a vault restart. Each gate supplies the runtime-specific
+half as shell functions (`http`, `restart_openbao`, `restart_core_app`) and calls
+`smoke_assert`.
+
+**Add a new integration assertion there**, not in a gate script, so both runtimes
+are held to it. `tests/test_smoke_gates.py` fails if a gate inlines one of them
+again, and if either gate stops sourcing or running the shared file.
+
+## Kubernetes smoke gate
+
+`chart-validate` renders the Helm chart and validates it against the real
+Kubernetes API schemas, which catches a misspelled field or a wrong `apiVersion` —
+and says nothing at all about whether the stack comes up. A bad probe, an
+unwritable mount, an RBAC grant that is one verb short: all render perfectly.
+
+The **`k8s-smoke` CI job** (`infra/ci/k8s-smoke.sh`) closes that gap the way
+`runtime-smoke` closes it for Compose. It creates a [kind](https://kind.sigs.k8s.io)
+cluster on the runner, builds the service images from the checkout and
+`kind load`s them, `helm install --wait`s the chart with `infra/ci/values-ci.yaml`,
+and then reaches the services through a curl pod in the namespace — the same way
+the core, the modules and the web shell reach each other — to run
+`smoke-assert.sh`. On top of the shared assertions it proves three things only a
+cluster can:
+
+- the OpenBao **bootstrap Job** completes, its app token is periodic, and the
+  unseal loop brings a deleted vault pod back unsealed;
+- the web shell proxies `/platform/` to the core through the **pod's own DNS**
+  (the resolver nginx derives at container start, #891 — the Docker address it
+  used before does not exist in a pod);
+- `CONTAINER_RUNTIME=auto` resolves to the **Kubernetes arm** inside a pod, and a
+  confirmed module removal scales that module's Deployment to zero through the
+  namespace-scoped Role the chart renders (#891, ADR-0134) — the first exercise of
+  that code against a real API server.
+
+`infra/ci/values-ci.yaml` overrides as little as possible, so the gate boots the
+shape an operator installs: only Ollama is off (a multi-gigabyte image and a 4Gi
+request for a model nothing here uses) and the PVCs are small. `tests/test_smoke_gates.py`
+fails if it ever disables a module or a data-plane piece.
+
+Run it locally, exactly as CI does — it needs `kind`, `kubectl`, `helm` and a lot
+of free disk:
+
+```bash
+sh infra/ci/k8s-smoke.sh              # create a cluster, boot, assert, delete
+KEEP_UP=1 sh infra/ci/k8s-smoke.sh    # leave the cluster up to poke at
+```
+
+Note the docker-light rule in `AGENTS.md`: this is a hosted gate, and running it
+locally is for diagnosing a red CI run, not routine development.
+
+**It is not a required check yet.** The bar set in #894 is *required once green
+two weeks running* — until then, read a red one and investigate it, but it does
+not block a merge on its own.

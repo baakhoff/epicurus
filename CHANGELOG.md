@@ -12,6 +12,39 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The Helm chart has now actually booted** (#894) — the chart shipped rendered and
+  schema-checked and never once started, which left a whole class of failure (a bad probe, an
+  unwritable mount, an RBAC grant one verb short) uncaught until an operator hit it, and left
+  the Kubernetes half of the container-runtime seam proven against nothing but a mock
+  transport. A new `k8s-smoke` CI job creates a kind cluster, builds the service images from
+  the checkout and loads them into it, `helm install`s the chart, and asserts the integration
+  last mile from a curl pod inside the namespace. The assertions themselves moved into
+  `infra/ci/smoke-assert.sh`, shared verbatim with the Compose gate, so both runtimes are held
+  to one list that cannot drift — and on top of it the Kubernetes gate proves the OpenBao
+  bootstrap Job and its unseal loop work, that the web shell resolves the core through the
+  pod's own DNS, and that a confirmed module removal really does scale that module's
+  Deployment to zero through the chart's namespace-scoped Role. Deliberately not a required
+  check until it has been green for two weeks. **The first boot immediately earned its
+  keep**, four times over. The chart's OpenBao bootstrap read the unseal key out of `/v1/sys/init`
+  under the *CLI's* field name (`unseal_keys_b64`) rather than the HTTP API's
+  (`keys_base64`), so it initialised a vault and discarded the only key that could ever open
+  it — unrecoverable, and invisible to every existing test because the stub they run against
+  mirrored the same mistake. And SearXNG crash-looped forever: Kubernetes hands every pod a
+  `SEARXNG_PORT=tcp://10.96.x.x:8080` service-link variable, SearXNG's entrypoint feeds that
+  straight into `GRANIAN_PORT`, and the server dies on a URL where it wanted a port number —
+  so the chart now turns that Docker-links injection off on every pod, since nothing in the
+  stack reads those names and they collide with the ones it does. And the web UI was broken
+  outright on Kubernetes: nginx resolves the core's name per request and never applies
+  `/etc/resolv.conf`'s `search` list, so the bare `core-app` it was handed SERVFAILed and
+  every `/platform/` call 502'd — while both probes stayed green, because `/healthz` is a
+  static handler that never touches the resolver. The chart now gives the shell a fully
+  qualified core URL (`clusterDomain` / `web.coreAppUrl`). And OpenBao could not survive its
+  own restart: its container drops every capability but four, and `chown -R` on the data
+  directory needs `DAC_OVERRIDE` to descend into the 0700 directories the file backend
+  creates — so a fresh vault booted, a vault holding data crash-looped forever, which is a
+  node drain or an upgrade away from any operator. None of the four is reproducible under
+  Compose. `epicurus` chart 0.1.0→0.1.1 (PATCH).
+
 - **Storage honours the tenant the caller names** (#836) — the object store's rows and buckets
   were always tenant-scoped, but the module resolved the tenant for you: its HTTP routes pinned
   `DEFAULT_TENANT_ID` and merely *accepted* a `tenant_id` "for forward-compatibility", so a

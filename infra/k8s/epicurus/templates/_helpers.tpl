@@ -11,6 +11,17 @@ Two conventions run through this chart and every template depends on them:
     on every workload.** That pair is how the core's Kubernetes container-runtime
     seam (#891) finds a module's Deployment to scale to zero, and Ollama's
     StatefulSet to rollout-restart. Do not rename either label.
+  * **`enableServiceLinks: false` on every pod spec.** Kubernetes otherwise injects a
+    `{SVCNAME}_SERVICE_HOST` and `{SVCNAME}_PORT` env var into every pod for every
+    Service in the namespace — Docker-links compatibility nothing here uses, because
+    every endpoint this chart wires comes from an env var it sets explicitly. It is
+    not merely noise: those generated names land in the same namespace as the stack's
+    own variables, and one of them is fatal. `SEARXNG_PORT` arrives as
+    `tcp://10.96.x.x:8080`; SearXNG's entrypoint does
+    `export GRANIAN_PORT="${SEARXNG_PORT:-$GRANIAN_PORT}"`; the server then dies on a
+    URL where it wanted a port number. The chart's very first boot on a cluster (#894)
+    crash-looped on exactly that, and it is invisible under Compose, which injects
+    nothing of the kind. A new pod spec gets this line too.
 
 Helpers that need more than the root context take a dict, by convention
 `(dict "ctx" $ "component" "web")`.
@@ -125,6 +136,31 @@ http://minio:9000
 
 {{- define "epicurus.platformUrl" -}}
 http://core-app:8080
+{{- end -}}
+
+{{/*
+The core's URL *as nginx must be given it* — fully qualified, unlike every other
+endpoint in this chart.
+
+The web shell resolves the core at request time (so nginx keeps serving the UI
+while the core restarts), which means a `resolver` directive and a runtime lookup
+rather than a start-up one. nginx's resolver does NOT apply /etc/resolv.conf's
+`search` list: it asks for exactly the name it was given. In a pod, `core-app.`
+is not in the cluster DNS zone, so the query SERVFAILs and every /platform/
+request 502s while both probes stay green — /healthz is a static handler that
+never touches the resolver. The chart's first boot on a cluster (#894) hit exactly
+that; under Compose, Docker's embedded DNS answers bare service names, so nothing
+before could see it.
+
+Every other consumer resolves through the OS resolver, which does apply `search`,
+and keeps the bare Service name the code and docs speak (ADR-0063).
+*/}}
+{{- define "epicurus.webCoreAppUrl" -}}
+{{- if .Values.web.coreAppUrl -}}
+{{- .Values.web.coreAppUrl -}}
+{{- else -}}
+{{- printf "http://core-app.%s.svc.%s:8080" .Release.Namespace .Values.clusterDomain -}}
+{{- end -}}
 {{- end -}}
 
 {{/*

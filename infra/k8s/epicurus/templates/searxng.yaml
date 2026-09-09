@@ -63,6 +63,8 @@ spec:
       annotations:
         checksum/settings: {{ $settings | sha256sum }}
     spec:
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: searxng
           image: {{ include "epicurus.thirdPartyImage" .Values.searxng.image }}

@@ -77,6 +77,8 @@ spec:
       annotations:
         checksum/config: {{ $config | sha256sum }}
     spec:
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: openbao
           image: {{ include "epicurus.thirdPartyImage" .Values.openbao.image }}
@@ -97,7 +99,16 @@ spec:
               drop: ["ALL"]
               # IPC_LOCK lets the server mlock its memory so secrets never reach
               # swap; CHOWN/SETUID/SETGID are what the handoff above needs.
-              add: ["IPC_LOCK", "CHOWN", "SETUID", "SETGID"]
+              #
+              # DAC_OVERRIDE is what it needs on the SECOND boot (#894). The file
+              # backend creates /openbao/data/{sys,core,logical} mode 0700 owned by
+              # uid 100, and root without DAC_OVERRIDE cannot open a directory it
+              # does not own — so `chown -R` fails with "Permission denied", the
+              # `&&` short-circuits, and the pod crash-loops forever. A fresh volume
+              # boots fine (those directories do not exist yet), which is why this
+              # survived every render, every schema check, and the first cluster
+              # boot, and only appeared when a vault holding data was restarted.
+              add: ["IPC_LOCK", "CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID"]
           env:
             # The bootstrap and unseal helpers talk to the Service, but anything
             # running inside this container defaults to https without this.

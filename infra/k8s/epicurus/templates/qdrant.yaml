@@ -82,6 +82,8 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /qdrant/storage
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: qdrant
           image: {{ include "epicurus.thirdPartyImage" .Values.qdrant.image }}

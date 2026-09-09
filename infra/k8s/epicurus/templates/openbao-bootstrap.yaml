@@ -90,6 +90,8 @@ spec:
       restartPolicy: Never
       serviceAccountName: openbao-bootstrap
       {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: bootstrap
           image: {{ include "epicurus.thirdPartyImage" .Values.openbao.bootstrap.image }}
@@ -160,6 +162,8 @@ spec:
         {{- include "epicurus.labels" (dict "ctx" $ "component" "openbao-unseal") | nindent 8 }}
     spec:
       {{- with (include "epicurus.imagePullSecrets" $) }}{{ nindent 6 . }}{{- end }}
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: unseal
           image: {{ include "epicurus.thirdPartyImage" .Values.openbao.bootstrap.image }}

@@ -96,6 +96,10 @@ json_string() { # key -> first matching string value in $RESP
     sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$RESP" | head -n 1
 }
 
+json_array_first() { # key -> first string element of the array at that key in $RESP
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\[[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$RESP" | head -n 1
+}
+
 b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 unb64() { printf '%s' "$1" | base64 -d; }
 
@@ -173,7 +177,15 @@ if [ "$INITIALIZED" = "0" ]; then
     echo "Initialising (1-of-1 Shamir shares)..."
     bao_req POST /v1/sys/init '{"secret_shares":1,"secret_threshold":1}'
     [ "$CODE" = "200" ] || fail "init failed (HTTP $CODE)"
-    UNSEAL_KEY="$(sed -n 's/.*"unseal_keys_b64"[[:space:]]*:[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$RESP" | head -n 1)"
+    # The HTTP API returns `keys` (hex) and `keys_base64`. The *CLI*
+    # (`bao operator init -format=json`, which the compose bootstrap parses) calls
+    # the same field `unseal_keys_b64` — and reading the CLI's name off an HTTP
+    # response is what made the chart's very first real boot initialise a vault and
+    # then throw away the only key that could ever open it (#894, unrecoverable:
+    # every retry then found an initialised vault with no stored key). Read the API's
+    # name, and accept the CLI's as a fallback so neither shape can wedge a vault.
+    UNSEAL_KEY="$(json_array_first keys_base64)"
+    [ -n "$UNSEAL_KEY" ] || UNSEAL_KEY="$(json_array_first unseal_keys_b64)"
     ROOT_TOKEN="$(json_string 'root_token')"
     [ -n "$UNSEAL_KEY" ] || fail "init response carried no unseal key"
     [ -n "$ROOT_TOKEN" ] || fail "init response carried no root token"

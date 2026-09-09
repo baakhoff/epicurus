@@ -66,6 +66,8 @@ spec:
       annotations:
         checksum/config: {{ $config | sha256sum }}
     spec:
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: nats
           image: {{ include "epicurus.thirdPartyImage" .Values.nats.image }}

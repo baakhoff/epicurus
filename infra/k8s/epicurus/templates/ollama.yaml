@@ -50,6 +50,8 @@ spec:
       {{- with .Values.ollama.gpu.runtimeClassName }}
       runtimeClassName: {{ . }}
       {{- end }}
+      {{- /* No Docker-links env injection anywhere; see _helpers.tpl (#894). */}}
+      enableServiceLinks: false
       containers:
         - name: ollama
           image: {{ include "epicurus.thirdPartyImage" .Values.ollama.image }}

@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -39,6 +40,7 @@ from epicurus_core_app.portability.models import (
     ArchiveManifest,
     ComponentEntry,
     ImportComponentPreview,
+    ImportComponentResult,
     ImportPreview,
     ImportReportView,
     SecretsInventory,
@@ -142,11 +144,19 @@ class TestService(PortabilityService):
 
     __test__ = False  # not a pytest test class
 
-    def __init__(self, *, streams: dict[str, bytes], **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        streams: dict[str, bytes],
+        import_response: httpx.Response | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self.streams = streams
         self.calls = ModuleCalls()
         self.import_failures: dict[str, int] = {}
+        # A non-2xx answer the module gives to POST /import, raised the way httpx would.
+        self.import_response = import_response
 
     async def _module_schema(self, base: str, tenant: str) -> str | None:
         body = self.streams.get(base)
@@ -167,6 +177,14 @@ class TestService(PortabilityService):
         async for chunk in body:
             received += chunk
         self.calls.imports[base] = received
+        if self.import_response is not None:
+            request = httpx.Request("POST", f"{base}/import")
+            self.import_response.request = request
+            raise httpx.HTTPStatusError(
+                f"Server error '{self.import_response.status_code}' for url '{base}/import'",
+                request=request,
+                response=self.import_response,
+            )
         lines = [line for line in received.splitlines() if line.strip()]
         report = ImportReport(schema_name=str(json.loads(lines[0])["schema"]))
         for line in lines[1:]:
@@ -224,6 +242,7 @@ def _service(
     reembeds: list[dict[str, str]] | None = None,
     embedding_probe: EmbeddingProbe | None = None,
     max_file_bytes: int = 0,
+    import_response: httpx.Response | None = None,
 ) -> TestService:
     async def rescan(force: bool = False, tenant: str | None = None) -> int:
         # Records the *tenant* as well as the force flag: the real helper defaults to the
@@ -250,6 +269,7 @@ def _service(
         reembed=reembed,
         embedding_probe=embedding_probe,
         max_file_bytes=max_file_bytes,
+        import_response=import_response,
     )
 
 
@@ -802,6 +822,118 @@ async def test_a_refused_module_is_skipped_while_the_rest_of_the_archive_applies
     by_name = {c.name: c for c in report.components}
     assert by_name["calendar"].state == "skipped"
     assert by_name["conversations"].created == 1  # the rest landed
+
+
+async def _apply_with_module_answer(
+    tmp_path: Path, engine: AsyncEngine, response: httpx.Response
+) -> ImportComponentResult:
+    """Export one calendar record, then apply it to a target whose module answers *response*."""
+    exporter = _service(
+        tmp_path / "src",
+        engine,
+        snaps=[_snapshot("calendar")],
+        bases={"calendar": "http://calendar:8080"},
+        streams={
+            "http://calendar:8080": _module_stream(
+                "calendar/1", [{"kind": "event", "id": "e-1", "data": {}}]
+            )
+        },
+    )
+    await exporter._jobs.init()
+    await exporter._files.ensure_tenant_root(tenant=TENANT)
+    archive = await _export_archive(exporter)
+
+    target = _service(
+        tmp_path / "dst",
+        engine,
+        snaps=[_snapshot("calendar")],
+        bases={"calendar": "http://calendar:8080"},
+        streams={"http://calendar:8080": _module_stream("calendar/1", [])},
+        import_response=response,
+    )
+    await target._files.ensure_tenant_root(tenant=TENANT)
+    job = await _upload(target, archive)
+    await target.start_apply(tenant=TENANT, job_id=job.id)
+    done = await _settle(target, TENANT, job.id, "running")
+    assert done.status == "done", done.error
+    report = ImportReportView.model_validate(done.report)
+    return next(c for c in report.components if c.name == "calendar")
+
+
+async def test_a_modules_own_error_detail_reaches_the_report_line(tmp_path: Path) -> None:
+    """The operator reads the module's words on the card, not in `docker compose logs`.
+
+    #903 was diagnosed from a container log because the report line said only
+    ``Server error '500 …'``. When the module *does* answer with a JSON ``detail`` the core
+    has always preferred it over httpx's text (since #869) — but nothing asserted it, so the
+    one line that decides whether an import failure is self-service could have regressed
+    silently.
+    """
+    engine = await _engine(tmp_path)
+    await _seed_core(engine)
+    try:
+        failed = await _apply_with_module_answer(
+            tmp_path / "json",
+            engine,
+            httpx.Response(500, json={"detail": "event 'e-1': column 'all_day' is NOT NULL"}),
+        )
+    finally:
+        await engine.dispose()
+
+    assert failed.state == "failed"
+    assert failed.error == "event 'e-1': column 'all_day' is NOT NULL"
+    # The rest of the archive is unaffected — one module's failure is not the import's.
+    assert "Server error" not in (failed.error or "")
+
+
+async def test_a_bodyless_500_leaves_the_report_line_with_nothing_to_carry(
+    tmp_path: Path,
+) -> None:
+    """The gap #903's follow-up names, pinned so the fix has something to change.
+
+    An unhandled exception inside a module's ``/import`` route is answered by Starlette's
+    ``ServerErrorMiddleware`` as ``text/plain`` "Internal Server Error" — no JSON, no
+    ``detail`` — so there is nothing for the core to carry and the report falls back to
+    httpx's generic text. That is exactly what the operator saw. The remedy belongs at
+    ``epicurus_core.add_portability_routes``, which is where the module's exception is still
+    an exception; when it lands, this test is the one that changes.
+    """
+    engine = await _engine(tmp_path)
+    await _seed_core(engine)
+    try:
+        # The body a module's unhandled exception really produces: text/plain, no JSON. It
+        # carries a sentence, and the assertion below is that none of it survives — which is
+        # the defect, not the fixture.
+        failed = await _apply_with_module_answer(
+            tmp_path / "bare",
+            engine,
+            httpx.Response(500, text="Internal Server Error"),
+        )
+    finally:
+        await engine.dispose()
+
+    assert failed.state == "failed"
+    # Nothing the module said survives — not even the sentence it did send, because it was
+    # not JSON with a `detail`. The operator is left with a status line and a container log.
+    assert "Internal Server Error" not in (failed.error or "")
+    assert str(500) in (failed.error or "")
+
+
+async def test_a_409_carries_the_modules_own_wording_as_the_skip_reason(tmp_path: Path) -> None:
+    """A refusal is the module's judgement, so the reason has to be the module's sentence."""
+    engine = await _engine(tmp_path)
+    await _seed_core(engine)
+    try:
+        refused = await _apply_with_module_answer(
+            tmp_path / "conflict",
+            engine,
+            httpx.Response(409, json={"detail": "calendar/1 is older than this build's /3"}),
+        )
+    finally:
+        await engine.dispose()
+
+    assert refused.state == "skipped"
+    assert refused.reason == "calendar/1 is older than this build's /3"
 
 
 # ── apply progress (#893) ─────────────────────────────────────────────────────

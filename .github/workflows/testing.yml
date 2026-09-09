@@ -47,28 +47,9 @@ jobs:
             echo "::endgroup::"
           done
 
-  # Package and publish the Helm chart beside the :testing images, as an OCI
-  # artifact tagged to this commit — no-op-safe (every step past checkout is
-  # guarded) so this job stays green whether or not
-  # infra/k8s/epicurus/Chart.yaml has landed yet (#890).
-  chart:
-    needs: images
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Helm
-        if: hashFiles('infra/k8s/epicurus/Chart.yaml') != ''
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-
-      - name: Package and push chart to GHCR
-        if: hashFiles('infra/k8s/epicurus/Chart.yaml') != ''
-        env:
-          HELM_REGISTRY_USER: ${{ github.actor }}
-          HELM_REGISTRY_PASSWORD: ${{ github.token }}
-        run: |
-          version="0.0.0-testing.${GITHUB_SHA:0:7}"
-          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          helm package infra/k8s/epicurus --version "${version}" --app-version testing -d /tmp/charts
-          echo "${HELM_REGISTRY_PASSWORD}" | helm registry login ghcr.io -u "${HELM_REGISTRY_USER}" --password-stdin
-          helm push "/tmp/charts/epicurus-${version}.tgz" "oci://ghcr.io/${owner}/charts"
+  # No chart job here on purpose (#907). The published Helm chart is a
+  # release artifact — only release.yml publishes one, on a vX.Y.Z tag. A
+  # chart built from an exact branch (this one included) is an on-demand,
+  # opt-in path for the owner's own testing clusters: dispatch
+  # chart-branch.yml by hand. See docs/infrastructure/kubernetes.md
+  # "Tracking a branch (opt-in)".

@@ -46,6 +46,26 @@ EpicurusModule(
 as of 2.0; previously `mcp.server.fastmcp.exceptions`) so module code and tests never
 import an SDK path that moves between major versions.
 
+### The tool-error seam (#908)
+
+**Raise a plain exception from a tool — it still reaches the model.** `tool()` wraps every
+registered function: any exception it raises other than `ToolError`/`ResourceError`/`MCPError`
+is re-raised as `ToolError(str(exc))`, chained (`from exc`). Module code never needs to import
+`ToolError` just to fail — `task 'x' not found for tenant 'local'` raised as a plain `KeyError`
+or `ValueError` arrives at the agent with that text.
+
+This exists because mcp >=2.1's own `Tool.run()` treats any exception other than those three as
+a crash: it re-raises `UnexpectedToolError("Error executing tool <name>")` and withholds the
+original message from the client entirely (mcp 2.0 carried it through unconditionally). Wrapping
+in `tool()` — *before* the SDK's own handler sees the exception — restores the mcp-2.0 contract
+so the 37 tests that pin "the model reads a tool's own failure text" needed no change when the
+`mcp` dependency crossed 2.1.
+
+The wrapper still tells anticipated failures from real crashes **in the server log**, even
+though both reach the model as a `ToolError`: `KeyError`, `LookupError`, `ValueError`,
+`PermissionError`, and `FileNotFoundError` log at WARNING (expected traffic); anything else logs
+at ERROR with a traceback, so an operator watching the log still sees a genuine bug stand out.
+
 ### `add_manifest_route`
 
 `epicurus_core.add_manifest_route(app: FastAPI, module: EpicurusModule)` — serves the

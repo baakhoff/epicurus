@@ -57,9 +57,7 @@ class AttachmentSink:
                 content=data,
                 headers={
                     "content-type": content_type or _DEFAULT_CONTENT_TYPE,
-                    # Forward the caller's tenant for forward-compatibility; the
-                    # single-tenant storage module currently keys uploads off its own
-                    # default tenant (threading it end-to-end is a module-wide follow-up).
+                    # The caller's tenant — storage files the upload under it (#836).
                     "x-epicurus-tenant": tenant,
                 },
             )

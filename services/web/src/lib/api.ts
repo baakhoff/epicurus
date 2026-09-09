@@ -1091,6 +1091,26 @@ export const api = {
     ),
   portabilityImport: (jobId: string) =>
     request(PortabilityImportJob, `/platform/v1/portability/imports/${encodeURIComponent(jobId)}`),
+  // Forget one settled job — its row and its staged archive (#903). Until this existed a
+  // failed import sat in the list with its report on screen until the retention sweep, which
+  // only runs when the *next* job starts: the operator's only way to clear a failure was to
+  // cause another one. Answers 204, so there is no body to parse; a 409 (the job is still
+  // working — a delete is not a cancel) arrives as `ApiError` with the core's own sentence.
+  removePortabilityJob: async (kind: "export" | "import", jobId: string): Promise<void> => {
+    const response = await epFetch(
+      `/platform/v1/portability/${kind}s/${encodeURIComponent(jobId)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" } },
+    );
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        detail = (await response.json()).detail ?? detail;
+      } catch {
+        /* non-JSON */
+      }
+      throw new ApiError(response.status, detail);
+    }
+  },
 };
 
 /**

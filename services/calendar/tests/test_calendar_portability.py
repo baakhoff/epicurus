@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from epicurus_calendar.db import LocalEventStore, instance_id
+from epicurus_calendar.db import LocalEventStore, _StoredEvent, instance_id
 from epicurus_calendar.lead_time_prefs import LeadTimePrefsStore
 from epicurus_calendar.models import Attendee, DateTimeRange, Event
 from epicurus_calendar.portability import (
@@ -488,3 +488,176 @@ async def test_attendees_and_all_day_survive_the_trip(source: _Side, target: _Si
     conference = events["Conference"]
     assert conference.all_day is True
     assert conference.end - conference.start == timedelta(days=3)
+
+
+# ── a NULL a reconciled source carries (#903) ─────────────────────────────────
+
+
+async def _reconciled_source(path: Path) -> _Side:
+    """A calendar the way a long-lived install actually is: ``all_day``/``excluded`` nullable.
+
+    Not hand-carved DDL pretending to be old — the real path. ``calendar_events`` is created
+    with only the columns of its *first* release and a row in it, then
+    :meth:`LocalEventStore.init` runs, which is where the shared additive reconcile (#249,
+    ADR-0067) adds the rest. Neither boolean has a ``server_default``, so there is nothing to
+    backfill a populated table with and both are added **nullable** — leaving the pre-existing
+    row with ``NULL`` in a column the model declares ``NOT NULL``. ``_row_to_event`` coerces
+    that to ``False`` on every ordinary read, which is exactly why it went unnoticed until
+    portability inserted the value verbatim into a fresh schema and the module 500'd (#903).
+    """
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql(
+            "CREATE TABLE calendar_events ("
+            " id INTEGER NOT NULL PRIMARY KEY,"
+            " tenant VARCHAR(63) NOT NULL,"
+            " event_id VARCHAR(64) NOT NULL,"
+            " title VARCHAR(512) NOT NULL,"
+            " start_dt DATETIME NOT NULL,"
+            " end_dt DATETIME NOT NULL,"
+            " description TEXT,"
+            " location VARCHAR(512),"
+            " created_at DATETIME NOT NULL,"
+            " CONSTRAINT uq_calendar_tenant_event UNIQUE (tenant, event_id))"
+        )
+        await conn.exec_driver_sql(
+            "INSERT INTO calendar_events"
+            " (tenant, event_id, title, start_dt, end_dt, created_at)"
+            " VALUES ('local', 'old-1', 'Retrospective',"
+            " '2026-07-08 09:00:00.000000', '2026-07-08 10:00:00.000000',"
+            " '2026-01-01 00:00:00.000000')"
+        )
+    side = _Side(engine)
+    await side.init()
+    return side
+
+
+async def test_a_reconciled_source_really_does_hold_a_null_in_a_not_null_column(
+    tmp_path: Path,
+) -> None:
+    """The premise of the whole fix, asserted rather than assumed."""
+    side = await _reconciled_source(tmp_path / "legacy.db")
+    try:
+        assert _StoredEvent.__table__.c.all_day.nullable is False  # the *model* says NOT NULL
+        async with side.engine.connect() as conn:
+            row = (
+                await conn.exec_driver_sql("SELECT all_day, excluded FROM calendar_events")
+            ).one()
+        assert row.all_day is None  # the *database* holds NULL anyway
+        assert row.excluded is None
+    finally:
+        await side.engine.dispose()
+
+
+async def test_a_reconciled_calendar_imports_into_a_fresh_schema(
+    tmp_path: Path, target: _Side
+) -> None:
+    """The #903 reproduction, end to end: this used to be a 500 and a lost calendar.
+
+    The export normalises on the way out and the import normalises on the way in, so the
+    values that reach the table are the model's defaults — asserted on the row itself, not
+    merely on the absence of an exception.
+    """
+    side = await _reconciled_source(tmp_path / "legacy.db")
+    try:
+        records = await _records(side)
+        assert records[0].data["all_day"] is False  # normalised on the way out
+        assert records[0].data["excluded"] is False
+        report = await _apply(target, records)
+    finally:
+        await side.engine.dispose()
+
+    assert report.counts[EVENT_RECORD_KIND].created == 1
+    assert report.warnings == []
+    async with target.engine.connect() as conn:
+        row = (
+            await conn.exec_driver_sql("SELECT all_day, excluded, title FROM calendar_events")
+        ).one()
+    assert row.title == "Retrospective"
+    assert row.all_day == 0  # a real value, never the NULL the source carried
+    assert row.excluded == 0
+
+
+async def test_an_archive_written_before_the_fix_still_applies(target: _Side) -> None:
+    """The reader normalises too — otherwise every archive already on disk stays broken."""
+    report = await _apply(
+        target,
+        [
+            PortabilityRecord(
+                kind=EVENT_RECORD_KIND,
+                id="old-1",
+                data={
+                    "event_id": "old-1",
+                    "title": "Retrospective",
+                    "start_dt": "2026-07-08T09:00:00+00:00",
+                    "end_dt": "2026-07-08T10:00:00+00:00",
+                    "description": None,
+                    "location": None,
+                    "all_day": None,
+                    "recurrence": None,
+                    "recurring_event_id": None,
+                    "excluded": None,
+                    "attendees": None,
+                    "timezone": None,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                },
+            )
+        ],
+    )
+    assert report.counts[EVENT_RECORD_KIND].created == 1
+    events = await _expanded(target)
+    assert [e.title for e in events] == ["Retrospective"]
+    assert events[0].all_day is False
+
+
+async def test_re_applying_a_pre_fix_archive_is_still_a_no_op(source: _Side, target: _Side) -> None:
+    """A `null` and the default it stands for are the same value, so the second apply skips."""
+    await source.events.create_event(tenant=TENANT, title="Solo", start=_dt(4), end=_dt(4, 10))
+    records = await _records(source)
+    # An archive from before the export normalised: the booleans travel as `null`.
+    stale = [
+        PortabilityRecord(
+            kind=record.kind,
+            id=record.id,
+            data={**record.data, "all_day": None, "excluded": None},
+        )
+        for record in records
+    ]
+    first = await _apply(target, stale)
+    second = await _apply(target, stale)
+    assert first.counts[EVENT_RECORD_KIND].created == 1
+    assert second.counts[EVENT_RECORD_KIND].skipped == 1
+    assert second.counts[EVENT_RECORD_KIND].updated == 0
+
+
+async def test_a_null_that_cannot_be_defaulted_costs_one_event_not_the_calendar(
+    source: _Side, target: _Side
+) -> None:
+    """One unusable row must not take the rest of the stream — it all runs in one transaction."""
+    await source.events.create_event(tenant=TENANT, title="Solo", start=_dt(4), end=_dt(4, 10))
+    good = await _records(source)
+    broken = PortabilityRecord(
+        kind=EVENT_RECORD_KIND,
+        id="broken-1",
+        # `title` is NOT NULL with no default of any kind: there is nothing to fill it with.
+        data={**good[0].data, "event_id": "broken-1", "title": None},
+    )
+    report = await _apply(target, [broken, *good])
+
+    assert report.counts[EVENT_RECORD_KIND].skipped == 1
+    assert report.counts[EVENT_RECORD_KIND].created == 1
+    assert any("title" in warning for warning in report.warnings)
+    assert [event.title for event in await _expanded(target)] == ["Solo"]
+
+
+async def test_a_nullable_columns_null_is_left_alone(source: _Side, target: _Side) -> None:
+    """A NULL that means something is data — `recurrence` on a plain event, and it stays NULL."""
+    await source.events.create_event(tenant=TENANT, title="Solo", start=_dt(4), end=_dt(4, 10))
+    records = await _records(source)
+    assert records[0].data["recurrence"] is None
+    assert records[0].data["timezone"] is None
+    await _apply(target, records)
+    async with target.engine.connect() as conn:
+        row = (await conn.exec_driver_sql("SELECT recurrence, timezone FROM calendar_events")).one()
+    assert row.recurrence is None
+    assert row.timezone is None

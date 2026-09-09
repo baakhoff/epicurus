@@ -975,7 +975,7 @@ dev = [
 
 [[package]]
 name = "epicurus-calendar"
-version = "0.21.0"
+version = "0.21.1"
 source = { editable = "services/calendar" }
 dependencies = [
     { name = "asyncpg" },
@@ -1048,7 +1048,7 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.122.0"
+version = "0.123.0"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },

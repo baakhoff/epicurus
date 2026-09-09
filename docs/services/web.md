@@ -428,6 +428,17 @@ two the halves already show included — each with a download beside it while it
 lasts. Deliberately not `localStorage`: the server's list is right on a second device and in
 a different browser, and a remembered id is right in neither.
 
+**And can be let go of** (#903). Every job that is not running carries a **Remove** —
+`DELETE /platform/v1/portability/{exports,imports}/{id}` — in the Recent jobs list and, for the
+job the import half is currently showing, beside Apply. Jobs otherwise leave only through the
+retention sweep, which runs when the *next* job starts, so a failed import stayed on the card
+with its report for a day and the only way to clear it was to cause another one. A **running**
+job is not offered the button at all: the core refuses that with a `409` (a delete is not a
+cancel), and offering a press that can only earn a refusal is worse than not offering it. The
+card also holds the ids it has removed for the life of the page, so the row *and* this tab's
+own copy of the job — the thing actually rendering the report — go at the press rather than
+whenever the invalidated list comes back.
+
 Deliberately **not** rendered (#886): a module's byte half. `ImportComponentResult.blobs` —
 how many objects were written, and the `conflicts` / `missing` id lists — and the
 per-component `warnings` that repeat them are in the report the API returns but have no row

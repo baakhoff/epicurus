@@ -428,12 +428,30 @@ two the halves already show included — each with a download beside it while it
 lasts. Deliberately not `localStorage`: the server's list is right on a second device and in
 a different browser, and a remembered id is right in neither.
 
-Deliberately **not** rendered (#886): a module's byte half. `ImportComponentResult.blobs` —
-how many objects were written, and the `conflicts` / `missing` id lists — and the
-per-component `warnings` that repeat them are in the report the API returns but have no row
-in this card; an operator who needs them reads
-`GET /platform/v1/portability/imports/{id}`. The same holds on the way out: the export
-progress list shows a component's record `count`, not its `blobs` / `blob_bytes`.
+**And can be let go of** (#903). Every job that is not running carries a **Remove** —
+`DELETE /platform/v1/portability/{exports,imports}/{id}` — in the Recent jobs list and, for the
+job the import half is currently showing, beside Apply. Jobs otherwise leave only through the
+retention sweep, which runs when the *next* job starts, so a failed import stayed on the card
+with its report for a day and the only way to clear it was to cause another one. A **running**
+job is not offered the button at all: the core refuses that with a `409` (a delete is not a
+cancel), and offering a press that can only earn a refusal is worse than not offering it. The
+card also holds the ids it has removed for the life of the page, so the row *and* this tab's
+own copy of the job — the thing actually rendering the report — go at the press rather than
+whenever the invalidated list comes back.
+
+**A module's bytes are in the report** (#905, the shape from #876). Under a component's own
+row, when `ImportComponentResult.blobs` is not `null`: a `bytes` line
+(`N written · M skipped · X MB`), then the `conflicts` and `missing` id lists, each headed with
+its one-line meaning — "already here with different content — left untouched", and "record
+imported, bytes not in the archive — copy the file across, its download answers 404 until then".
+Counted apart from the records above because a hundred rows and a hundred objects are the same
+number and wildly different imports. A list past five entries is a `<details>` rather than a
+truncation: the ids are what the operator has to act on, so all of them stay reachable, and a
+`storage` module with forty conflicts must not push the rest of the report off the card to say
+so. Nothing at all when `blobs` is `null` — that module has no object store, which is not the
+same fact as having carried nothing. Until this the whole byte half was visible only in
+`GET /platform/v1/portability/imports/{id}` (#886). The export half is unchanged: its progress
+list still shows a component's record `count`, not its `blobs` / `blob_bytes`.
 
 Both halves poll only while a job is in flight and stop the moment it settles — as does the
 job list itself — so an idle Settings page settles back to no requests. Every verdict,
@@ -689,7 +707,11 @@ saved* (*saved · not indexed* if the re-index round-trip failed); a **read-only
 watched Obsidian mount (ADR-0035) — never saves. The list and editor panes are each width-
 and scroll-bounded (`min-w-0`, `overscroll-contain`), so on a phone the Save-bearing
 toolbar never overflows the viewport and scrolling a long note never drags the bottom tab
-bar.
+bar. The `.ProseMirror` surface sets `caret-color: var(--ep-accent)` (#904) rather than
+leaving the text cursor to inherit `color`, so it reads in the archetype's accent hue instead
+of blending into the surrounding text — dark theme especially, where the two used to sit at
+the same lightness; the rule inherits into code blocks, blockquotes and the title line too,
+since none of them set their own `caret-color`.
 
 When the page is **`versioned`** (notes, knowledge — ADR-0046), a **History** control lists
 past saves; selecting one previews it read-only, and **Restore** brings it back as a fresh

@@ -30,6 +30,12 @@ each with its own download while its archive lasts. (Archives are cleaned up aft
 see the table at the end. A job whose archive has gone says so, and the answer is to export
 again.)
 
+**Finished with a job? Remove it.** Every job that is not still running has a **Remove**
+beside it — in Recent jobs, and on the import half for the one it is showing. It drops the job
+and its archive there and then, rather than leaving them until the automatic clean-up, which
+only happens the next time you start a job. A job that is still working cannot be removed:
+Remove forgets a job, it does not stop one.
+
 When the job is ready a **Download archive** link appears. The archive is a plain gzipped
 tar you can open with tools you already have:
 
@@ -131,10 +137,34 @@ That has two useful consequences:
 One deliberate exception, in your favour: a **file** that exists here with different
 contents is *never* overwritten. It is named in the report as a conflict, and you decide.
 
+### One bad record costs one record
+
+Very occasionally an archive holds a record this installation cannot write — a field left
+empty on the old machine that has no default here to stand in for it. That record is
+**skipped**, the report names the field, and everything else in the same group still lands. It
+used to take the whole group with it: preferences are applied in one transaction, so a single
+unusable row lost the model settings, the timezone, the page order, push notifications and the
+maintenance schedule at once. Most empty fields are not this — an older machine legitimately
+leaves a newer setting unset, and the import simply fills it with that setting's own default.
+
 ### After an apply
 
 The report shows what each component did, which files were written, and the two rebuilds the
-import runs for you:
+import runs for you.
+
+**Your uploads are reported too.** A module that keeps files of its own — `storage`, where
+everything you attach to a chat ends up — gets a **bytes** line under its row saying how many
+objects were written and how much that was, and, when there is anything to say, two lists:
+
+* **already here with different content** — the bytes here differ from the archive's, so they
+  were left exactly as they are. Nothing was overwritten; it is yours to reconcile.
+* **record imported, bytes not in the archive** — the entry is there and findable, but the
+  file itself was not carried (it was over the per-file ceiling, or already gone on the old
+  machine). Its download answers 404 until you copy the file across yourself.
+
+A list longer than five folds up; open it to read every id.
+
+The two rebuilds:
 
 1. a **forced re-scan** of your file space, rebuilding the Files index and search;
 2. the **re-embed** fan-out, asking each module to rebuild its vectors with *this*

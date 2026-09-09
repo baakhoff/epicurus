@@ -25,6 +25,70 @@ images to GHCR.
   so today they still land on the default. No backfill: every existing row and object was
   written under the default tenant and stays exactly where it is. `storage` 0.10.0→0.11.0
   (MINOR).
+- **The import report shows what happened to your files, not just your records** (#905) — a
+  module that keeps files of its own (`storage`, where every chat attachment lives) has always
+  answered an import with a byte-level result: how many objects were written, which ones were
+  **left untouched because the bytes here differ**, and which arrived as a record whose file the
+  archive did not carry — the entry is findable and its download answers 404 until the operator
+  copies it across. None of that was rendered anywhere (#886), so the one component where it
+  matters most reported only record counts and the operator had to read the JSON to learn that
+  a file had not come with them. Export & import now shows a `bytes` line under the component's
+  own row and both id lists, each headed with what it means and what to do about it, collapsed
+  past five entries so a module with forty conflicts cannot push the rest of the report off the
+  card. Plain rows in the shell's own style; the core decides what they mean and the card shows
+  them (ADR-0018). `web` 0.144.0→0.145.0 (MINOR).
+
+- **A `NULL` no longer costs the operator a whole data set, and a failed import can be thrown
+  away** (#903) — dogfooding the tenant import on a second machine lost the entire `prefs` set
+  to a single row. A column added after its table's first release with no `server_default` is
+  reconciled in **nullable** (there is nothing to backfill a populated table with), so a
+  long-lived source carries `NULL` where the model says `NOT NULL` — and a fresh target, whose
+  `create_all` made the column `NOT NULL` for real, refused the insert. One row took
+  `llm_prefs`, `saved_models`, `model_settings`, the timezone, the page order, push and the
+  maintenance schedule with it, because a set is one transaction. Both ends now normalise a
+  `NULL` to the column's own default, on export *and* on import, so an archive is portable
+  whichever reconcile its source went through and archives already written apply cleanly; a
+  null that genuinely cannot be defaulted costs **one row**, named with its column in the
+  report, and the rest of the set still lands. The same shape was what made `calendar` answer
+  the import with a 500 and lose the calendar — `all_day` and `excluded` are exactly that kind
+  of column — and it is fixed the same way at both ends. And a job can now be **removed**:
+  `DELETE /platform/v1/portability/{exports,imports}/{id}` drops the row and its staged
+  archive (409 while it is running — a delete is not a cancel), with Remove on the import half
+  and on every settled row of Recent jobs. Until now jobs left only through the retention
+  sweep, which runs when the *next* job starts, so a failed import sat on the card with its
+  report for a day and the only way to clear it was to cause another one. `core-app`
+  0.122.0→0.123.0 (MINOR) · `web` 0.143.1→0.144.0 (MINOR) · `calendar` 0.21.0→0.21.1 (PATCH).
+
+- **The editor's text cursor now reads in the accent colour, not body text** (#904) —
+  dogfooding turned up a `.ProseMirror` caret that inherited `color` and so sat at exactly
+  the same lightness as the character next to it, easy to lose in a long note, worst on the
+  dark theme. `caret-color: var(--ep-accent)` fixes it with one inherited declaration —
+  it reaches code blocks, blockquotes and the title line too, since none of them set their
+  own `caret-color` — and needs no custom ProseMirror decoration: the accent clears WCAG
+  1.4.11's 3:1 non-text floor against the editor surface on every theme/power combination.
+  `web` 0.143.0→0.143.1 (PATCH).
+- **The published Helm chart is a release artifact, not a nightly one** (#907, part of #889) —
+  `testing.yml` published a chart on every push to `testing`, which made the on-demand
+  `0.0.0-testing.<sha>` build look like a supported second track when the standard install and
+  upgrade path is, and always was, a tagged release pulled straight from
+  `oci://ghcr.io/baakhoff/charts/epicurus`. `testing.yml` no longer packages a chart at all;
+  `release.yml` is unchanged. A new `chart-branch.yml` packages and pushes a chart from any
+  branch or sha on a manual dispatch only — `0.0.0-<branch>.<7-char sha>`, with the dispatch
+  naming the image tag that ref's images actually carry (`testing` is the one ref that can
+  infer it) — for the owner's own testing clusters, never automatic and never the documented
+  path. `docs/infrastructure/kubernetes.md` now leads with the OCI release install and gives the
+  checkout path its honest name, "developing the chart." No component bump.
+- **A tool's failure message reaches the model again under mcp 2.1** (#908) — mcp 2.1
+  started masking any tool exception other than `ToolError`/`ResourceError`/`MCPError` as
+  a bare `Error executing tool <name>`, dropping the model-actionable text every module's
+  `KeyError`/`ValueError`/`LookupError` failures rely on (37 tests across every module
+  caught it). `EpicurusModule.tool()` now wraps the registered function so any exception
+  it raises reaches the SDK already as a `ToolError` carrying the original message,
+  chained — restoring the mcp 2.0 contract exactly. The wrapper logs an anticipated
+  exception (`KeyError`/`LookupError`/`ValueError`/`PermissionError`/`FileNotFoundError`)
+  at WARNING and everything else at ERROR with a traceback, so a genuine crash still
+  stands out to the operator even though the model still gets a readable message. `mcp`'s
+  floor moves to `>=2.1,<3`. `epicurus-core` 0.37.0→0.38.0 (MINOR).
 - **An import now shows its work, and the Platform card tells the truth** (#893) — dogfooding a
   tenant import on a second machine found four things the Settings card never said. The upload
   was a busy button: `fetch` cannot report upload progress at all, so the archive route is now

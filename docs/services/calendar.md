@@ -710,6 +710,19 @@ rather than `updated`.
   dropped, also with a warning. The rest of the stream still lands.
 * An **older** `calendar/<n>` is accepted with a warning; a **newer** one — or a stream from
   another module — is refused `409` before a byte is written.
+* **A `NULL` the model has a default for never travels as one** (#903). `all_day` and
+  `excluded` postdate this table's first release and carry no `server_default`, so the additive
+  reconcile added them **nullable** to every database provisioned before them — there is
+  nothing to backfill a populated table with — and `_row_to_event` coerces the resulting `NULL`
+  to `False` on every ordinary read. Portability read it verbatim, and a fresh target's
+  `create_all` makes both columns `NOT NULL`, so the import raised an `IntegrityError`, the
+  route answered **500**, and the operator's whole calendar was lost. Both ends now normalise
+  from the column's own metadata; the `skipped`-vs-`updated` comparison runs against the
+  normalised record, so re-applying an archive written before this is still a no-op. A column
+  that is `NOT NULL` with no default at all (`title`) cannot be filled: that record is
+  `skipped` with a warning naming the column, and the rest of the stream still lands — one
+  event, never the calendar. A **nullable** column's `NULL` is data (`recurrence` on a plain
+  event, `timezone` on a pre-#446 master) and is left exactly as it is.
 
 ## Dependencies
 

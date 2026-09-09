@@ -595,7 +595,9 @@ can be *found* without an id: `GET .../jobs` lists this tenant's recent jobs, wh
 reloaded tab (or a second device) re-attaches to a run it did not start. The archive itself
 lives in a **disposable staging directory** (`PORTABILITY_STAGING_DIR`), swept after
 `PORTABILITY_RETENTION_HOURS` — a download of a swept archive is a **410**, and the answer
-is to export again.
+is to export again. A **settled** job can also be removed on demand (#903): the sweep only
+runs when the *next* job starts, so without a delete a failed import stays on the card, with
+its report, until another job is started a day later.
 
 ### `GET /platform/v1/portability/jobs`
 
@@ -658,6 +660,12 @@ its catalogue record still travels.
 
 The finished `.tar.gz` (`application/gzip`, `content-disposition: attachment`). **409**
 while the job is still running or if it failed; **410** if staging has been swept.
+
+### `DELETE /platform/v1/portability/exports/{id}`
+
+Forget one export: the job row **and** its staged archive. **204** on success, **404** for an
+id this tenant does not own (or an import id — the two routes do not cross), **409** while the
+job is still running. A delete is not a cancel; there is no way to stop a job in flight.
 
 ### `POST /platform/v1/portability/imports`
 
@@ -757,9 +765,9 @@ that already held **different** bytes here and were left untouched; `missing` ar
 archive listed but whose bytes it does not carry (omitted at export by the per-blob ceiling) —
 their catalogue records still landed, so the entry is listed and its download 404s until the
 operator copies those bytes across by hand. Both are repeated in `warnings` so a reader that
-only shows warnings still sees them. The Settings card renders neither list today (#886): it
-shows per-component record counts and the file-space conflicts, so a blob conflict or a missing
-object is visible only in this response.
+only shows warnings still sees them. Since #905 the Settings card renders all of it — a `bytes`
+line and both id lists under the component's own row, collapsed past five entries — so this
+response is no longer the only place a blob conflict or a missing object can be seen.
 
 `conflicts` names files that exist here with **different bytes** — never overwritten. After
 the components land, the core runs the file rescan for **this import's tenant** with the
@@ -788,6 +796,28 @@ can persist nothing worth exporting and still need reconnecting on the far side 
 export probes each enabled module's manifest `secrets[]` for **presence** (never the value)
 and the report says which to re-enter. Best-effort like the rest of the inventory: a vault
 that cannot be reached yields an empty map, not a failed export.
+
+**Nulls, and what one costs (#903).** A component's counts carry a fourth outcome with no
+field of its own: a record the target cannot accept is `skipped`, with a warning naming the
+column. It arises when a record holds `null` for a column the model declares `NOT NULL` —
+which a long-lived source genuinely has, because the additive reconcile adds a post-release
+column *nullable* when the model gives it no `server_default`. Almost always the core fills it
+from the column's own Python-side default and the record lands unchanged; that normalisation
+runs on **export and on import**, so an archive is portable whichever reconcile its source went
+through *and* an archive written before this rule applies cleanly. Only a column with **no**
+default at all (`maintenance_schedule_prefs.cadence`, `agent_messages.content`) costs a row —
+and it costs only that row: a set is applied in one transaction, so an insert allowed to raise
+would lose everything the set had already written. The identical rule binds a module's own
+import (ADR-0133); `calendar`'s `all_day`/`excluded` were the shape that made it a 500.
+
+### `DELETE /platform/v1/portability/imports/{id}`
+
+Forget one import: the job row **and** the archive staged for it. **204** on success, **404**
+for an id this tenant does not own (or an export id — the two routes do not cross), **409**
+while the apply is still running. This is the card's "Remove", and it exists because a *failed*
+import is exactly the job an operator wants gone: jobs otherwise leave only through the
+retention sweep, which runs when the next job starts, so a failure sat on the card with its
+report for a day (#903).
 
 The archive layout and the core's own included/excluded table are in
 [`core-app`](../services/core-app.md#tenant-data-portability-867); the module half of the

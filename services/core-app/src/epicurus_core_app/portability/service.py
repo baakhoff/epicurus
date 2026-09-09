@@ -86,7 +86,14 @@ from epicurus_core_app.portability.models import (
     as_json,
 )
 
-__all__ = ["ArchiveTooLarge", "FactSource", "ModuleTargets", "PortabilityService"]
+__all__ = [
+    "ArchiveTooLarge",
+    "FactSource",
+    "JobNotFound",
+    "JobRunning",
+    "ModuleTargets",
+    "PortabilityService",
+]
 
 
 class ArchiveTooLarge(ValueError):
@@ -96,6 +103,14 @@ class ArchiveTooLarge(ValueError):
     (``MemberError`` subclasses it), and "too big" is a 413 while "not an archive" is a 400.
     Collapsing them once already turned a corrupt upload into a size complaint.
     """
+
+
+class JobNotFound(LookupError):
+    """No such job for this tenant — a foreign id reads the same as a swept one (404)."""
+
+
+class JobRunning(RuntimeError):
+    """The job is still working, so it cannot be removed (409)."""
 
 
 log = get_logger("core.portability")
@@ -216,6 +231,32 @@ class PortabilityService:
         if removed:
             log.info("swept expired portability jobs", tenant=tenant, jobs=removed)
         return removed
+
+    async def remove(self, *, tenant: str, job_id: str) -> None:
+        """Delete one settled job of *tenant*'s — its row and its staging directory (#903).
+
+        Until this existed a job left the card only through :meth:`sweep`, which runs when the
+        *next* job starts and only past the retention window — so a failed import sat in
+        "Recent jobs" with its report on screen for a day, and the operator's only way to
+        clear it was to start another job and wait. An import that failed is exactly the one
+        an operator wants gone.
+
+        A **running** job is refused (:class:`JobRunning`) rather than removed: the background
+        task holds the staging directory open, and pulling the row out from under it would
+        turn a running apply into a silent one. There is no cancel here — an apply is
+        additive and half-applying is a real state, so stopping one mid-flight would need a
+        contract of its own, not a delete.
+        """
+        job = await self._jobs.get(tenant=tenant, job_id=job_id)
+        if job is None:
+            raise JobNotFound(f"no portability job {job_id!r}")
+        if job.status == "running":
+            raise JobRunning(f"job is {job.status}; it cannot be removed while it is working")
+        await asyncio.to_thread(
+            shutil.rmtree, str(self.job_dir(tenant, job_id)), ignore_errors=True
+        )
+        await self._jobs.delete(tenant=tenant, job_id=job_id)
+        log.info("portability job removed", tenant=tenant, job=job_id, kind=job.kind)
 
     def _spawn(self, coro: Any) -> None:
         task = asyncio.create_task(coro)

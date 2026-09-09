@@ -13,6 +13,8 @@ here once instead of in every module.
 
 from __future__ import annotations
 
+import functools
+import inspect
 from collections.abc import Callable
 from typing import Any
 
@@ -20,9 +22,11 @@ from fastapi import FastAPI
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult, ContentBlock
 from starlette.applications import Starlette
 
+from epicurus_core.logging import get_logger
 from epicurus_core.manifest import (
     CONTRACT_VERSION,
     AutomationTemplate,
@@ -40,6 +44,90 @@ from epicurus_core.manifest import (
 __all__ = ["EpicurusModule", "ToolError", "add_manifest_route"]
 
 Decorator = Callable[[Callable[..., Any]], Callable[..., Any]]
+
+logger = get_logger(__name__)
+
+# Exception types a tool raises on purpose to report a state the model can act on
+# (e.g. "task 'x' not found for tenant 'local'"). Logged at WARNING — expected traffic,
+# not an incident. Everything else is logged at ERROR with a traceback: it is still
+# turned into a ToolError (see ``_carry_tool_errors_to_the_model`` below) so the model
+# keeps reading a message instead of the generic "Error executing tool <name>" that
+# mcp >=2.1 substitutes for an unmasked crash, but the log line tells the operator this
+# one was not anticipated.
+_ANTICIPATED_TOOL_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    KeyError,
+    LookupError,
+    ValueError,
+    PermissionError,
+    FileNotFoundError,
+)
+
+
+def _carry_tool_errors_to_the_model(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Wrap a tool function so any exception it raises reaches the model as text.
+
+    mcp 2.1's ``Tool.run()`` treats any exception other than ``ToolError`` /
+    ``ResourceError`` / ``MCPError`` as a crash: it is re-raised as
+    ``UnexpectedToolError("Error executing tool <name>")`` and the original message
+    never reaches the client (mcp 2.0 carried it). Wrapping here, *before* the SDK's
+    own ``Tool.run()`` sees the exception, restores the mcp-2.0 contract exactly: a
+    plain ``KeyError``/``ValueError``/etc. raised by a tool still arrives at the model
+    with its own text, chained (``from exc``) so the traceback and cause survive for
+    anyone reading the server log.
+
+    ``functools.wraps`` keeps the wrapper transparent to the SDK's introspection —
+    ``inspect.signature`` follows ``__wrapped__`` by default, so the generated input
+    schema is unaffected.
+    """
+    if inspect.iscoroutinefunction(fn):
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(*args, **kwargs)
+            except (ToolError, MCPError):
+                raise
+            except _ANTICIPATED_TOOL_EXCEPTIONS as exc:
+                logger.warning(
+                    "tool raised an anticipated exception",
+                    tool=fn.__name__,
+                    exc_type=type(exc).__name__,
+                )
+                raise ToolError(str(exc)) from exc
+            except Exception as exc:
+                logger.error(
+                    "tool crashed",
+                    tool=fn.__name__,
+                    exc_type=type(exc).__name__,
+                    exc_info=True,
+                )
+                raise ToolError(str(exc)) from exc
+
+        return async_wrapper
+
+    @functools.wraps(fn)
+    def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except (ToolError, MCPError):
+            raise
+        except _ANTICIPATED_TOOL_EXCEPTIONS as exc:
+            logger.warning(
+                "tool raised an anticipated exception",
+                tool=fn.__name__,
+                exc_type=type(exc).__name__,
+            )
+            raise ToolError(str(exc)) from exc
+        except Exception as exc:
+            logger.error(
+                "tool crashed",
+                tool=fn.__name__,
+                exc_type=type(exc).__name__,
+                exc_info=True,
+            )
+            raise ToolError(str(exc)) from exc
+
+    return sync_wrapper
 
 
 class EpicurusModule:
@@ -144,21 +232,24 @@ class EpicurusModule:
         restrictive reading, so an unannotated tool is withheld from a read-only automation
         rather than trusted by one. **Annotate your read tools** — that is what makes them
         usable by a Notify automation.
+
+        Every registered function is wrapped so a plain exception it raises (a
+        ``KeyError``/``ValueError`` reporting "not found", say) still reaches the model as
+        text — see :func:`_carry_tool_errors_to_the_model`. mcp >=2.1 would otherwise mask it
+        behind a generic "Error executing tool <name>".
         """
         registered = self._mcp.tool(name=name, description=description)
-        if writes_document is None and side_effect is None:
-            return registered
 
-        def annotate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        def register(fn: Callable[..., Any]) -> Callable[..., Any]:
             # Key by the name the MCP server will publish: the explicit one, else the function's.
             key = name or fn.__name__
             if writes_document is not None:
                 self._writes_documents[key] = writes_document
             if side_effect is not None:
                 self._side_effects[key] = side_effect
-            return registered(fn)
+            return registered(_carry_tool_errors_to_the_model(fn))
 
-        return annotate
+        return register
 
     def emits(self, subject: str, description: str = "") -> None:
         """Declare a base event subject this module publishes."""

@@ -1,10 +1,12 @@
 """The operator-facing portability API — ``/platform/v1/portability`` (#867).
 
-Seven endpoints, three shapes. An **export** is started, polled, and downloaded; an
+Nine endpoints, four shapes. An **export** is started, polled, and downloaded; an
 **import** is uploaded (which only ever *reads* it), previewed, applied, and polled. The
 asymmetry is deliberate: an export can be started with one click because it changes nothing,
 while an import shows the operator exactly what it is about to do and waits to be told to do
-it. The seventh, **the job list**, is what makes either survive a page reload (#877).
+it. **The job list** is what makes either survive a page reload (#877), and the two
+**deletes** are what let a settled job leave the list before the retention sweep gets to it
+(#903) — a failed import used to be unclearable for a day.
 
 Every endpoint is tenant-scoped, and a job id from another tenant reads as absent rather
 than forbidden (constraint #1 — a tenant should not be able to learn that another's job
@@ -17,7 +19,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, UploadFile
+from fastapi import APIRouter, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 
 from epicurus_core import get_logger
@@ -32,7 +34,12 @@ from epicurus_core_app.portability.models import (
     ImportReportView,
     PortabilityJobSummary,
 )
-from epicurus_core_app.portability.service import ArchiveTooLarge, PortabilityService
+from epicurus_core_app.portability.service import (
+    ArchiveTooLarge,
+    JobNotFound,
+    JobRunning,
+    PortabilityService,
+)
 
 __all__ = ["create_portability_router"]
 
@@ -190,6 +197,41 @@ def create_portability_router(
     async def get_import(job_id: str, tenant_id: str | None = Query(default=None)) -> ImportJobView:
         """Status, the preview, and — once applied — the final report."""
         return _import_view(await _job(_tenant(tenant_id), job_id, "import"))
+
+    async def _remove(tenant_id: str | None, job_id: str, kind: str) -> Response:
+        tenant = _tenant(tenant_id)
+        await _job(tenant, job_id, kind)  # 404s a foreign id and a wrong-kind one alike
+        try:
+            await service.remove(tenant=tenant, job_id=job_id)
+        except JobNotFound as exc:  # swept between the read and the delete
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except JobRunning as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(status_code=204)
+
+    @router.delete("/imports/{job_id}", status_code=204)
+    async def remove_import(job_id: str, tenant_id: str | None = Query(default=None)) -> Response:
+        """Forget one import — the job row and its staged archive (#903).
+
+        The card's "Remove". Without it a failed import sat in the job list with its report
+        on screen until the retention sweep, which only runs when the *next* job starts; the
+        operator's only way to clear a failure was to cause another one. **409** while the
+        apply is still running: the background task owns the staging directory, and a delete
+        is not a cancel.
+        """
+        return await _remove(tenant_id, job_id, "import")
+
+    @router.delete("/exports/{job_id}", status_code=204)
+    async def remove_export(job_id: str, tenant_id: str | None = Query(default=None)) -> Response:
+        """Forget one export — the job row and its staged archive (#903).
+
+        The symmetric half, because the *list* is not split by kind: "Recent jobs" shows both,
+        and a Remove that appeared on some rows and not others would read as a broken button
+        rather than a deliberate asymmetry. It is also the only way to discard an archive
+        early — staging is a cache, and an operator who has downloaded theirs should be able
+        to say so.
+        """
+        return await _remove(tenant_id, job_id, "export")
 
     return router
 

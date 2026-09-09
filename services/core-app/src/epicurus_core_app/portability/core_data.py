@@ -368,9 +368,11 @@ def _scalar_default(column: Column[Any]) -> Any:
     into the archive.
     """
     default = column.default
-    # ``ColumnDefault`` is the plain-value branch of SQLAlchemy's default hierarchy; a
-    # ``CallableColumnDefault`` / ``Sequence`` has no ``arg`` to read, which is the same
-    # answer as having none.
+    # ``is_scalar`` is what does the work, not the ``isinstance``: ``CallableColumnDefault``
+    # and ``ColumnElementColumnDefault`` are both ``ColumnDefault`` subclasses and both carry
+    # an ``arg`` (the callable, the SQL element) — it is just not a value that may be frozen
+    # into a record, which is the same answer as having no default at all. A ``Sequence`` is
+    # not a ``ColumnDefault``, so the ``isinstance`` catches that one.
     if not isinstance(default, ColumnDefault) or not default.is_scalar:
         return _NO_DEFAULT
     return default.arg

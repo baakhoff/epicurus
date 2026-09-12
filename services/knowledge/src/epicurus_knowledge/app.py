@@ -23,12 +23,14 @@ from epicurus_core import (
     get_logger,
     scope_collection,
 )
+from epicurus_core.db.migrations import run_migrations
 from epicurus_knowledge.attachments import VaultAttachments, create_attachments_router
 from epicurus_knowledge.db import DocIndex, NoteIndex, VersionStore
 from epicurus_knowledge.dimensions import CollectionDimensionGuard
 from epicurus_knowledge.events import KnowledgeEventEmitter
 from epicurus_knowledge.fuse import FusePolicy, rebuild_refusals
 from epicurus_knowledge.indexer import KnowledgeIndexer
+from epicurus_knowledge.migrations import METADATAS, SCRIPT_LOCATION
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 from epicurus_knowledge.pages import VaultPages, create_pages_router
 from epicurus_knowledge.portability import KnowledgePortability
@@ -233,12 +235,18 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
-            await note_index.init()
-            await doc_index.init()
-            await module_doc_ledger.init()
-            await suggestion_store.init()
-            await suggestion_audit.init()
-            await version_store.init()
+            # Schema first, before anything reads or writes a row. In-process rather than a
+            # separate init step: a container has one entry point on both runtimes this stack
+            # supports, and a Kubernetes-only init container would put the schema behind a
+            # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
+            # start — is handled by the Postgres advisory lock inside run_migrations, not by
+            # assuming this process is alone (#834, #931, ADR-XXXX).
+            await run_migrations(
+                engine,
+                service=MODULE_NAME,
+                script_location=SCRIPT_LOCATION,
+                metadatas=METADATAS,
+            )
             await bus.connect()
             log.info(
                 "knowledge service ready",

@@ -12,6 +12,13 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Add a hosted model straight from the Models page** (#922) — the Hosted models card's
+  "None yet" copy used to send the operator to a chat's model picker just to save an id; now an
+  **Add a hosted model** row sits on the card itself, with a provider select drawn from what the
+  core actually reports (never the client's static alias list, so an unregistered provider can't
+  be picked), a model-id field that prepends the alias for you (OpenRouter's two-slash ids stay
+  intact), and an inline hint when the chosen provider's key is `missing`/`unavailable` — the
+  first place the core's `key_state` (#728) is rendered. `web` 0.145.0→0.146.0 (MINOR).
 - **The Helm chart has now actually booted** (#894) — the chart shipped rendered and
   schema-checked and never once started, which left a whole class of failure (a bad probe, an
   unwritable mount, an RBAC grant one verb short) uncaught until an operator hit it, and left

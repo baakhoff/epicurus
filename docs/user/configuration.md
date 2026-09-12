@@ -92,10 +92,14 @@ To connect OpenRouter:
 
 1. **Enter the key.** Models page → *Providers* → **OpenRouter** → paste your key. It is
    write-only: the UI never shows it again.
-2. **Pick a chat model.** Type its full id in the model picker, e.g.
-   `openrouter/anthropic/claude-sonnet-4.6`. Note the **two** slashes — OpenRouter's model ids
-   carry a vendor segment of their own, and the whole thing after `openrouter/` is the model
-   name. Using a model saves it to your list, so it is a click next time.
+2. **Add a chat model.** Models page → *Hosted models* → **Add a hosted model** → pick
+   **OpenRouter** from the provider select, then type just the model part, e.g.
+   `anthropic/claude-sonnet-4.6` — the `openrouter/` alias is prepended for you. Note the model
+   part still carries **its own** slash — OpenRouter's ids carry a vendor segment of their own,
+   and the whole thing after the alias is the model name. Adding it saves it to your list, so
+   it's a click (or a star, to make it the default) next time. This no longer needs a chat: a
+   model chosen in the picker is still saved the same way, but the Models page is now enough on
+   its own.
 3. **Pick an embedding model** *(optional)*. Models page → **Embedding model**. Local models
    and your saved hosted ones appear in separate groups; a hosted embedding id looks like
    `openrouter/openai/text-embedding-3-small`. The saved list cannot tell a chat model from an

@@ -254,11 +254,18 @@ export const SystemInfo = z.object({
 });
 export type SystemInfo = z.infer<typeof SystemInfo>;
 
+// `key_state` distinguishes "no key needed" / "key present" / "OpenBao has nothing there" /
+// "OpenBao couldn't be asked" (#728) — three real answers behind the one `configured` bit.
+// `key_error` names the reason for `unavailable` only. Defaulted so an older core (which sends
+// neither) still parses: every row reads as `not_required`, matching `configured` exactly as
+// before this field existed.
 export const ProviderInfo = z.object({
   alias: z.string(),
   local: z.boolean(),
   configured: z.boolean(),
   needs_base_url: z.boolean().default(false),
+  key_state: z.enum(["not_required", "present", "missing", "unavailable"]).default("not_required"),
+  key_error: z.string().nullish(),
 });
 export type ProviderInfo = z.infer<typeof ProviderInfo>;
 

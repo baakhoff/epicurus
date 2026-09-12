@@ -19,8 +19,10 @@ images to GHCR.
   the same names, so the Compose fragment, the chart's `minio.image` / `minio.initImage`
   defaults, and the docs now point at `quay.io/minio/minio` / `quay.io/minio/mc` — identical
   digests, nothing else moves. An existing deployment that already holds the images keeps
-  running; it picks the new ref up on its next pull. Chart 0.1.1→0.1.2 (PATCH); no
-  component bump.
+  running; it picks the new ref up on its next pull. The two testcontainers suites that
+  boot MinIO (`epicurus-core` `test_s3_round_trip`, storage's object-store tests) pin the
+  same Quay image instead of the library's Docker Hub default, so the `quality` gate pulls
+  from the same place. Chart 0.1.1→0.1.2 (PATCH); no component bump.
 - **The Helm chart has now actually booted** (#894) — the chart shipped rendered and
   schema-checked and never once started, which left a whole class of failure (a bad probe, an
   unwritable mount, an RBAC grant one verb short) uncaught until an operator hit it, and left

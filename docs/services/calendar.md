@@ -625,10 +625,9 @@ database.
 Unique constraint: `(tenant, event_id)`.
 
 `all_day`, `recurrence`, `recurring_event_id`, `excluded`, `attendees`, and `timezone` were all
-added after the table's first release. There is no migration framework, so
-`LocalEventStore.init` runs an additive `_ensure_columns` step that adds each in place on an
-existing table (mirroring `TaskStore._ensure_columns`, #248); rows written before a given
-column existed read `NULL`, coerced to the documented fallback above.
+added after the table's first release; a deployment that predates a given column read `NULL`
+there, coerced to the documented fallback above. See **Schema is migration-managed** below for
+how that reconciliation happens now.
 
 The **Google provider** stores no data locally; all its *event* state lives in Google Calendar
 and in the core's OAuth vault. An all-day Google event uses `start.date`/`end.date` (date-only)
@@ -651,10 +650,41 @@ The **reconcile layer** (#831) owns three more, all tenant-scoped, all in the sa
 | `calendar_synced_event` | `(tenant, account, collection, event_id)` unique | What this module last observed about one event: `series_id` (kept denormalised — a tombstone has no event object left to read it from), `title`, `start_dt`/`end_dt`, `all_day`, and `change_hash` (`spine.event_change_hash` of the last observed state). This is what turns a provider's "here is a changed event" into a creation, an edit (with a real `time_changed`) or a cancellation with a printable title. |
 | `calendar_self_writes` | `(tenant, marker_key)` unique | The self-write ledger. `marker_key` is `"<event type>|<provider>:<id>"`; `expires_at_ns` is a nanosecond epoch (~1.8e18) and therefore `BigInteger`, never `Integer`. Durable rather than in-memory on purpose: a write can land seconds before a restart, and the reconcile that then notices it must still know it was already announced. Expired rows are pruned once per reconcile pass. |
 
-All three are created by `CalendarSyncStore.init` / `SelfWriteLedger.init` via `create_all` +
-the shared additive `ensure_columns` reconcile (ADR-0067) — this is their first release, so the
-reconciled-column lists are empty; they exist so a *later* column lands in an already-provisioned
-database instead of 500ing every read.
+### Schema is migration-managed (#834, #928, ADR-XXXX)
+
+Calendar is the second service to adopt the Alembic foundation (#926), after `storage`. The
+deployed shape of all six tables above comes from the revisions in
+`src/epicurus_calendar/migrations/versions/`, applied once at startup: the lifespan calls
+`epicurus_core.db.migrations.run_migrations` before anything reads a row, under a Postgres
+advisory lock so two replicas — or a restart overlapping a start — cannot both run `upgrade
+head`. Its private version table is `alembic_version_calendar`; every service shares one
+database and keeps its own head revision. The migration target is one `MetaData` per store
+module's `DeclarativeBase` — four of them (`epicurus_calendar.db`, `.lead_time_prefs`,
+`.scheduler`, `.sync_store`), declared in `src/epicurus_calendar/migrations/__init__.py`.
+
+- Every store's `init()` still exists and still calls `create_all`, but **the deployed service
+  no longer calls it** — it is the unit-test schema path, kept because an Alembic run per test
+  is needless cost. CI's `migrations` gate is what proves the two agree. The `_ensure_columns`
+  staticmethods and `_ADDED_COLUMNS` tuples the additive reconcile used are gone from every
+  store; the baseline revision's `ep.create_table` absorbed them.
+- **The backfill audit (#834's rule) found seven** `NOT NULL` columns with a Python-side
+  `default=` and no `server_default=`: `calendar_events.{all_day,excluded}` and
+  `calendar_sync_state.collection` / `calendar_synced_event.{collection,title,all_day,
+  change_hash}`. The first two postdate `calendar_events`'s first release and travel through
+  the old `_ADDED_COLUMNS` reconcile, which — having no server default to backfill an existing
+  row with — added them **nullable**, so a deployment that predates either column can genuinely
+  hold `NULL` there (the same shape of bug as #903, in another service). The other five are
+  original columns of tables with no reconcile history, so every path that has ever created
+  them declared them `NOT NULL` from the start — nothing to backfill there in practice. Revision
+  **0002** backfills any real `NULL` to the model's own default and adds the matching server
+  default to all seven, so the database enforces what the application layer has always supplied.
+  `collection`, `title`, and `change_hash` sit inside unique constraints, which is why the fix
+  matches the existing default rather than inventing a value that could collide.
+- Calendar has **no** plain-string `server_default="'…'"` columns (the defect storage's
+  adoption arm surfaced, ADR-XXXX) — every `server_default` here is `func.now()`.
+- Changing a column here means writing a revision: `task migrate:new -- calendar "<what
+  changed>"`, then `task migrate:check -- calendar`. See
+  **[Schema migrations](../developer/migrations.md)**.
 
 ## Portability (#870)
 

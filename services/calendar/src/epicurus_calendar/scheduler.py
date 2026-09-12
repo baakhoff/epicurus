@@ -23,7 +23,6 @@ import time
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import BigInteger, String, UniqueConstraint, select
-from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -32,7 +31,6 @@ from epicurus_calendar.lead_time_prefs import LeadTimePrefsStore
 from epicurus_calendar.models import DateTimeRange, Event
 from epicurus_calendar.providers.base import CalendarProvider
 from epicurus_core import EntityRef, EventBus, emit_event, get_logger
-from epicurus_core.db import ensure_columns
 
 log = get_logger("epicurus_calendar.scheduler")
 
@@ -87,14 +85,16 @@ class FiredMarkerStore:
         )
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's table straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment in :mod:`epicurus_calendar.migrations`, applied once at startup by
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-XXXX). It survives
+        for the tests, where a fresh SQLite file per test is cheaper to build from the models
+        than to migrate.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_MarkerBase.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        ensure_columns(sync_conn, _FiredMarkerRow.__table__, ())
 
     async def try_claim(self, *, tenant: str, event_id: str, marker: str) -> bool:
         """Atomically claim ``(tenant, event_id, marker)`` — ``True`` if this call won.

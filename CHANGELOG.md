@@ -12,6 +12,56 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`calendar`'s schema is migration-managed now** (#834, #928) — the second service to adopt
+  the Alembic foundation (#926), after `storage`. A baseline revision covers all four
+  `DeclarativeBase`s (six tables: the local event store, the lead-time preference, the
+  lead-time scheduler's fire-once markers, and the reconcile layer's sync cursor /
+  observed-event cache / self-write ledger); the startup reconcile calls
+  (`epicurus_core.db.ensure_columns`, `_ADDED_COLUMNS`) are gone from every store, replaced by
+  one `run_migrations` call in the lifespan. The backfill audit found **seven** `NOT NULL`
+  columns with a Python-side default and no server default — `calendar_events.{all_day,
+  excluded}` (which the old reconcile could only add *nullable* to a populated table, so an
+  upgraded deployment could genuinely hold `NULL` there, #903's shape of bug) and
+  `calendar_sync_state.collection` / `calendar_synced_event.{collection,title,all_day,
+  change_hash}` (always `NOT NULL` in practice, since those tables have no reconcile history) —
+  a revision backfills any real `NULL` and adds the server default to all seven. `calendar`
+  0.21.1→0.22.0 (MINOR).
+- **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
+  the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
+  was un-shippable, a `NOT NULL` column added without a server default reached existing rows as
+  `NULL` (the cause of #903), and no gate anywhere ever exercised an *upgrade* — the unit tests
+  build tables from the models and the smoke gates boot an empty database, so both production
+  failures that motivated this (#214, #218) were visible only on a deployment that had been
+  running a while. epicurus now uses **Alembic, one migration environment per service**, applied
+  in-process at startup under a Postgres advisory lock so two replicas or an overlapping restart
+  never migrate at once — the same on Compose and on Kubernetes. Each service keeps its own
+  version table (`alembic_version_<service>`), because all seven share one database and own
+  disjoint tables in it. A service's *baseline* revision is idempotent, so one `upgrade head`
+  serves an empty database, one built by the old reconcile, and one already at head — with no
+  branch and, unlike a stamp, no revision ever silently skipped. `storage` is migrated as the
+  reference; authoring is `task migrate:new` and `task migrate:check` (a second, on SQLite), and
+  a new **`migrations`** CI gate proves every migrated service on real Postgres: fresh install,
+  restart, adoption of a pre-Alembic database, and adoption of a *drifted* one. A model change
+  with no revision now fails review instead of production. The gate earned its keep on its very
+  first run: a *plain string* `server_default` is a literal SQLAlchemy quotes for you, so the
+  house pattern `server_default="'fs'"` has been compiling to `DEFAULT '''fs'''` — a default whose
+  value carries the quote characters — while the additive reconcile, pasting the same string in as
+  raw SQL, produced `DEFAULT 'fs'`: two deployments of the same release could disagree about their
+  own column defaults. Storage's is corrected and an existing database normalised by a revision —
+  the first change here the reconcile could never have made. The remaining services carry the same
+  pattern and each lane fixes its own. `epicurus-core` 0.38.0→0.39.0 (MINOR), `storage`
+  0.11.0→0.12.0 (MINOR).
+- **MinIO images now pull from Quay** — Docker Hub no longer serves the `minio/minio` and
+  `minio/mc` repositories (a `404` on the repository itself, not just the tag), so every
+  fresh `compose up`, the `runtime-smoke` and `k8s-smoke` gates, and a chart install failed
+  with `pull access denied for minio/minio`. The same pinned releases exist on Quay under
+  the same names, so the Compose fragment, the chart's `minio.image` / `minio.initImage`
+  defaults, and the docs now point at `quay.io/minio/minio` / `quay.io/minio/mc` — identical
+  digests, nothing else moves. An existing deployment that already holds the images keeps
+  running; it picks the new ref up on its next pull. The two testcontainers suites that
+  boot MinIO (`epicurus-core` `test_s3_round_trip`, storage's object-store tests) pin the
+  same Quay image instead of the library's Docker Hub default, so the `quality` gate pulls
+  from the same place. Chart 0.1.1→0.1.2 (PATCH); no component bump.
 - **The Helm chart has now actually booted** (#894) — the chart shipped rendered and
   schema-checked and never once started, which left a whole class of failure (a bad probe, an
   unwritable mount, an RBAC grant one verb short) uncaught until an operator hit it, and left

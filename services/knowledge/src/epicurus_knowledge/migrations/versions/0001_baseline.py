@@ -104,9 +104,11 @@ def upgrade() -> None:
         sa.Column("sid", sa.String(length=32), nullable=False),
         sa.Column("path", sa.String(length=4096), nullable=False),
         sa.Column("operation", sa.String(length=16), nullable=False),
-        sa.Column("proposed_content", sa.Text(), nullable=False),
-        sa.Column("origin", sa.String(length=64), nullable=False),
-        sa.Column("note", sa.Text(), nullable=False),
+        sa.Column("proposed_content", sa.Text(), server_default=sa.text("''"), nullable=False),
+        sa.Column(
+            "origin", sa.String(length=64), server_default=sa.text("'agent'"), nullable=False
+        ),
+        sa.Column("note", sa.Text(), server_default=sa.text("''"), nullable=False),
         sa.Column("to_path", sa.String(length=4096), server_default=sa.text("''"), nullable=False),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
@@ -126,11 +128,13 @@ def upgrade() -> None:
         sa.Column("sid", sa.String(length=32), nullable=False),
         sa.Column("path", sa.String(length=4096), nullable=False),
         sa.Column("operation", sa.String(length=16), nullable=False),
-        sa.Column("origin", sa.String(length=64), nullable=False),
-        sa.Column("note", sa.Text(), nullable=False),
-        sa.Column("proposed_content", sa.Text(), nullable=False),
-        sa.Column("applied_content", sa.Text(), nullable=False),
-        sa.Column("to_path", sa.String(length=4096), nullable=False),
+        sa.Column(
+            "origin", sa.String(length=64), server_default=sa.text("'agent'"), nullable=False
+        ),
+        sa.Column("note", sa.Text(), server_default=sa.text("''"), nullable=False),
+        sa.Column("proposed_content", sa.Text(), server_default=sa.text("''"), nullable=False),
+        sa.Column("applied_content", sa.Text(), server_default=sa.text("''"), nullable=False),
+        sa.Column("to_path", sa.String(length=4096), server_default=sa.text("''"), nullable=False),
         sa.Column("decision", sa.String(length=16), nullable=False),
         sa.Column("proposed_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column(

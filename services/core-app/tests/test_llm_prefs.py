@@ -8,7 +8,9 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 
 
 async def _fresh_store() -> tuple[LlmPrefsStore, AsyncEngine]:
@@ -113,11 +115,11 @@ async def test_embed_default_and_chat_default_coexist() -> None:
     assert await store.get_embed_default("t1") == "nomic-embed-text"
 
 
-async def test_init_migrates_legacy_table_missing_embed_default() -> None:
-    """A pre-#214 ``llm_prefs`` table (no ``embed_default``) is migrated in place.
+async def test_the_migration_heals_a_legacy_table_missing_embed_default() -> None:
+    """A pre-#214 ``llm_prefs`` table (no ``embed_default``) is reconciled by the baseline.
 
-    Without the column-add migration, ``create_all`` is a no-op on the existing table and
-    every prefs/embedding read 500s with ``column llm_prefs.embed_default does not exist``.
+    Without the column-add, ``create_all`` is a no-op on the existing table and every
+    prefs/embedding read 500s with ``column llm_prefs.embed_default does not exist`` (#834).
     """
     engine = create_async_engine(
         "sqlite+aiosqlite://",
@@ -134,8 +136,14 @@ async def test_init_migrates_legacy_table_missing_embed_default() -> None:
         )
         await conn.exec_driver_sql("INSERT INTO llm_prefs (tenant) VALUES ('t1')")
 
+    # Must ADD COLUMN embed_default, not fail.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = LlmPrefsStore(engine)
-    await store.init()  # must ADD COLUMN embed_default rather than fail
 
     assert await store.get_embed_default("t1") is None  # the read that previously 500'd
     await store.set_embed_default("t1", "nomic-embed-text")
@@ -179,12 +187,12 @@ async def test_context_window_coexists_with_model_defaults() -> None:
     assert await store.get_context_window("t1") == 16384
 
 
-async def test_init_migrates_legacy_table_missing_context_window() -> None:
-    """A legacy ``llm_prefs`` table without ``context_window`` is migrated in place.
+async def test_the_migration_heals_a_legacy_table_missing_context_window() -> None:
+    """A legacy ``llm_prefs`` table without ``context_window`` is reconciled by the baseline.
 
-    Mirrors the embed-default migration: without the column-add, ``create_all`` is a no-op on
-    the existing table and every prefs read 500s with ``column llm_prefs.context_window does
-    not exist``.
+    Mirrors the embed-default case: without the column-add, ``create_all`` is a no-op on the
+    existing table and every prefs read 500s with ``column llm_prefs.context_window does not
+    exist``.
     """
     engine = create_async_engine(
         "sqlite+aiosqlite://",
@@ -202,8 +210,14 @@ async def test_init_migrates_legacy_table_missing_context_window() -> None:
         )
         await conn.exec_driver_sql("INSERT INTO llm_prefs (tenant) VALUES ('t1')")
 
+    # Must ADD COLUMN context_window, not fail.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = LlmPrefsStore(engine)
-    await store.init()  # must ADD COLUMN context_window rather than fail
 
     assert await store.get_context_window("t1") is None  # the read that would otherwise 500
     await store.set_context_window("t1", 8192)

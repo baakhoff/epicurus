@@ -1247,10 +1247,12 @@ rows only would read as a broken button.
 **A `NULL` costs one row, never a set** (#903). `import_set` applies a whole set in one
 transaction — the right trade for ten thousand `agent_messages`, and a trap for anything that
 raises mid-stream. A record can carry `null` for a column the model declares `NOT NULL`,
-legitimately: the additive reconcile (#249, ADR-0067) adds a post-release column *nullable*
-when the model gives it no `server_default`, because there is nothing to backfill a populated
+legitimately: the additive reconcile (#249, ADR-0067) added a post-release column *nullable*
+when the model gave it no `server_default`, because there is nothing to backfill a populated
 table with, and each store's row-reader coerces the `NULL` to the model's Python-side default
-on every read. Portability read it verbatim, and an explicit `None` in an `insert()` bypasses
+on every read. Migrations fixed that at the source for the core's two such columns (#834,
+revisions 0003/0004), but the normalisation stays: an archive written before them, or one
+exported from a module still on the reconcile, carries the `NULL` all the same. Portability read it verbatim, and an explicit `None` in an `insert()` bypasses
 the ORM default — so on a fresh target, where `create_all` made the column `NOT NULL` for
 real, one `module_prefs` row took the operator's entire `prefs` set with it.
 `TableSpec.encode` now normalises on the way out and `TableSpec.normalize` on the way in, from
@@ -1684,7 +1686,8 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   activity timeline on reopen (ADR-0041). `activity.timeline` is the **chronological**
   interleaving of thinking blocks and tool steps (think → call → think, #300); the flat
   `thinking`/`steps` are derived and kept for backward compatibility (older rows have only
-  those). Tenant-scoped; post-release columns are added in place at startup (no migration). The
+  those). Tenant-scoped; its schema, like every table below, comes from this service's
+  **[migrations](#schema-is-migration-managed-834-adr-xxxx)** (#834). The
   `memory_search` built-in's *sessions* half (ADR-0089) runs a tenant-scoped case-insensitive
   content match here (portable `ILIKE`, no full-text index — a single operator's history is
   small; FTS is a future optimization), joined back to each session's opening-message title.
@@ -1694,8 +1697,9 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `prompt`, `model`, `autonomy`, JSON `sinks`, JSON `sink_config` (#672 — the notes/kb
   document targets), `agent_gated_delivery` (#706 — the "agent decides delivery" toggle),
   `chat_mode`, `chat_session_id`, `rate_cap_per_hour`, `digest_window_minutes`, timestamps,
-  `last_run_at` / `last_status`. The last two columns post-date the table and are reconciled
-  additively (ADR-0067), as any further one must be. The
+  `last_run_at` / `last_status`. `sink_config` and `agent_gated_delivery` post-date the table;
+  the additive reconcile used to add them at startup and the baseline revision absorbed that,
+  so any further column is an ordinary revision now (#834). The
   triggers are JSON rather than flattened columns: a trigger is a closed vocabulary the core
   owns and always reads whole, so flattening would buy nothing and cost a migration per new
   matcher op.
@@ -1705,7 +1709,7 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   (the `module_events` ids that caused it), `filter_verdict`, `model`, token counts, duration,
   outcome, error, the `output`, `sinks_fired`, JSON `artifacts` (#672 — the `EntityRef`s the
   run wrote, which the runs feed links), and `quiet_reason` (#706 — why a `quiet` outcome
-  skipped delivery). The last two are additively reconciled (ADR-0067).
+  skipped delivery). The last two post-date the table; the baseline revision covers them (#834).
 - **Postgres `automation_queue`** — matched triggers awaiting a run (the ADR-0051 durable-queue
   pattern). The matcher runs on intake, the run may be much later (an open digest window), and
   a restart in between must lose nothing.
@@ -1743,8 +1747,8 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `saved_models`** — per-`(tenant, model)` saved **hosted**-model ids (#496):
   `tenant`, `model`, `added_at` (epoch-ms, `BigInteger`, drives most-recent-first ordering), plus
   the capability override (#711) in `vision_override` (`"on"`/`"off"`/NULL = auto) and
-  `context_length_override` (NULL = take LiteLLM's map) — both nullable and reconciled additively
-  (ADR-0067), so NULL on both is the pre-override behaviour and forgetting a model forgets its
+  `context_length_override` (NULL = take LiteLLM's map) — both nullable and post-release (the
+  baseline revision carries them, #834), so NULL on both is the pre-override behaviour and forgetting a model forgets its
   override with it. Only hosted ids land here — a known `<provider>/` prefix; the route rejects
   locals so an `hf.co/…` model can't masquerade as hosted. A durable, cross-device home for the
   strings entered in the chat picker (the browser's `recentModels` is only a warm cache).
@@ -1755,7 +1759,9 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   account/collection selection (`{enabled, active}` JSON, ADR-0030), and `suggestions_enabled`
   holds the per-module review on/off toggle (#KB-refactor; NULL ⇒ on). A module with no row
   defaults to enabled, not-removed, core-default models, all tools on, review on, and the local
-  default collection. Post-release columns are added in place at startup (no migration framework).
+  default collection. `suggestions_enabled` is the column #903 was about: it post-dates the table
+  and the additive reconcile could only add it *nullable*, so revision **0003** backfills those
+  rows and makes it `NOT NULL` for real (#834).
 - **Postgres `core_files`** — the core-owned **file index** over the swappable `FileStore`
   (ADR-0063): a tenant-scoped catalogue of the file-space tree (`path`, `name`, `size`, `mtime`,
   `kind`), built by the startup scan and kept current by the `FILES_WATCH` watcher; it backs the
@@ -1843,14 +1849,13 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `agent_pending_drafts`** — a turn paused on a draft-first send (ADR-0085, #563):
   `id` (run_id), `tenant`, `session_id`, `model`, `pending_call_id`, `tool`, `module`, `summary`,
   `draft` (JSON — the composed message), `conversation` (JSON), `created_at`. A **sibling** of
-  `agent_suspended_runs` (a separate table, so `create_all` builds it with no migration and the two
-  consume-on-resume paths can't cross). Written on suspend, **consumed** on Confirm/Decline, reaped
+  `agent_suspended_runs` (a separate table, so neither consume-on-resume path can cross the other). Written on suspend, **consumed** on Confirm/Decline, reaped
   after `DRAFT_REVIEW_TTL_HOURS`.
 - **Postgres `agent_pending_approvals`** — a turn paused by `ask_approval` (#745, ADR-0117): `id`
   (run_id), `tenant`, `session_id`, `model`, `pending_call_id`, `summary`, `refs` (JSON — the
   entity reference(s), possibly empty), `conversation` (JSON), `created_at`. A **third sibling**
-  of `agent_suspended_runs`/`agent_pending_drafts`, same reasoning: a separate table so
-  `create_all` needs no migration and none of the three consume-on-resume paths can cross. No
+  of `agent_suspended_runs`/`agent_pending_drafts`, same reasoning: a separate table, so none of
+  the three consume-on-resume paths can cross. No
   `tool`/`module` column like the draft table — the pending call is always the one fixed
   `ask_approval` tool, never a per-module compose tool. Written on suspend, **consumed** on
   Approve/Reject, reaped after `ASK_APPROVAL_TTL_HOURS`.
@@ -1868,8 +1873,7 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   writes normally but is excluded from the sessions list, the extraction enqueue, reflection's
   transcript scan, and `memory_search`'s conversation half; every exit path deletes it via the
   #771 cascade (which drops this row **last**, so a failed erase stays sweepable), and the
-  orphan sweep erases any flagged session a crashed client left behind. A new table created by
-  `create_all` — no migration.
+  orphan sweep erases any flagged session a crashed client left behind.
 - **Postgres `scheduled_turns`** — recurring prompts that run unattended (ADR-0092): `id`,
   `tenant`, `prompt`, `cadence` (`daily`/`weekly`), `hour`, `weekday` (nullable, weekly-only,
   0=Monday..6=Sunday), `delivery_target` (the session id the turn delivers into), `enabled`,
@@ -1933,6 +1937,53 @@ error`, so the two are told apart at a glance. Fact extraction never runs on the
 set `MEMORY_EXTRACTION_MODE=immediate` to distil as a background task right after each turn
 instead (the original ADR-0045 behaviour). A dedicated small `MEMORY_EXTRACTION_MODEL` keeps the
 distillation cheap and off the chat model.
+
+### Schema is migration-managed (#834, ADR-XXXX)
+
+All **40** tables above come from the revisions in `src/epicurus_core_app/migrations/versions/`,
+applied once at startup: the lifespan calls `epicurus_core.db.migrations.run_migrations` before
+anything reads a row. Its private version table is `alembic_version_core_app`; every service
+shares one database and keeps its own head revision. Changing a column here means writing a
+revision — `task migrate:new -- core-app "<what changed>"`, then `task migrate:check -- core-app`.
+See **[Schema migrations](../developer/migrations.md)**.
+
+- **One call replaced 29.** The lifespan used to call each store's `init()` — `create_all` plus,
+  for twelve of them, the additive reconcile (ADR-0067) — each wrapped in its own `try/except`
+  that logged and carried on. `run_migrations` replaces all of it and is deliberately **not**
+  wrapped: schema is not a per-feature degradation, so a database the core cannot reach now fails
+  the boot (and the restart policy retries) instead of bringing the core up with 29 error lines
+  and no working feature. The `init()` methods and the `create_all` inside them survive as the
+  **unit-test** schema path — the deployed core never calls them — because an Alembic run per
+  test is needless cost, and CI's `migrations` gate is what proves the two agree.
+- **The advisory lock is belt-and-braces here.** `run_migrations` takes a Postgres session
+  advisory lock keyed on the service name so two processes cannot both run `upgrade head`. The
+  Helm chart runs core-app as a **singleton** (one replica, an RWO PVC — ADR-0135), so unlike a
+  module it cannot scale out; the lock still earns its place because Compose can start a new
+  container while the old one is shutting down.
+- **Nothing escapes the migration target.** The core has 28 `DeclarativeBase` objects across its
+  store modules, listed once in `migrations/__init__.py`'s `METADATAS` (two stores — `memory.profile`
+  and `memory.extraction_queue` — hang their tables off `memory.store`'s base, so that module
+  imports them for their mappers). A base left out would be a store no revision creates and no
+  drift check sees, so `test_core_app_migrations.py` scans the package's own source and fails if
+  the count or the table set drifts from the list.
+- **Revision 0002** normalises five literal server defaults: `module_prefs.models` /
+  `.disabled_tools` / `.collections`, `llm_prefs.hidden_models` and `saved_models.added_at` were
+  declared with a *plain string* `server_default` (`"'{}'"`, `"'[]'"`, `"0"`), which SQLAlchemy
+  quotes as a literal — so `create_all` wrote `DEFAULT '''{}'''` (value: the four characters
+  `'{}'`) while the reconcile, treating the same string as raw SQL, wrote `DEFAULT '{}'`. Two
+  deployments of one release, two different defaults; invisible because every insert sets these
+  columns and the readers fall back on unparseable JSON. The models now say `text("'{}'")` and
+  0002 fixes the defaults and any row the old ones produced.
+- **Revisions 0003 and 0004** are the #834 backfill rule applied: `module_prefs.suggestions_enabled`
+  (#903's cause) and `automations.agent_gated_delivery` are the only two columns in the service that
+  are `NOT NULL` in the model, post-date their table, and had no `server_default` — so the reconcile
+  could only add them nullable, and every older row holds `NULL`. Each revision backfills those rows
+  to the model's default and makes the column `NOT NULL` for real; the models now declare the
+  matching `server_default` too, which is what keeps a freshly created table and a reconciled one
+  identical. Every other post-release column in the core is either nullable in the model (no
+  divergence to fix) or carries a literal server default (the reconcile added it
+  `NOT NULL DEFAULT …`). The portability seam's `NULL` normalisation (#914) stays regardless — an
+  archive written before these revisions still carries the `NULL`.
 
 ## Dependencies
 

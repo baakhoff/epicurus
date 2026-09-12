@@ -32,6 +32,7 @@ from epicurus_core import (
     get_logger,
     setup_tracing,
 )
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core.files import PathEscapeError
 from epicurus_core.manifest import UiSection
 from epicurus_core_app.agent.agent import Agent
@@ -142,6 +143,7 @@ from epicurus_core_app.messaging import (
     RegistryBridgeClient,
     create_messaging_router,
 )
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION
 from epicurus_core_app.module_prefs import ModulePrefsStore
 from epicurus_core_app.modules import (
     ModuleRegistry,
@@ -931,165 +933,44 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # Schema first, before anything reads or writes a row — one call for all 40 tables the
+        # core owns, replacing the 29 per-store `create_all` + additive-reconcile calls that
+        # used to stand here (#834, ADR-XXXX). In-process rather than a separate init step: a
+        # container has one entry point on both runtimes this stack supports, and a
+        # Kubernetes-only init container would put the schema behind a path Compose never runs.
+        # Concurrency is handled by the Postgres advisory lock inside run_migrations, not by
+        # assuming this process is alone — core-app is a chart singleton, so that is
+        # belt-and-braces here, but Compose can still start a container while the old one is
+        # shutting down.
+        #
+        # Deliberately *not* wrapped in try/except. Each store's init() used to be, so a
+        # database outage at boot left the core up with 29 ERROR lines and no working feature;
+        # schema is not a per-feature degradation, so a failure here fails startup and the
+        # restart policy retries against a clear log line.
+        await run_migrations(
+            engine,
+            service=SERVICE_NAME,
+            script_location=SCRIPT_LOCATION,
+            metadatas=METADATAS,
+        )
         await bus.connect()
-        try:
-            await prefs.init()
-        except Exception as exc:
-            log.error("llm prefs init failed; hide/default prefs disabled", error=str(exc))
-        try:
-            await saved_models.init()
-        except Exception as exc:
-            log.error("saved-models init failed; hosted-model list disabled", error=str(exc))
-        try:
-            await session_models.init()
-        except Exception as exc:
-            log.error("session-models init failed; set_chat_model disabled", error=str(exc))
-        try:
-            await model_settings.init()
-        except Exception as exc:
-            log.error("model settings init failed; per-model tuning disabled", error=str(exc))
-        try:
-            await module_prefs.init()
-        except Exception as exc:
-            log.error("module prefs init failed; enable/disable unavailable", error=str(exc))
-        try:
-            await timezone_prefs.init()
-        except Exception as exc:
-            log.error("timezone prefs init failed; timezone setting disabled", error=str(exc))
-        try:
-            await push_subscriptions.init()
-        except Exception as exc:
-            log.error("push subscriptions init failed; push notifications disabled", error=str(exc))
-        try:
-            await push_prefs.init()
-        except Exception as exc:
-            log.error("push prefs init failed; push notifications use defaults", error=str(exc))
-        try:
-            await push_queue.init()
-        except Exception as exc:
-            log.error(
-                "push queue init failed; quiet-hours digest queueing disabled", error=str(exc)
-            )
-        try:
-            await notifications.init()
-        except Exception as exc:
-            log.error("notification center init failed; notifications disabled", error=str(exc))
-        try:
-            await event_subscriptions.init()
-        except Exception as exc:
-            log.error("event subscriptions init failed; event alerts disabled", error=str(exc))
-        try:
-            await maintenance_schedule_prefs.init()
-        except Exception as exc:
-            log.error(
-                "maintenance schedule prefs init failed; schedule falls back to env config",
-                error=str(exc),
-            )
-        try:
-            await maintenance_history.init()
-        except Exception as exc:
-            log.error(
-                "maintenance run history init failed; last_run/run history unavailable",
-                error=str(exc),
-            )
-        try:
-            await page_order_prefs.init()
-        except Exception as exc:
-            log.error("page-order prefs init failed; nav reorder disabled", error=str(exc))
-        try:
-            await agent_instructions.init()
-        except Exception as exc:
-            log.error("agent instructions init failed; using the default prompt", error=str(exc))
-        try:
-            await agent_playbooks.init()
-        except Exception as exc:
-            # The composed prompt degrades to the base instructions alone (ADR-0093 §4's
-            # best-effort read), so a failure here costs playbooks, never every turn.
-            log.error("agent playbooks init failed; playbooks disabled", error=str(exc))
-        try:
-            await playbook_proposals.init()
-        except Exception as exc:
-            log.error(
-                "playbook proposal store init failed; the core review page is empty",
-                error=str(exc),
-            )
-        try:
-            await playbook_reflection_state.init()
-        except Exception as exc:
-            # Without its watermark the nightly pass can't tell new sessions from old, so it
-            # errors as a contained job result rather than re-proposing the whole history.
-            log.error(
-                "playbook reflection state init failed; nightly reflection off", error=str(exc)
-            )
-        try:
-            await suspended_runs.init()
-        except Exception as exc:
-            log.error("suspended-run store init failed; ask_user pause/resume off", error=str(exc))
-        try:
-            await pending_drafts.init()
-        except Exception as exc:
-            log.error("pending-draft store init failed; draft-first send off", error=str(exc))
-        try:
-            await pending_approvals.init()
-        except Exception as exc:
-            log.error(
-                "pending-approval store init failed; ask_approval pause/resume off",
-                error=str(exc),
-            )
         try:
             await registry.reconcile_tombstones()
         except Exception as exc:  # best-effort — a Docker hiccup must never block startup
             log.error("tombstone reconcile failed", error=str(exc))
         try:
-            await memory.init()
-        except Exception as exc:  # core stays up; cross-chat memory just degrades
-            log.error("memory init failed; cross-chat memory disabled", error=str(exc))
-        try:
-            await extraction_queue.init()
-        except Exception as exc:  # queue down → deferred extraction degrades; chat is unaffected
-            log.error("extraction queue init failed; nightly extraction off", error=str(exc))
-        try:
-            await ephemeral_sessions.init()
-        except Exception as exc:  # flag store down → invisible chats degrade; chat is unaffected
-            log.error("ephemeral-session store init failed; invisible chats off", error=str(exc))
-        try:
-            await scheduled_turns.init()
-        except Exception as exc:  # store down → scheduled turns degrade; chat is unaffected
-            log.error("scheduled-turns init failed; scheduled turns disabled", error=str(exc))
-        try:
-            await event_log.init()
-        except Exception as exc:  # log down → events aren't recorded; chat is unaffected
-            log.error("event log init failed; the module event spine is off", error=str(exc))
-        try:
-            await automations.init()
-            await automation_queue.init()
-            await automation_kill_switch.init()
-            await automation_proposals.init()
-            await automation_sessions.init()
             # Fold #614's scheduled turns in (ADR-0105). Idempotent and non-destructive:
             # migrated rows are marked, never deleted, so a second boot is a no-op and a
             # bad migration is recoverable.
             moved = await migrate_scheduled_turns(scheduled_turns, automations)
             if moved:
                 log.info("scheduled turns migrated into automations", count=moved)
-        except Exception as exc:  # store down → automations degrade; chat is unaffected
-            log.error("automations init failed; automations disabled", error=str(exc))
-        try:
-            await profile_store.init()
-        except Exception as exc:  # profile down → static injection degrades; recall still runs
-            log.error("standing-profile store init failed; profile injection off", error=str(exc))
+        except Exception as exc:  # store down → the fold retries next boot; chat is unaffected
+            log.error("scheduled-turn fold into automations failed", error=str(exc))
         # Provision the tenant's file-space root and index it (core-owned, ADR-0052/0061). The
-        # core now mounts the shared volume (Phase 2), so the local root exists at boot: init the
-        # file index, ensure the tenant root, then walk it in. Best-effort throughout — a DB or
-        # scan hiccup degrades the Files page rather than blocking startup.
-        try:
-            await file_index.init()
-        except Exception as exc:
-            log.error("file index init failed; Files search disabled", error=str(exc))
-        try:
-            await portability_jobs.init()
-        except Exception as exc:  # portability degrades; nothing else depends on this table
-            log.error("portability job store init failed; export/import disabled", error=str(exc))
+        # core now mounts the shared volume (Phase 2), so the local root exists at boot: ensure
+        # the tenant root, then walk it into the index the migrations built above. Best-effort —
+        # a DB or scan hiccup degrades the Files page rather than blocking startup.
         if settings.files_backend != "local" or settings.files_root.exists():
             try:
                 await file_store.ensure_tenant_root(tenant=settings.default_tenant_id)

@@ -35,13 +35,12 @@ from sqlalchemy import (
     delete,
     func,
     select,
+    text,
 )
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import EntityRef, get_logger
-from epicurus_core.db import ensure_columns
 from epicurus_core_app.automations.model import (
     Automation,
     AutomationRun,
@@ -58,15 +57,14 @@ from epicurus_core_app.automations.model import (
 
 log = get_logger("epicurus_core_app.automations.store")
 
-# Columns added after these tables' first release (#682) — reconciled in place at init via the
-# shared additive helper (ADR-0067), since they now have a deployed predecessor. ``sink_config``
-# (#672) holds the notes/kb document targets; ``artifacts`` (#672) holds the EntityRefs a run
-# produced; ``agent_gated_delivery`` (#706) is the "agent decides delivery" toggle; ``quiet_reason``
-# (#706) is the model's own reason for an outcome=="quiet" run. Neither added column declares a
-# server_default, so ``ensure_columns`` reconciles both nullable on an upgraded table — the
-# row-readers below coerce a reconciled NULL to the model's Python-side default.
-_ADDED_AUTOMATION_COLUMNS = ("sink_config", "agent_gated_delivery")
-_ADDED_RUN_COLUMNS = ("artifacts", "quiet_reason")
+# Four columns postdate these tables' first release (#682): ``sink_config`` (#672, the notes/kb
+# document targets), ``artifacts`` (#672, the EntityRefs a run produced), ``quiet_reason`` (#706,
+# the model's reason for an outcome=="quiet" run) and ``agent_gated_delivery`` (#706, the "agent
+# decides delivery" toggle). The additive reconcile used to add them from ``init()`` (ADR-0067);
+# the baseline revision absorbed that (#834). Three are nullable in the model, so a reconciled
+# table and a freshly created one agree; ``agent_gated_delivery`` is NOT NULL, which is why
+# revision 0004 backfills the NULLs the reconcile left and the model now declares the matching
+# ``server_default``.
 
 
 class _Base(DeclarativeBase):
@@ -104,9 +102,13 @@ class _StoredAutomation(_Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # "Agent decides delivery" (#706), added after the table shipped — nullable for the same
-    # reconciliation reason as sink_config; _to_value coerces a reconciled NULL to False.
-    agent_gated_delivery: Mapped[bool] = mapped_column(Boolean, default=False)
+    # "Agent decides delivery" (#706), added after the table shipped, so the additive reconcile
+    # added it nullable on an upgraded deployment and `_to_value` coerces such a NULL to False.
+    # Revision 0004 backfills those rows and makes the column NOT NULL for real; the
+    # ``server_default`` is what the database has had since, and what keeps the two paths equal.
+    agent_gated_delivery: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
 
 
 class _StoredRun(_Base):
@@ -271,9 +273,10 @@ def _to_value(row: _StoredAutomation) -> Automation:
         last_status=row.last_status,
         notes_target=_target_from_json((row.sink_config or {}).get("notes")),
         kb_target=_target_from_json((row.sink_config or {}).get("kb")),
-        # bool(...), not the raw column: a reconciled row on an upgraded deployment has this
-        # column NULL (no server_default to reconcile it with — see ensure_columns), and that
-        # must read as False, not None.
+        # bool(...), not the raw column. The additive reconcile added this column nullable on
+        # an upgraded deployment, so a pre-#706 row holds NULL and must read as False. Revision
+        # 0004 repairs such rows, but the coercion stays: the reader must not depend on every
+        # deployment having migrated, and a restore from an older backup looks the same.
         agent_gated_delivery=bool(row.agent_gated_delivery),
     )
 
@@ -319,21 +322,14 @@ class AutomationStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the automations tables if they do not exist, then reconcile added columns.
+        """Build this store's tables from the models — the **unit-test** schema path.
 
-        ``create_all`` never alters an existing table, so the columns added after #682 shipped
-        (``sink_config`` on automations, ``artifacts`` on the run ledger — both #672) are added
-        in place via the shared additive helper (ADR-0067). Idempotent on every startup.
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
         """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Add the post-#682 columns an older deployment's tables still lack (ADR-0067)."""
-        ensure_columns(sync_conn, _StoredAutomation.__table__, _ADDED_AUTOMATION_COLUMNS)
-        ensure_columns(sync_conn, _StoredRun.__table__, _ADDED_RUN_COLUMNS)
 
     async def create(
         self,
@@ -616,6 +612,12 @@ class AutomationQueue:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
 
@@ -707,6 +709,12 @@ class KillSwitchStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
 
@@ -752,6 +760,12 @@ class AutomationSessionStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
 

@@ -12,6 +12,60 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
+  #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
+  startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own
+  "log it and carry on". One `run_migrations` call replaces all of them, and is deliberately not
+  wrapped: a database the core cannot reach now fails the boot, with a restart and a clear log
+  line, instead of bringing the core up with 29 error lines and no working feature. Two
+  **backfill revisions** finish what the old reconcile could not start:
+  `module_prefs.suggestions_enabled` — the column behind #903, where a preferences *write* on a
+  long-lived install aborted on a `NULL` the reconcile had no way to avoid leaving — and
+  `automations.agent_gated_delivery`, in exactly the same position. Existing rows get the value
+  every reader was already pretending they had, and both columns become `NOT NULL` for real. A
+  third revision repairs five column defaults that have been wrong on disk since they shipped
+  (`module_prefs.models` / `.disabled_tools` / `.collections`, `llm_prefs.hidden_models`,
+  `saved_models.added_at`): declared as plain strings, they compiled to a default whose value
+  included the quote characters when the table was created fresh, and to the intended value when
+  the reconcile added the column — one release, two different databases. Nothing user-visible
+  changes, and nothing about a schema change here is guesswork any more: a model edited without a
+  revision fails CI. `core-app` 0.123.0→0.124.0 (MINOR).
+- **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
+  the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
+  was un-shippable, a `NOT NULL` column added without a server default reached existing rows as
+  `NULL` (the cause of #903), and no gate anywhere ever exercised an *upgrade* — the unit tests
+  build tables from the models and the smoke gates boot an empty database, so both production
+  failures that motivated this (#214, #218) were visible only on a deployment that had been
+  running a while. epicurus now uses **Alembic, one migration environment per service**, applied
+  in-process at startup under a Postgres advisory lock so two replicas or an overlapping restart
+  never migrate at once — the same on Compose and on Kubernetes. Each service keeps its own
+  version table (`alembic_version_<service>`), because all seven share one database and own
+  disjoint tables in it. A service's *baseline* revision is idempotent, so one `upgrade head`
+  serves an empty database, one built by the old reconcile, and one already at head — with no
+  branch and, unlike a stamp, no revision ever silently skipped. `storage` is migrated as the
+  reference; authoring is `task migrate:new` and `task migrate:check` (a second, on SQLite), and
+  a new **`migrations`** CI gate proves every migrated service on real Postgres: fresh install,
+  restart, adoption of a pre-Alembic database, and adoption of a *drifted* one. A model change
+  with no revision now fails review instead of production. The gate earned its keep on its very
+  first run: a *plain string* `server_default` is a literal SQLAlchemy quotes for you, so the
+  house pattern `server_default="'fs'"` has been compiling to `DEFAULT '''fs'''` — a default whose
+  value carries the quote characters — while the additive reconcile, pasting the same string in as
+  raw SQL, produced `DEFAULT 'fs'`: two deployments of the same release could disagree about their
+  own column defaults. Storage's is corrected and an existing database normalised by a revision —
+  the first change here the reconcile could never have made. The remaining services carry the same
+  pattern and each lane fixes its own. `epicurus-core` 0.38.0→0.39.0 (MINOR), `storage`
+  0.11.0→0.12.0 (MINOR).
+- **MinIO images now pull from Quay** — Docker Hub no longer serves the `minio/minio` and
+  `minio/mc` repositories (a `404` on the repository itself, not just the tag), so every
+  fresh `compose up`, the `runtime-smoke` and `k8s-smoke` gates, and a chart install failed
+  with `pull access denied for minio/minio`. The same pinned releases exist on Quay under
+  the same names, so the Compose fragment, the chart's `minio.image` / `minio.initImage`
+  defaults, and the docs now point at `quay.io/minio/minio` / `quay.io/minio/mc` — identical
+  digests, nothing else moves. An existing deployment that already holds the images keeps
+  running; it picks the new ref up on its next pull. The two testcontainers suites that
+  boot MinIO (`epicurus-core` `test_s3_round_trip`, storage's object-store tests) pin the
+  same Quay image instead of the library's Docker Hub default, so the `quality` gate pulls
+  from the same place. Chart 0.1.1→0.1.2 (PATCH); no component bump.
 - **The Helm chart has now actually booted** (#894) — the chart shipped rendered and
   schema-checked and never once started, which left a whole class of failure (a bad probe, an
   unwritable mount, an RBAC grant one verb short) uncaught until an operator hit it, and left

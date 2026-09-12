@@ -9,7 +9,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 
 
 async def _fresh_store() -> tuple[ModelSettingsStore, AsyncEngine]:
@@ -63,8 +65,8 @@ async def test_settings_are_tenant_scoped() -> None:
     assert await store.list("t2") == {}
 
 
-async def test_ensure_columns_heals_a_pre_existing_bare_table() -> None:
-    """A table created before the columns existed gets them added in place (no migration)."""
+async def test_the_migration_heals_a_pre_existing_bare_table() -> None:
+    """A table created before the columns existed gets them added in place (#834)."""
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -78,8 +80,14 @@ async def test_ensure_columns_heals_a_pre_existing_bare_table() -> None:
                 "PRIMARY KEY (tenant, model))"
             )
         )
+    # Must ALTER in the missing columns.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = ModelSettingsStore(engine)
-    await store.init()  # must ALTER in the missing columns, not raise
     await store.set("t1", "m:latest", ModelSettings(context_window=2048, keep_alive="5m"))
     assert (await store.get("t1", "m:latest")).context_window == 2048
 

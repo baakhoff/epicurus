@@ -3,8 +3,8 @@
 Stored in the core's Postgres database so the operator's choice survives restarts and
 is consistent across devices. Disabling a module hides its tools, pages, and actions
 from the agent and the shell while the **container keeps running** (issue #126) — the
-flag lives here in the core, never in the module. Auto-created on first use via
-``init`` (same pattern as ``LlmPrefsStore`` / ``ConversationStore``).
+flag lives here in the core, never in the module. The table is created by this service's
+migrations (:mod:`epicurus_core_app.migrations`), applied at startup (#834).
 """
 
 from __future__ import annotations
@@ -12,13 +12,11 @@ from __future__ import annotations
 import json
 from typing import cast
 
-from sqlalchemy import Boolean, String, Text, select
-from sqlalchemy.engine import Connection
+from sqlalchemy import Boolean, String, Text, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import CollectionPrefs
-from epicurus_core.db import ensure_columns
 
 
 class _ModulePrefBase(DeclarativeBase):
@@ -38,19 +36,25 @@ class _ModulePrefRow(_ModulePrefBase):
     # every surface, and re-removed on startup if a reconcile has resurrected the container.
     removed: Mapped[bool] = mapped_column(Boolean, default=False)
     # JSON ``{slot_key: model_id}`` — the operator's per-slot model choices (#128). A slot
-    # absent here falls back to the core default model.
-    models: Mapped[str] = mapped_column(Text, default="{}", server_default="'{}'")
+    # absent here falls back to the core default model. ``text("'{}'")``, not the bare string
+    # ``"'{}'"``: a plain string is a *literal* SQLAlchemy quotes for you, so that spelling
+    # emitted ``DEFAULT '''{}'''`` from ``create_all`` (#834, revision 0002).
+    models: Mapped[str] = mapped_column(Text, default="{}", server_default=text("'{}'"))
     # JSON list of tool names the operator has explicitly disabled (#213). An absent tool
     # (not in the list) is enabled by default; the agent never receives a listed tool.
-    disabled_tools: Mapped[str] = mapped_column(Text, default="[]", server_default="'[]'")
+    disabled_tools: Mapped[str] = mapped_column(Text, default="[]", server_default=text("'[]'"))
     # JSON ``CollectionPrefs`` — the operator's enabled collections + active view for an
     # account/collection module (calendar, tasks) (ADR-0030). Empty (``{}``) means "use the
     # silent local default": no enabled external collection, no active view.
-    collections: Mapped[str] = mapped_column(Text, default="{}", server_default="'{}'")
-    # Whether agent-proposed changes go through review (#KB-refactor). Default on (NULL on a
-    # pre-existing row ⇒ on). When off, a module that supports suggestions applies the
-    # agent's change directly instead of staging it for the operator.
-    suggestions_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    collections: Mapped[str] = mapped_column(Text, default="{}", server_default=text("'{}'"))
+    # Whether agent-proposed changes go through review (#KB-refactor). When off, a module that
+    # supports suggestions applies the agent's change directly instead of staging it for the
+    # operator. The column postdates the table (#424 reconciled it in nullable, which is how a
+    # pre-existing row read back NULL and aborted a prefs write — #903); revision 0003
+    # backfills those rows and the ``server_default`` keeps any future additive add honest.
+    suggestions_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true")
+    )
 
 
 class ModulePrefsStore:
@@ -63,26 +67,14 @@ class ModulePrefsStore:
         )
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_ModulePrefBase.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``removed`` (#127), per-slot ``models`` (#128), ``disabled_tools`` (#213),
-        ``collections`` (ADR-0030), and ``suggestions_enabled`` (#KB-refactor) all postdate
-        the table's first release. The JSON columns carry a ``server_default`` so the helper
-        backfills them; the booleans (no server default) are added nullable. See
-        :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(
-            sync_conn,
-            _ModulePrefRow.__table__,
-            ("removed", "models", "disabled_tools", "collections", "suggestions_enabled"),
-        )
 
     async def enabled_map(self, tenant: str) -> dict[str, bool]:
         """Every stored enabled flag for ``tenant``.

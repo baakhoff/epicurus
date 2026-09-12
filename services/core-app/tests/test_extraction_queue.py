@@ -9,8 +9,10 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
 from epicurus_core_app.memory.store import ConversationStore
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 
 
 async def _fresh_queue() -> ExtractionQueue:
@@ -100,11 +102,12 @@ async def test_delete_for_session_purges_only_that_chat_and_tenant() -> None:
     assert remaining == ["stays", "other tenant", "legacy"]
 
 
-async def test_init_adds_session_id_to_a_legacy_queue_table() -> None:
+async def test_the_migration_adds_session_id_to_a_legacy_queue_table() -> None:
     """A pre-#771 deployment: memory_extraction_queue exists without the session_id column.
 
-    ``init`` must reconcile it in place (ADR-0067) so both the stamped enqueue and the cascade's
-    purge work after an upgrade; the legacy rows stay NULL and drain exactly as before.
+    The baseline revision reconciles it in place (#834, ADR-XXXX — it absorbed the additive
+    reconcile this used to prove through ``init()``), so both the stamped enqueue and the
+    cascade's purge work after an upgrade; the legacy rows stay NULL and drain as before.
     """
     engine = create_async_engine(
         "sqlite+aiosqlite://",
@@ -121,8 +124,14 @@ async def test_init_adds_session_id_to_a_legacy_queue_table() -> None:
             "INSERT INTO memory_extraction_queue (tenant, user_text, assistant_text) "
             "VALUES ('t', 'legacy row', 'a')"
         )
+    # Must add session_id in place, not raise.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     queue = ExtractionQueue(engine)
-    await queue.init()  # must add session_id in place, not raise
     await queue.enqueue(tenant="t", user_text="new row", assistant_text="a", session_id="s")
     pending = await queue.pending(limit=10)
     assert [(p.user_text, p.session_id) for p in pending] == [

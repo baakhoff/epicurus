@@ -116,6 +116,12 @@ class ScheduledTurnStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
 

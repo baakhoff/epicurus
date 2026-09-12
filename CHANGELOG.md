@@ -12,6 +12,17 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`knowledge` schema is migration-managed** (#834, #931) — the fourth service to adopt the
+  migration foundation. Every model change now ships as an Alembic revision: startup runs
+  `run_migrations` once, before any store touches a row, and no store reconciles its own schema
+  on Postgres any more. The gate caught the same defect it found in `storage`: a *plain string*
+  `server_default` is a literal SQLAlchemy quotes for you, so `knowledge_suggestions.to_path`'s
+  `server_default="''"` compiled to `DEFAULT ''''''` (a default whose value carries two quote
+  characters) while the additive reconcile, pasting the same string in as raw SQL, produced the
+  real empty string — the model now says `text("''")`, and a revision normalises an existing
+  database. A further backfill-audit pass adds a matching database-level default to eight more
+  columns that carried a Python-side one only, closing the gap on principle even though none of
+  them was ever at risk of a `NULL` row. `knowledge` 0.30.0→0.31.0 (MINOR).
 - **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
   the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
   was un-shippable, a `NOT NULL` column added without a server default reached existing rows as

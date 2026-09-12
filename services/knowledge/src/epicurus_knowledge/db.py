@@ -83,7 +83,13 @@ class NoteIndex:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema if it does not exist."""
+        """Build this store's tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (#834, #931, ADR-XXXX). It survives for the tests, where a fresh SQLite
+        file per test is cheaper to build from the models than to migrate. Honest only because
+        the `migrations` CI gate proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_NoteBase.metadata.create_all)
 
@@ -222,7 +228,13 @@ class DocIndex:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema if it does not exist."""
+        """Build this store's tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (#834, #931, ADR-XXXX). It survives for the tests, where a fresh SQLite
+        file per test is cheaper to build from the models than to migrate. Honest only because
+        the `migrations` CI gate proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_DocBase.metadata.create_all)
 
@@ -390,7 +402,13 @@ class VersionStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema if it does not exist."""
+        """Build this store's tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (#834, #931, ADR-XXXX). It survives for the tests, where a fresh SQLite
+        file per test is cheaper to build from the models than to migrate. Honest only because
+        the `migrations` CI gate proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_VersionBase.metadata.create_all)
 

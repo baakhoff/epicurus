@@ -37,13 +37,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import DateTime, String, Text, delete, func, select
-from sqlalchemy.engine import Connection
+from sqlalchemy import DateTime, String, Text, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import ImportOutcome, get_logger
-from epicurus_core.db import ensure_columns
 from epicurus_core.review import (
     ApplyResult,
     ApproveBody,
@@ -72,10 +70,6 @@ REVIEW_PAGE_ID = "review"
 _OPERATIONS = frozenset({"create", "update", "delete", "move", "mkdir", "mkproject"})
 # Operations whose review shows a content diff; the rest are simple confirmations.
 _DIFF_OPERATIONS = frozenset({"create", "update", "delete"})
-
-# Columns added to knowledge_suggestions after its first release; added in place at init
-# (the store uses ``create_all``, no migration tool) — mirrors storage_files' pattern.
-_ADDED_COLUMNS = ("to_path",)
 
 
 class Suggestion:
@@ -131,14 +125,29 @@ class _StoredSuggestion(_SuggestionBase):
     sid: Mapped[str] = mapped_column(String(32), index=True)
     path: Mapped[str] = mapped_column(String(4096))
     operation: Mapped[str] = mapped_column(String(16))
-    proposed_content: Mapped[str] = mapped_column(Text, default="")
-    origin: Mapped[str] = mapped_column(String(64), default="agent")
-    note: Mapped[str] = mapped_column(Text, default="")
+    # These three carried a Python-side ``default=`` only, with no ``server_default=`` — the
+    # #834 backfill audit's other shape (#903): harmless here because this table has never
+    # gone through the additive reconcile (every column has been part of `create_table` since
+    # the table's first release, so none could ever have reached a deployment as nullable), but
+    # left that way the DB itself still permits nothing but what the ORM happens to write.
+    # Revision 0003 aligns the DB-level default with the model's for all three, closing the gap
+    # on principle rather than because a NULL was ever observed.
+    proposed_content: Mapped[str] = mapped_column(Text, server_default=text("''"), default="")
+    origin: Mapped[str] = mapped_column(String(64), server_default=text("'agent'"), default="agent")
+    note: Mapped[str] = mapped_column(Text, server_default=text("''"), default="")
     # Destination path for a ``move`` operation; empty for all others (#KB-refactor).
-    # ``server_default`` is raw SQL, hence the quoted empty-string literal — so a freshly
-    # created column and the additive reconcile's ``DEFAULT ''`` agree (the bare ``""`` it
-    # carried before rendered no default at all).
-    to_path: Mapped[str] = mapped_column(String(4096), server_default="''", default="")
+    #
+    # ``text("''")``, not the bare string ``"''"`` this used to be. A *plain string*
+    # ``server_default`` is a literal SQLAlchemy quotes for you, so ``"''"`` compiled to
+    # ``DEFAULT ''''''`` — a default whose value is the two characters ``''``, not the empty
+    # string the comment always claimed. The additive reconcile, which pasted the same string
+    # into ``ALTER TABLE … ADD COLUMN`` as raw SQL, produced ``DEFAULT ''`` — the real empty
+    # string — so a table created fresh and a table that gained this column through the
+    # reconcile disagreed about their own default. Nothing ever noticed: every insert sets
+    # ``to_path`` explicitly and the read side treats a falsy value as "no destination"
+    # either way. ``text()`` makes the value what the comment always claimed it was, and
+    # revision 0002 normalises databases built the old way (#834, #931).
+    to_path: Mapped[str] = mapped_column(String(4096), server_default=text("''"), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -150,20 +159,15 @@ class SuggestionStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (#834, #931, ADR-XXXX). It survives for the tests, where a fresh SQLite
+        file per test is cheaper to build from the models than to migrate. Honest only because
+        the `migrations` CI gate proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_SuggestionBase.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``to_path`` (#220 move support) carries a ``server_default`` of ``''``, so the helper
-        adds it ``NOT NULL DEFAULT ''`` — backfilling existing rows. See
-        :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(sync_conn, _StoredSuggestion.__table__, _ADDED_COLUMNS)
 
     async def add(
         self,
@@ -425,11 +429,17 @@ class _StoredDecision(_AuditBase):
     sid: Mapped[str] = mapped_column(String(32))
     path: Mapped[str] = mapped_column(String(4096))
     operation: Mapped[str] = mapped_column(String(16))
-    origin: Mapped[str] = mapped_column(String(64), default="agent")
-    note: Mapped[str] = mapped_column(Text, default="")
-    proposed_content: Mapped[str] = mapped_column(Text, default="")
-    applied_content: Mapped[str] = mapped_column(Text, default="")
-    to_path: Mapped[str] = mapped_column(String(4096), default="")
+    # Five columns with a Python-side ``default=`` only and no ``server_default=`` — the #834
+    # backfill audit's other shape (#903). Harmless here: this table has never gone through
+    # the additive reconcile (every column has been part of `create_table` since the table's
+    # first release), so none could ever have reached a deployment as nullable. Revision 0003
+    # aligns the DB-level default with the model's for all five, closing the gap on principle
+    # rather than because a NULL was ever observed.
+    origin: Mapped[str] = mapped_column(String(64), server_default=text("'agent'"), default="agent")
+    note: Mapped[str] = mapped_column(Text, server_default=text("''"), default="")
+    proposed_content: Mapped[str] = mapped_column(Text, server_default=text("''"), default="")
+    applied_content: Mapped[str] = mapped_column(Text, server_default=text("''"), default="")
+    to_path: Mapped[str] = mapped_column(String(4096), server_default=text("''"), default="")
     decision: Mapped[str] = mapped_column(String(16))
     proposed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -466,6 +476,13 @@ class SuggestionAuditStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
+        """Build this store's tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (#834, #931, ADR-XXXX). It survives for the tests, where a fresh SQLite
+        file per test is cheaper to build from the models than to migrate. Honest only because
+        the `migrations` CI gate proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_AuditBase.metadata.create_all)
 

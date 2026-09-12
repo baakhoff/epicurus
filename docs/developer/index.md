@@ -12,6 +12,8 @@ epicurus.
   `epicurus-core` library.
 - **[API Reference](../reference/index.md)** — every class and function in
   `epicurus-core`, and how they fit together.
+- **[Schema migrations](migrations.md)** — how a database change ships: Alembic per
+  service, authoring a revision, and what the gates prove.
 - **[Testing](testing.md)** — the quality gates and how tests are written.
 - **[Contributing](contributing.md)** — the workflow for getting a change merged.
 - **[Versioning](versioning.md)** — per-component SemVer and the bundled-stack tag.

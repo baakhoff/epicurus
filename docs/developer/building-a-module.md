@@ -145,6 +145,48 @@ log = get_logger(__name__)
 module emits traces to Tempo with no extra code — see the
 [tracing reference](../reference/observability.md#tracing-57-adr-0068).
 
+## A store and its schema
+
+A module that keeps its own rows declares them as SQLAlchemy models (one private
+`DeclarativeBase` per store module is the house pattern) and lets **Alembic** own the deployed
+shape. The service template ships no store, so this is a recipe rather than scaffolding — see
+**[Schema migrations](migrations.md)** for the full picture and the authoring commands.
+
+1. Depend on **`epicurus-core[db]`** rather than bare `epicurus-core`. The extra is what puts
+   Alembic in the runtime image; SQLAlchemy your store declares directly anyway.
+2. Add the migration environment *inside the package* — `src/<package>/migrations/` with an
+   `__init__.py` exporting `SERVICE`, `SCRIPT_LOCATION` and `METADATAS` (one entry per store
+   module's `DeclarativeBase`), and an `env.py` copied verbatim from `storage` (three lines).
+   Inside the package, because the image is built with `uv sync --no-editable`: a directory
+   outside `src/<package>` ships nowhere.
+3. `uv run python scripts/migrate.py baseline <service>` renders the initial revision from the
+   models; read it before committing.
+4. Call `run_migrations` once from the lifespan, before anything touches a table:
+
+   ```python
+   from epicurus_core.db.migrations import run_migrations
+   from epicurus_yourmodule.migrations import METADATAS, SCRIPT_LOCATION
+
+   await run_migrations(
+       engine, service=MODULE_NAME, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+   )
+   ```
+
+   In the lifespan, not a separate init step: a container has one entry point on both Compose
+   and Kubernetes, and the Postgres advisory lock inside `run_migrations` is what makes that
+   safe when the chart scales the module past one replica.
+5. Keep the store's `init()` as plain `create_all` for the unit tests, and change a column only
+   together with a revision — `task migrate:check -- <service>` takes a second, and CI's
+   `migrations` gate fails the PR otherwise.
+
+Two column rules that have each already caused a production-only failure:
+
+- **`BigInteger`, never `Integer`, for any `*_ns` or byte-size column.** SQLite tolerates the
+  overflow so the unit tests pass; Postgres `INTEGER` is 32-bit and overflows in production.
+- **A `NOT NULL` column wants a `server_default`.** Without one, rows that already exist have
+  nothing to be backfilled with (#903) — see the
+  [backfill rule](migrations.md#the-backfill-rule).
+
 ## Call the LLM gateway via `PlatformClient`
 
 Modules must never call a language model directly or hold provider API keys.

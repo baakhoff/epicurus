@@ -19,11 +19,12 @@ Everything is scoped by ``tenant_id`` (constraint #1) even though v1 is single-t
 store owns no provider specifics — the orchestrator (:mod:`epicurus_mail.cache`) drives it
 from the neutral provider seam, so an IMAP backend reuses the same schema.
 
-There is no migration framework; like every epicurus store it evolves via
-``create_all`` + the shared additive :func:`epicurus_core.db.ensure_columns` reconcile,
-called from :meth:`MailCache.init` (ADR-0067). This is the tables' first release, so the
-reconciled-column lists are empty today — they exist so a *later* column lands in an
-already-provisioned database instead of 500ing every read.
+Schema is Alembic-managed (#834, #932, ADR-XXXX): the deployed service builds its tables from
+``services/mail/src/epicurus_mail/migrations/versions/``, applied once at startup by
+:func:`epicurus_core.db.migrations.run_migrations`. :meth:`MailCache.init` survives only as the
+**unit-test** schema path — a fresh SQLite file per test is cheaper to build straight from the
+models than to migrate — honest only because the ``migrations`` CI gate proves the models and
+the revisions agree on real Postgres.
 """
 
 from __future__ import annotations
@@ -44,11 +45,9 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from epicurus_core.db import ensure_columns
 from epicurus_mail.provider import (
     MailCategory,
     MailCategoryPreview,
@@ -62,14 +61,6 @@ from epicurus_mail.provider import (
 # page shows ~25; keeping 200 leaves ample headroom for "Older" jumps to still hit cache-ish
 # without unbounded growth.
 LANDING_KEEP = 200
-
-# Columns added after each table's first release, reconciled in place at startup. Empty on
-# first release; append a column name here when you add one to a model (ADR-0067).
-_THREAD_ADDED: tuple[str, ...] = ()
-_LABEL_ADDED: tuple[str, ...] = ()
-_SYNC_ADDED: tuple[str, ...] = ()
-_LANDING_ADDED: tuple[str, ...] = ()
-_CATEGORY_ADDED: tuple[str, ...] = ()
 
 # The ``category_id`` of the **negative-cache** row (#765): "we asked the provider and it has
 # no categories here". A real category id is never empty, so this can't collide with one — and
@@ -244,19 +235,15 @@ class MailCache:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema, then reconcile any columns added after first release."""
+        """Build this store's tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (#834, #932, ADR-XXXX). It survives for the tests, where a fresh SQLite
+        file per test is cheaper to build from the models than to migrate. Honest only because
+        the ``migrations`` CI gate proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Additive reconcile for each cache table (ADR-0067) — no-op on first release."""
-        ensure_columns(sync_conn, _StoredThread.__table__, _THREAD_ADDED)
-        ensure_columns(sync_conn, _StoredLabel.__table__, _LABEL_ADDED)
-        ensure_columns(sync_conn, _StoredSync.__table__, _SYNC_ADDED)
-        ensure_columns(sync_conn, _StoredLanding.__table__, _LANDING_ADDED)
-        ensure_columns(sync_conn, _StoredCategory.__table__, _CATEGORY_ADDED)
 
     # ── landing rows ─────────────────────────────────────────────────────────
 

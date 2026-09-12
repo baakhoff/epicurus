@@ -89,6 +89,7 @@ class _StoredFile(_Base):
     # the baseline revision can restore this column on a pre-migration database exactly as
     # ``create_all`` would have made it (``NOT NULL DEFAULT 'fs'``, existing rows backfilled).
     source: Mapped[str] = mapped_column(String(16), server_default="'fs'", default="fs")
+    etag: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 def _row_to_entry(row: _StoredFile) -> FileEntry:

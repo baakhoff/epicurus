@@ -61,6 +61,7 @@
 - [Architecture](developer/architecture.md)
 - [Development setup](developer/development-setup.md)
 - [Building a module](developer/building-a-module.md)
+- [Schema migrations](developer/migrations.md)
 - [Testing](developer/testing.md)
 - [Contributing](developer/contributing.md)
 - [Versioning](developer/versioning.md)

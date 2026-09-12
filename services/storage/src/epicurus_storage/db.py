@@ -1,4 +1,10 @@
-"""File-index schema and query helpers — tenant-scoped rows in Postgres."""
+"""File-index schema and query helpers — tenant-scoped rows in Postgres.
+
+The table this module declares is the *model* side of the schema; the deployed shape comes
+from the revisions in :mod:`epicurus_storage.migrations` (#834, ADR-XXXX). Change a column
+here and you owe a revision — ``uv run python scripts/migrate.py check storage`` says so in a
+second, and CI's `migrations` gate fails the PR if you skip it.
+"""
 
 from __future__ import annotations
 
@@ -17,11 +23,9 @@ from sqlalchemy import (
     or_,
     select,
 )
-from sqlalchemy.engine import Connection, CursorResult
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from epicurus_core.db import ensure_columns
 
 FileKind = Literal["file", "dir"]
 
@@ -29,10 +33,6 @@ FileKind = Literal["file", "dir"]
 # MinIO object store ("object", e.g. chat uploads — ADR-0025). Only "fs" rows are
 # purged by a directory rescan; object rows persist until explicitly removed.
 FileSource = Literal["fs", "object"]
-
-# Columns added to storage_files after its first release. On an existing deployment
-# these are added in place at init (the index uses ``create_all``, no migration tool).
-_ADDED_COLUMNS = ("source",)
 
 
 def _like_prefix(path: str) -> str:
@@ -85,7 +85,9 @@ class _StoredFile(_Base):
     )
     # "fs" (scanned, read-only) or "object" (MinIO-backed upload). Defaults to "fs"
     # so existing rows and the scanner need no change; a rescan only purges "fs".
-    # ``server_default`` is raw SQL, hence the quoted literal.
+    # ``server_default`` is raw SQL, hence the quoted literal — and, because it is a literal,
+    # the baseline revision can restore this column on a pre-migration database exactly as
+    # ``create_all`` would have made it (``NOT NULL DEFAULT 'fs'``, existing rows backfilled).
     source: Mapped[str] = mapped_column(String(16), server_default="'fs'", default="fs")
 
 
@@ -111,20 +113,22 @@ class FileIndex:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this. Its schema comes from the migration
+        environment in :mod:`epicurus_storage.migrations`, applied once at startup by
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, ADR-XXXX) — which is also
+        what retired the additive reconcile this method used to run after ``create_all``
+        (ADR-0067): the baseline revision absorbed it.
+
+        It survives for the tests, where a fresh SQLite file per test is cheaper to build from
+        the models than to migrate, and where there is no drift to reconcile. That is only
+        honest because the `migrations` CI gate proves the models and the revisions agree on
+        real Postgres — without that gate this method would be a way to add a column and never
+        notice the deployment does not have it.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``source`` (#KB-refactor) carries a ``server_default`` of ``'fs'``, so the helper
-        adds it ``NOT NULL DEFAULT 'fs'`` — backfilling existing rows. See
-        :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(sync_conn, _StoredFile.__table__, _ADDED_COLUMNS)
 
     async def upsert_batch(
         self,

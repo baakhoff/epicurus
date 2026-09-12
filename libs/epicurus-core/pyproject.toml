@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core"
-version = "0.38.0"
+version = "0.39.0"
 description = "Shared contract and runtime for epicurus services."
 requires-python = ">=3.11"
 dependencies = [
@@ -28,13 +28,17 @@ dependencies = [
 # optional extra so the shared library stays lean: the local-filesystem backend — the
 # self-host default — has no S3 dependency. Install `epicurus-core[s3]` to use the S3 backend.
 #
-# The additive schema reconcile (epicurus_core.db.ensure_columns) needs SQLAlchemy. It is
-# likewise an optional extra so a module without a database carries no ORM dependency; the
-# `db` submodule is deliberately not imported by `epicurus_core/__init__`. Install
-# `epicurus-core[db]` — every store-owning service already depends on SQLAlchemy directly.
+# The schema layer (epicurus_core.db — the Alembic runner of ADR-XXXX, the shared `env.py`
+# body, the idempotent baseline ops, and the legacy additive reconcile) needs SQLAlchemy and
+# Alembic. It is likewise an optional extra so a module without a database carries no ORM
+# dependency; the `db` subpackage is deliberately not imported by `epicurus_core/__init__`,
+# and `epicurus_core.db` itself imports no Alembic — only `epicurus_core.db.migrations` and
+# `epicurus_core.db.ops` do, so a service that still uses only `ensure_columns` needs no
+# Alembic. A migrated service declares `epicurus-core[db]`; SQLAlchemy alone every store
+# already depends on directly.
 [project.optional-dependencies]
 s3 = ["aioboto3>=13.0"]
-db = ["sqlalchemy>=2.0"]
+db = ["sqlalchemy>=2.0", "alembic>=1.13"]
 
 [build-system]
 requires = ["hatchling"]

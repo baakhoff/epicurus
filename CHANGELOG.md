@@ -12,6 +12,24 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
+  the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
+  was un-shippable, a `NOT NULL` column added without a server default reached existing rows as
+  `NULL` (the cause of #903), and no gate anywhere ever exercised an *upgrade* — the unit tests
+  build tables from the models and the smoke gates boot an empty database, so both production
+  failures that motivated this (#214, #218) were visible only on a deployment that had been
+  running a while. epicurus now uses **Alembic, one migration environment per service**, applied
+  in-process at startup under a Postgres advisory lock so two replicas or an overlapping restart
+  never migrate at once — the same on Compose and on Kubernetes. Each service keeps its own
+  version table (`alembic_version_<service>`), because all seven share one database and own
+  disjoint tables in it. A service's *baseline* revision is idempotent, so one `upgrade head`
+  serves an empty database, one built by the old reconcile, and one already at head — with no
+  branch and, unlike a stamp, no revision ever silently skipped. `storage` is migrated as the
+  reference; authoring is `task migrate:new` and `task migrate:check` (a second, on SQLite), and
+  a new **`migrations`** CI gate proves every migrated service on real Postgres: fresh install,
+  restart, adoption of a pre-Alembic database, and adoption of a *drifted* one. A model change
+  with no revision now fails review instead of production. `epicurus-core` 0.38.0→0.39.0 (MINOR),
+  `storage` 0.11.0→0.12.0 (MINOR).
 - **The Helm chart has now actually booted** (#894) — the chart shipped rendered and
   schema-checked and never once started, which left a whole class of failure (a bad probe, an
   unwritable mount, an RBAC grant one verb short) uncaught until an operator hit it, and left

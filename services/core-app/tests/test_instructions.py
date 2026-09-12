@@ -5,11 +5,13 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core_app.agent.instructions import (
     DEFAULT_AGENT_INSTRUCTIONS,
     AgentInstructionsStore,
 )
 from epicurus_core_app.agent.playbooks import MAX_VERSIONS, PlaybookStore
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 
 
 async def _fresh(default: str = DEFAULT_AGENT_INSTRUCTIONS) -> AgentInstructionsStore:
@@ -112,8 +114,8 @@ async def test_default_encodes_recover_on_not_found() -> None:
     assert "propose what to do next" in text
 
 
-async def test_init_heals_legacy_table_without_instructions_column() -> None:
-    """A pre-existing table missing ``instructions`` is migrated in place (mirrors llm_prefs)."""
+async def test_the_migration_heals_a_legacy_table_without_the_instructions_column() -> None:
+    """A pre-existing table missing ``instructions`` is reconciled by the baseline (#834)."""
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -124,8 +126,14 @@ async def test_init_heals_legacy_table_without_instructions_column() -> None:
             "CREATE TABLE agent_instructions (tenant VARCHAR(63) PRIMARY KEY)"
         )
         await conn.exec_driver_sql("INSERT INTO agent_instructions (tenant) VALUES ('t1')")
+    # Must ADD COLUMN, not fail.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = AgentInstructionsStore(engine, default="D")
-    await store.init()  # must ADD COLUMN instructions rather than fail
     assert await store.get_instructions("t1") == "D"
     await store.set_instructions("t1", "X")
     assert await store.get_instructions("t1") == "X"

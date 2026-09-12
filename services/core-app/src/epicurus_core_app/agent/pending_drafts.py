@@ -7,10 +7,9 @@ id, and the composed draft), the SSE stream ends with an ``awaiting_input`` fram
 Confirm/Decline request rehydrates and continues it.
 
 This is a deliberate **sibling** to :mod:`epicurus_core_app.agent.suspended` (the ``ask_user``
-store) rather than an extension of it: the shipped ``agent_suspended_runs`` table already exists,
-and ``create_all`` never adds columns to an existing table — so a new, separately-created table
-carries the draft-specific fields with no migration, and the two consume-on-resume paths can never
-cross (a stray ``/resume`` cannot swallow a draft, or vice-versa). Rows are **consumed** on resume
+store) rather than an extension of it: a table of its own carries the draft-specific fields, and
+the two consume-on-resume paths can never cross (a stray ``/resume`` cannot swallow a draft, or
+vice-versa). Rows are **consumed** on resume
 and reaped after a TTL. Tenant-scoped (constraint #1).
 """
 
@@ -80,7 +79,12 @@ class PendingDraftStore:
         self._ttl = timedelta(hours=max(1, ttl_hours))
 
     async def init(self) -> None:
-        """Create the schema."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
 

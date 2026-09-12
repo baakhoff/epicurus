@@ -12,8 +12,8 @@ assignable to a module's model slot (ADR-0029).
 
 Local ids never belong here — the route validates each id as *hosted* (a known
 provider-alias prefix) via :func:`epicurus_core_app.llm.providers.is_hosted`, so a local
-``hf.co/org/model:tag`` can never masquerade as a hosted entry. Auto-created on first use
-via ``SavedHostedModelStore.init()`` (the same pattern as ``LlmPrefsStore``).
+``hf.co/org/model:tag`` can never masquerade as a hosted entry. The table is created by this
+service's migrations (:mod:`epicurus_core_app.migrations`), applied at startup (#834).
 
 Each row may also carry a **capability override** (#711) — the operator's correction to what
 the core *believes* about the model when LiteLLM's static cost map is wrong or silent. See
@@ -26,14 +26,12 @@ import time
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Integer, String, delete, select, update
+from sqlalchemy import BigInteger, Integer, String, delete, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.engine import Connection, CursorResult
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from epicurus_core.db import ensure_columns
 
 # How a saved model's vision capability is decided: trust the map, or force it either way.
 VisionOverride = Literal["auto", "on", "off"]
@@ -101,7 +99,10 @@ class _SavedModelRow(_SavedBase):
     # bumped when an existing id is re-saved. BigInteger, not Integer: epoch-ms (~1.7e12)
     # overflows Postgres INTEGER (int32), the same class of bug as the *_ns columns (#249), so
     # BigInteger is the safe default for any epoch column even though SQLite tolerates the width.
-    added_at: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    # ``text("0")``, not the bare string ``"0"``: a plain string is a *literal* SQLAlchemy
+    # quotes, so that spelling emitted ``DEFAULT '0'`` — a quoted zero — from ``create_all``
+    # while the additive reconcile pasted it in raw and emitted ``DEFAULT 0`` (#834, rev 0002).
+    added_at: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"))
     # The capability override (#711), stored flat. NULL on both means "no override" — the
     # absence *is* the "auto" case, so an untouched row keeps the map's answers verbatim.
     vision_override: Mapped[str | None] = mapped_column(String(8), nullable=True)
@@ -118,24 +119,14 @@ class SavedHostedModelStore:
         )
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_SavedBase.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        A ``saved_models`` table provisioned before ``added_at`` (or before the #711 override
-        columns) existed self-heals rather than 500ing on every read. See
-        :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(
-            sync_conn,
-            _SavedModelRow.__table__,
-            ("added_at", "vision_override", "context_length_override"),
-        )
 
     async def list(self, tenant: str) -> list[str]:
         """The tenant's saved hosted-model ids, most-recently-saved first."""

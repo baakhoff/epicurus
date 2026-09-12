@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core_app.maintenance_schedule_prefs import (
     MaintenanceSchedule,
     MaintenanceScheduleStore,
@@ -21,6 +22,7 @@ from epicurus_core_app.maintenance_schedule_prefs import (
     next_run_at,
     validate_cadence,
 )
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 
 
 async def _fresh(
@@ -73,8 +75,8 @@ async def test_set_overwrites_a_previous_schedule_wholesale() -> None:
     )
 
 
-async def test_init_heals_legacy_table_missing_columns() -> None:
-    """A pre-existing table with only the PK column self-heals rather than 500ing."""
+async def test_the_migration_heals_a_legacy_table_missing_columns() -> None:
+    """A pre-existing table with only the PK column is reconciled rather than 500ing (#834)."""
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -84,8 +86,14 @@ async def test_init_heals_legacy_table_missing_columns() -> None:
         await conn.exec_driver_sql(
             "CREATE TABLE maintenance_schedule_prefs (tenant VARCHAR(63) PRIMARY KEY)"
         )
+    # Must ADD COLUMN rather than fail.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = MaintenanceScheduleStore(engine, default_enabled=False, default_hour=4)
-    await store.init()  # must ADD COLUMN rather than fail
     await store.set("t1", MaintenanceSchedule(enabled=True, cadence="daily", hour=6))
     assert await store.get("t1") == MaintenanceSchedule(
         enabled=True, cadence="daily", hour=6, weekday=None

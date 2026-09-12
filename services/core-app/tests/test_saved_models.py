@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 import epicurus_core_app.llm.saved_models as saved_models_mod
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core_app.llm.saved_models import SavedHostedModelStore, SavedModelOverride
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 
 
 async def _fresh() -> tuple[SavedHostedModelStore, AsyncEngine]:
@@ -81,8 +83,13 @@ async def test_remove_absent_is_noop() -> None:
     assert await store.list("t1") == []
 
 
-async def test_init_heals_legacy_table_without_added_at_column() -> None:
-    """A pre-existing table missing ``added_at`` is migrated in place (mirrors llm_prefs)."""
+async def test_the_migration_heals_a_legacy_table_without_added_at() -> None:
+    """A pre-existing table missing ``added_at`` is reconciled by the baseline (#834).
+
+    The column carries a literal ``server_default``, so the reconcile re-adds it
+    ``NOT NULL DEFAULT 0`` and the pre-existing row is backfilled — unlike a column with only a
+    Python-side default, which comes back nullable (revisions 0003/0004 are the fix for those).
+    """
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -96,8 +103,14 @@ async def test_init_heals_legacy_table_without_added_at_column() -> None:
         await conn.exec_driver_sql(
             "INSERT INTO saved_models (tenant, model) VALUES ('t1', 'claude/sonnet')"
         )
+    # Must ADD COLUMN added_at, not fail.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = SavedHostedModelStore(engine)
-    await store.init()  # must ADD COLUMN added_at rather than fail
     assert await store.list("t1") == ["claude/sonnet"]
     await store.add("t1", "gpt/gpt-4o")
     assert set(await store.list("t1")) == {"claude/sonnet", "gpt/gpt-4o"}
@@ -186,8 +199,8 @@ async def test_an_unknown_stored_vision_value_degrades_to_auto() -> None:
     assert (await store.get_override("t1", "xai/grok-latest")).vision == "auto"
 
 
-async def test_init_heals_a_table_without_the_override_columns() -> None:
-    """A table provisioned before #711 gains both columns in place rather than 500ing."""
+async def test_the_migration_heals_a_table_without_the_override_columns() -> None:
+    """A table provisioned before #711 gains both columns in place rather than 500ing (#834)."""
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -201,8 +214,13 @@ async def test_init_heals_a_table_without_the_override_columns() -> None:
         await conn.exec_driver_sql(
             "INSERT INTO saved_models (tenant, model, added_at) VALUES ('t1', 'xai/grok-latest', 1)"
         )
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = SavedHostedModelStore(engine)
-    await store.init()
     assert (await store.get_override("t1", "xai/grok-latest")).is_empty()
     assert (
         await store.set_override("t1", "xai/grok-latest", SavedModelOverride(vision="on")) is True

@@ -12,12 +12,14 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core_app.memory.store import (
     AttachmentStore,
     ConversationStore,
     EphemeralSessionStore,
     StoredMessage,
 )
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 
 
 async def _fresh_store() -> tuple[ConversationStore, AsyncEngine]:
@@ -266,8 +268,10 @@ async def test_attachment_store_delete_many_is_tenant_scoped() -> None:
     assert await blobs.delete_many(tenant="t1", att_ids=[]) == 0
 
 
-async def test_init_adds_entity_refs_column_to_a_legacy_table() -> None:
-    # A pre-v0.3 deployment: agent_messages exists without the entity_refs column.
+async def test_the_migration_adds_entity_refs_to_a_legacy_table() -> None:
+    # A pre-v0.3 deployment: agent_messages exists without the entity_refs column. The baseline
+    # revision reconciles it in place now (#834) — it absorbed the additive reconcile that used
+    # to run from ConversationStore.init().
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -280,8 +284,14 @@ async def test_init_adds_entity_refs_column_to_a_legacy_table() -> None:
             "role VARCHAR(16), content TEXT, "
             "created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"
         )
+    # Must add entity_refs + attachments + activity in place, not raise.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = ConversationStore(engine)
-    await store.init()  # must add entity_refs + attachments + activity columns in place, not raise
     await store.append(
         tenant="t",
         session_id="s",

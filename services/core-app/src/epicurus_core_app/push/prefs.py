@@ -23,11 +23,8 @@ from dataclasses import dataclass, field
 from datetime import time
 
 from sqlalchemy import Boolean, String, Text
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from epicurus_core.db import ensure_columns
 
 __all__ = [
     "KNOWN_CATEGORIES",
@@ -137,15 +134,6 @@ class _PushPrefsRow(_Base):
     quiet_hours_end: Mapped[str] = mapped_column(String(5), default=_DEFAULT_QUIET_END)
 
 
-_ADDED_COLUMNS = (
-    "categories",
-    "automation_overrides",
-    "quiet_hours_enabled",
-    "quiet_hours_start",
-    "quiet_hours_end",
-)
-
-
 class PushPrefsStore:
     """Read/write a tenant's push/center preferences."""
 
@@ -156,14 +144,14 @@ class PushPrefsStore:
         )
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        ensure_columns(sync_conn, _PushPrefsRow.__table__, _ADDED_COLUMNS)
 
     async def get(self, tenant: str) -> PushPrefs:
         """Return the tenant's preferences, defaulting an unset row entirely."""
@@ -247,11 +235,12 @@ def _decode_channels(raw: str) -> dict[str, ChannelPrefs]:
 
 
 def _to_value(row: _PushPrefsRow) -> PushPrefs:
-    # Every added column here carries a Python-side `default=`, not a `server_default=`, so
-    # a row reconciled onto a legacy table (ensure_columns, epicurus_core.db) adds them
-    # NULLable with nothing to backfill — a healed row can read back None even though the
-    # model declares a default. Coerce explicitly rather than leaning on json.loads'/bool's
-    # incidental falsy handling.
+    # Every column here carries a Python-side `default=`, not a `server_default=`, so a row on
+    # a table the additive reconcile had to heal can read back None even though the model
+    # declares a default. These five shipped *with* the table (#670), so no deployment should
+    # hold such a NULL and #927's audit owed them no backfill revision — but the coercion is
+    # free and the reader must not be the thing that breaks if one turns up. Explicit rather
+    # than leaning on json.loads'/bool's incidental falsy handling.
     return PushPrefs(
         categories=_decode_channels(row.categories or "{}"),
         automation_overrides=_decode_channels(row.automation_overrides or "{}"),

@@ -114,11 +114,11 @@ class MaintenanceRunStore:
         self._max_age_days = max_age_days
 
     async def init(self) -> None:
-        """Create the schema (idempotent).
+        """Build this store's tables from the models — the **unit-test** schema path.
 
-        No ``ensure_columns`` call: this table is new in this release, so it has no deployed
-        predecessor to reconcile against — the first column added *after* this ships must add
-        one (ADR-0067).
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
         """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)

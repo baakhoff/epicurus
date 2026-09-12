@@ -9,10 +9,9 @@ and continues it.
 
 This is a deliberate **sibling** to :mod:`epicurus_core_app.agent.suspended` (the ``ask_user``
 store) and :mod:`epicurus_core_app.agent.pending_drafts` (the ``draft_review`` store), for the
-same reason ``pending_drafts`` gives for not extending ``suspended``: both shipped tables already
-exist, and ``create_all`` never adds columns to an existing table, so a third pause kind gets a
-third, separately-created table rather than a migration. The three consume-on-resume paths can
-never cross — a stray ``/resume`` or ``/draft`` post cannot swallow an approval, or vice versa.
+same reason ``pending_drafts`` gives for not extending ``suspended``: a third pause kind gets a
+third table so the three consume-on-resume paths can never cross — a stray ``/resume`` or
+``/draft`` post cannot swallow an approval, or vice versa.
 Rows are **consumed** on resume and reaped after a TTL. Tenant-scoped (constraint #1).
 
 Unlike a draft, an approval never carries a payload the core transmits on the operator's behalf:
@@ -86,7 +85,12 @@ class PendingApprovalStore:
         self._ttl = timedelta(hours=max(1, ttl_hours))
 
     async def init(self) -> None:
-        """Create the schema."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
 

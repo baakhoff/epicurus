@@ -5,6 +5,8 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core.db.migrations import run_migrations
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 from epicurus_core_app.timezone_prefs import TimezonePrefsStore
 
 
@@ -41,8 +43,8 @@ async def test_set_is_tenant_scoped() -> None:
     assert await store.get_timezone("t2") == "UTC"
 
 
-async def test_init_heals_legacy_table_without_timezone_column() -> None:
-    """A pre-existing table missing ``timezone`` is migrated in place (mirrors llm_prefs)."""
+async def test_the_migration_heals_a_legacy_table_without_the_timezone_column() -> None:
+    """A pre-existing table missing ``timezone`` is reconciled by the baseline (#834)."""
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -51,8 +53,14 @@ async def test_init_heals_legacy_table_without_timezone_column() -> None:
     async with engine.begin() as conn:
         await conn.exec_driver_sql("CREATE TABLE timezone_prefs (tenant VARCHAR(63) PRIMARY KEY)")
         await conn.exec_driver_sql("INSERT INTO timezone_prefs (tenant) VALUES ('t1')")
+    # Must ADD COLUMN timezone, not fail.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = TimezonePrefsStore(engine, default="UTC")
-    await store.init()  # must ADD COLUMN timezone rather than fail
     assert await store.get_timezone("t1") == "UTC"
     await store.set_timezone("t1", "Europe/Belgrade")
     assert await store.get_timezone("t1") == "Europe/Belgrade"

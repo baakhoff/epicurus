@@ -268,11 +268,30 @@ any future reconcile get it too. A column inside a unique constraint needs care:
 several rows to the same value can collide, so decide what the value should be per row rather
 than blanket-defaulting.
 
-Inventory at the time of writing: **`storage` has none** — its one post-release column (`source`)
-carries a literal `server_default`. `calendar` has seven (`calendar_events.all_day`,
-`calendar_events.excluded`, `calendar_sync_state.collection`,
-`calendar_synced_event.{collection,title,all_day,change_hash}`); the other services have not been
-audited yet. Each service lane audits its own and says so in its PR.
+**Add the `server_default` to the model as well, in the same PR.** `compare_server_default` is
+on, so a default the revision puts in the database and the model does not declare is *drift*:
+`alembic check` reports a `modify_server_default` and the gate goes red. Declaring it is also the
+point — it is what makes a freshly created table and a table the baseline reconciles produce the
+same column, which is the guarantee the whole framework rests on. The revision then becomes a
+no-op on a fresh install (the `UPDATE` matches nothing, the `ALTER` restates what is there) and
+does real work only on the deployments that carry the `NULL`s.
+
+Inventory as the lanes land: **`storage` has none** — its one post-release column (`source`)
+carries a literal `server_default`. **`core-app` has two** of 55 candidates —
+`module_prefs.suggestions_enabled` and `automations.agent_gated_delivery` (revisions 0003/0004).
+`calendar` has seven (`calendar_events.all_day`, `calendar_events.excluded`,
+`calendar_sync_state.collection`, `calendar_synced_event.{collection,title,all_day,change_hash}`);
+the remaining services have not been audited yet. Each service lane audits its own and says so in
+its PR.
+
+**Narrow the candidate list with `git log`, don't blanket-fix it.** A `NOT NULL` column with a
+`default=` and no `server_default` only holds `NULL` if it was **added after its table's first
+release** — a column that shipped *with* the table was created `NOT NULL` by `create_all` and
+never went through the reconcile at all. Several stores list every non-key column in their
+`ensure_columns` call defensively, so that list over-reports; comparing the commit that introduced
+`__tablename__ = "<t>"` with the commit that introduced the column's declaration is what settles
+it. core-app's audit went from 55 candidates to 2 that way, and writing 53 no-op revisions would
+have been 53 chances to get a value wrong.
 
 ## SQLite, Postgres, and what each gate proves
 

@@ -1064,13 +1064,13 @@ provides-extras = ["s3", "db"]
 
 [[package]]
 name = "epicurus-core-app"
-version = "0.123.0"
+version = "0.124.0"
 source = { editable = "services/core-app" }
 dependencies = [
     { name = "aioboto3" },
     { name = "asyncpg" },
     { name = "docker" },
-    { name = "epicurus-core" },
+    { name = "epicurus-core", extra = ["db"] },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "httpx2" },
@@ -1090,7 +1090,7 @@ requires-dist = [
     { name = "aioboto3", specifier = ">=13.0" },
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "docker", specifier = ">=7.0" },
-    { name = "epicurus-core", editable = "libs/epicurus-core" },
+    { name = "epicurus-core", extras = ["db"], editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx2", specifier = ">=2.9" },

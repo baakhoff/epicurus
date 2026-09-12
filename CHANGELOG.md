@@ -12,6 +12,24 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
+  #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
+  startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own
+  "log it and carry on". One `run_migrations` call replaces all of them, and is deliberately not
+  wrapped: a database the core cannot reach now fails the boot, with a restart and a clear log
+  line, instead of bringing the core up with 29 error lines and no working feature. Two
+  **backfill revisions** finish what the old reconcile could not start:
+  `module_prefs.suggestions_enabled` — the column behind #903, where a preferences *write* on a
+  long-lived install aborted on a `NULL` the reconcile had no way to avoid leaving — and
+  `automations.agent_gated_delivery`, in exactly the same position. Existing rows get the value
+  every reader was already pretending they had, and both columns become `NOT NULL` for real. A
+  third revision repairs five column defaults that have been wrong on disk since they shipped
+  (`module_prefs.models` / `.disabled_tools` / `.collections`, `llm_prefs.hidden_models`,
+  `saved_models.added_at`): declared as plain strings, they compiled to a default whose value
+  included the quote characters when the table was created fresh, and to the intended value when
+  the reconcile added the column — one release, two different databases. Nothing user-visible
+  changes, and nothing about a schema change here is guesswork any more: a model edited without a
+  revision fails CI. `core-app` 0.123.0→0.124.0 (MINOR).
 - **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
   the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
   was un-shippable, a `NOT NULL` column added without a server default reached existing rows as

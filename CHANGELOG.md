@@ -12,6 +12,16 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`tasks`'s schema is migration-managed** (#834, #929) — the module adopts the Alembic
+  foundation (#926): a startup `run_migrations` call replaces `TaskStore`/`LeadTimePrefsStore`/
+  `FiredMarkerStore`'s `create_all` + additive-reconcile, under a Postgres advisory lock, across
+  the four tables its three `DeclarativeBase` objects own (`tasks_local`, `task_repeats`,
+  `tasks_lead_time_prefs`, `tasks_fired_markers`). The baseline revision absorbs the reconcile
+  that used to repair a pre-#218 `tasks_local` missing `status`/`priority`/`tags`/`repeat` on an
+  existing deployment. The backfill audit (#903's rule) found one `NOT NULL`
+  `default=`-without-`server_default=` column, `tasks_local.completed` — no revision needed, since
+  it has been part of the table since v1 and both its writers always set it explicitly, so no
+  deployment can have carried a `NULL` there. `tasks` 0.24.0→0.25.0 (MINOR).
 - **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
   the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
   was un-shippable, a `NOT NULL` column added without a server default reached existing rows as

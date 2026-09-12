@@ -61,10 +61,10 @@ def _build_booted_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 @pytest.fixture()
 def booted_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
-    """A TestClient whose lifespan actually runs, so the local store is created.
+    """A TestClient whose lifespan actually runs, so the local store's schema is built.
 
-    The page endpoint queries the DB, which the lifespan's ``store.init()`` builds —
-    so unlike ``client`` we enter the app's lifespan.
+    The page endpoint queries the DB, which the lifespan's ``run_migrations`` call builds
+    (#929) — so unlike ``client`` we enter the app's lifespan.
     """
     with _build_booted_client(monkeypatch) as the_client:
         yield the_client

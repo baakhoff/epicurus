@@ -195,7 +195,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.24.0",
+        version="0.25.0",
         portable=True,
         description=(
             "Task management: list, add, edit, complete, and repeat tasks. Backed by a local"

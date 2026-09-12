@@ -741,8 +741,7 @@ ADR-0085), not in the module.
 What the module *does* own is the tenant-scoped **local cache** (ADR-0096, #623) — a
 materialization of the landing view, not a mail store. Every table is scoped by `tenant_id`
 (constraint #1); large-int columns are `BigInteger` (a Gmail `historyId` and an epoch-millisecond
-`sort_ts` both exceed int32). There is no migration framework — the schema evolves via
-`create_all` + the shared additive [`ensure_columns`](../reference/db.md) reconcile (ADR-0067).
+`sort_ts` both exceed int32).
 
 | Table | Scope | Holds |
 | --- | --- | --- |
@@ -751,6 +750,35 @@ materialization of the landing view, not a mail store. Every table is scoped by 
 | `mail_sync` | `(tenant_id)` | The change cursor: Gmail `history_id`; IMAP `uid_validity`/`uid_next` reserved (all `BigInteger`). |
 | `mail_landing` | `(tenant_id, label)` | Per-folder landing metadata: the page-1 `next_cursor` (so a cached view keeps its "Older") and when it was last full-synced. |
 | `mail_category` | `(tenant_id, label, category_id)` | The Inbox's category tabs (#765): title, unread count, and the newest-message preview, in strip order, with the `cached_at` that drives the TTL. An empty `category_id` is the negative-cache row — "the provider was asked and has no categories here". |
+
+### Schema is migration-managed (#834, #932, ADR-XXXX)
+
+The deployed shape of the five tables above comes from the revisions in
+`src/epicurus_mail/migrations/versions/`, applied once at startup: the lifespan calls
+`epicurus_core.db.migrations.run_migrations` before anything reads a row, under a Postgres
+advisory lock so two replicas — or a restart overlapping a start — cannot both run
+`upgrade head`. Its private version table is `alembic_version_mail`; every service shares one
+database and keeps its own head revision.
+
+- `MailCache.init()` still exists and still calls `create_all`, but **the deployed service no
+  longer calls it** — it is the unit-test schema path, kept because an Alembic run per test is
+  needless cost. CI's `migrations` gate is what proves the two agree.
+- All five tables shipped in mail's first release with every column they have today — the
+  pre-migration `db.py` carried empty `ensure_columns`-added-column lists for every table — so
+  there is no history of a column reaching a populated table through the additive reconcile, and
+  no reconcile-repair case for the baseline to cover (unlike storage's `source`).
+- Mail has **no** plain-string `server_default` (`server_default="'…'"`), so unlike `calendar`,
+  `knowledge`, `notes`, and `core-app` its adoption arm needed no `text("'…'")` fix and no
+  normalisation revision — the only server defaults here are `func.now()` on the three
+  `synced_at`/`cached_at` timestamp columns, which render dialect-neutrally already.
+- Mail has **no** `default=`-without-`server_default=` NOT NULL column that could hold a `NULL`
+  on any real deployment: every such column (`subject`, `sender`, `snippet`, `date`, `sort_ts`,
+  `unread`, `message_count`, `title`, `kind`, `position`, `preview_sender`, `preview_subject`,
+  `has_preview`) has existed since its table's original `create_all`, which enforces `NOT NULL`
+  at creation time, and every insert goes through the ORM (which always supplies the Python-side
+  default) — so the #903 backfill rule finds nothing to write here.
+- Changing a column here means writing a revision: `task migrate:new -- mail "<what changed>"`,
+  then `task migrate:check -- mail`. See **[Schema migrations](../developer/migrations.md)**.
 
 ---
 

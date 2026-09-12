@@ -12,6 +12,15 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`mail` adopts the migration foundation** (#834, #932) — the five `mail_*` local-cache tables
+  (ADR-0096) are now schema-migration-managed like `storage`: a baseline revision, applied
+  in-process at startup under a Postgres advisory lock, replaces the old `create_all` +
+  `ensure_columns` reconcile. Mail turned out to need neither of the two per-service defects the
+  foundation warned about: it carries no plain-string `server_default` (only `func.now()`), and
+  every `default=`-without-`server_default=` NOT NULL column has existed since its table's
+  first release rather than being added later to a populated table, so the #903 backfill rule
+  finds nothing to write here either — both are recorded in the PR body's audit. `mail`
+  0.21.0→0.22.0 (MINOR).
 - **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
   the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
   was un-shippable, a `NOT NULL` column added without a server default reached existing rows as

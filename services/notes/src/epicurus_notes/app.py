@@ -24,10 +24,12 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
+from epicurus_core.db.migrations import run_migrations
 from epicurus_notes.attachments import NotesAttachments, create_attachments_router
 from epicurus_notes.db import NoteFolderStore, NotesStore
 from epicurus_notes.events import NoteEventEmitter
 from epicurus_notes.indexer import NotesIndexer
+from epicurus_notes.migrations import METADATAS, SCRIPT_LOCATION
 from epicurus_notes.mirror import NotesMirror
 from epicurus_notes.pages import NotesPages, create_pages_router
 from epicurus_notes.portability import NotesPortability
@@ -101,10 +103,21 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
-            await store.init()
-            await suggestion_store.init()
-            await suggestion_audit.init()
-            await folders.init()
+            # Schema first, before anything reads or writes a row. In-process rather than a
+            # separate init step: a container has one entry point on both runtimes this stack
+            # supports, and a Kubernetes-only init container would put the schema behind a
+            # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
+            # start — is handled by the Postgres advisory lock inside run_migrations, not by
+            # assuming this process is alone (#834, #930, ADR-XXXX). Replaces the four
+            # `<store>.init()` calls this lifespan used to make — each did nothing but
+            # `create_all`, which the baseline revision now covers; they survive only as the
+            # unit-test schema path (see each store's `init()` docstring).
+            await run_migrations(
+                engine,
+                service=MODULE_NAME,
+                script_location=SCRIPT_LOCATION,
+                metadatas=METADATAS,
+            )
             # One-time copy of pre-existing notes into the shared file space (#KB-refactor).
             await mirror.backfill()
             await bus.connect()

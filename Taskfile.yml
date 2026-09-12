@@ -46,6 +46,21 @@ tasks:
       - task: type
       - task: test
 
+  migrate:list:
+    desc: List the services whose schema is migration-managed, with each one's head revision
+    cmds:
+      - uv run python scripts/migrate.py services
+
+  migrate:new:
+    desc: 'Create the next schema revision for a service, empty and ready to hand-write (e.g. `task migrate:new -- storage "add etag"`). Not autogenerate — that needs a live Postgres; see docs/developer/migrations.md'
+    cmds:
+      - uv run python scripts/migrate.py new {{.CLI_ARGS}}
+
+  migrate:check:
+    desc: 'Prove a service''s revisions still match its models — upgrade an empty SQLite to head, then `alembic check` (e.g. `task migrate:check -- storage`; no args checks every migrated service). The local half of CI''s `migrations` gate'
+    cmds:
+      - uv run python scripts/migrate.py check {{.CLI_ARGS}}
+
   up:
     desc: Start the full stack (data plane + enabled modules; Docker control is on by default through docker-proxy-core, observability is opt-in — see `obs-up` / `docker-socket-up`)
     cmds:

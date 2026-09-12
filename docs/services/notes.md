@@ -372,6 +372,40 @@ note. The agent's view of `notes/` through the storage file tools is hidden by s
 Everything is tenant-scoped: the Postgres rows, the suggestion queue, the Qdrant collection
 name, and the NATS subject.
 
+### Schema is migration-managed (#834, #930, ADR-XXXX)
+
+Notes follows the foundation storage shipped (#926). The deployed shape of all five tables
+above comes from the revisions in `src/epicurus_notes/migrations/versions/`, applied once at
+startup: the lifespan calls `epicurus_core.db.migrations.run_migrations` before anything reads
+a row, under a Postgres advisory lock so two replicas — or a restart overlapping a start —
+cannot both run `upgrade head`. Its private version table is `alembic_version_notes`; every
+service shares one database and keeps its own head revision.
+
+- Three `DeclarativeBase`s cover the five tables: `epicurus_notes.db._Base` (`notes`,
+  `note_folders`, `note_versions`), `epicurus_notes.suggestions._NoteSuggestionBase`
+  (`notes_suggestions`), and `epicurus_notes.suggestions._NoteAuditBase`
+  (`notes_suggestion_decisions`).
+- Each store's `init()` still exists and still calls `create_all`, but **the deployed service
+  no longer calls any of them** — that was the lifespan's only use for them, and it now calls
+  `run_migrations` once instead. They survive as the unit-test schema path, kept because an
+  Alembic run per test is needless cost; CI's `migrations` gate is what proves the two agree.
+- **No `server_default="'…'"` literal exists in this service's models** — every server default
+  here is `func.now()`, which Alembic's autogenerate renders correctly on its own. Unlike
+  storage, calendar, knowledge and mail, notes needed no `text("'…'")` fix and ships no
+  `0002` normalisation revision.
+- **Backfill audit (#903 rule):** seven `NOT NULL` columns carry a Python-side `default=` with
+  no `server_default=` — `notes_suggestions.{proposed_content,origin,note}` and
+  `notes_suggestion_decisions.{origin,note,proposed_content,applied_content}`. None needs a
+  backfill revision: both tables, and every one of these columns, were introduced together in
+  the same commit that created the table (#306, #611) — notes has never called
+  `epicurus_core.db.ensure_columns`, so no column here was ever added to an already-populated
+  table. The ORM applies each Python-side default at flush regardless of a server default
+  (confirmed by the portability import path too, which upserts through the same models), so no
+  row — old or freshly restored — can hold a `NULL` in any of the seven. Recorded here rather
+  than left silent, per the wave's audit requirement.
+- Changing a column here means writing a revision: `task migrate:new -- notes "<what changed>"`,
+  then `task migrate:check -- notes`. See **[Schema migrations](../developer/migrations.md)**.
+
 ## Portability (#872)
 
 Notes implements the module half of tenant export/import (ADR-0133): `portable: true` in the

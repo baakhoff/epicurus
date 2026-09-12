@@ -229,7 +229,7 @@ services:
     networks: [epicurus]
 
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -256,7 +256,7 @@ services:
   minio-init:
     # NOTE: the mc client is versioned SEPARATELY from the minio server — its
     # release tags do not match the server's, so they are pinned independently.
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
     restart: "no"
     depends_on:
       minio:

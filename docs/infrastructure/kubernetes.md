@@ -385,8 +385,8 @@ cluster points at managed services.
 | `openbao.unseal.enabled` / `.intervalSeconds` | `true` / `30` |
 | `openbao.external.url` / `.tokenSecret` / `.tokenSecretKey` | `""` / `""` / `app-token` |
 | `minio.enabled` | **`true`** |
-| `minio.image.repository` / `.tag` | `minio/minio` / `RELEASE.2025-04-22T22-12-26Z` |
-| `minio.initImage.repository` / `.tag` | `minio/mc` / `RELEASE.2025-04-16T18-13-26Z` |
+| `minio.image.repository` / `.tag` | `quay.io/minio/minio` / `RELEASE.2025-04-22T22-12-26Z` |
+| `minio.initImage.repository` / `.tag` | `quay.io/minio/mc` / `RELEASE.2025-04-16T18-13-26Z` |
 | `minio.defaultBucket` | `epicurus` |
 | `minio.initJob.ttlSecondsAfterFinished` | `86400` |
 | `minio.persistence.*` | as postgres, `50Gi` |

@@ -359,7 +359,7 @@ def build_module(
 
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.11.0",
+        version="0.12.0",
         description=(
             "Agent file tools over the core-owned file space (list, search, read), plus "
             "app-managed object storage via MinIO and durable chat-upload ingest. The Files "

@@ -161,9 +161,13 @@ def test_the_committed_baseline_is_what_the_generator_renders(migrate: ModuleTyp
 
     Not a substitute for ``alembic check`` — that runs the revisions against a real database and
     is what the `migrations` gate does — but it catches the cheap version of the same mistake in
-    milliseconds: a model edited, the baseline left alone, on a service whose baseline is still
-    its only revision. Both sides go through ``ruff format`` first, since the committed file was
-    formatted on the way in and the renderer's own output is not.
+    milliseconds: a model edited, the baseline left alone. Both sides go through ``ruff format``
+    first, since the committed file was formatted on the way in and the renderer's output is not.
+
+    Only applicable to a service whose baseline is still its **only** revision: once there is a
+    0002, the models have deliberately moved past the baseline and the two no longer match. Each
+    service lane lands in exactly that state, so this covers every adoption as it arrives; it
+    skips once they have all moved on, and the gate carries it from there.
     """
     ruff = shutil.which("ruff")
     if ruff is None:  # pragma: no cover - ruff is a dev dependency, so it is on PATH
@@ -189,7 +193,10 @@ def test_the_committed_baseline_is_what_the_generator_renders(migrate: ModuleTyp
             f"revision; run `uv run python scripts/migrate.py check {service.name}`"
         )
         checked += 1
-    assert checked, "no service is still on its baseline alone — drop this test or keep one"
+    if not checked:
+        pytest.skip(
+            "every migrated service has revisions past its baseline; `alembic check` owns it"
+        )
 
 
 def test_baseline_refuses_to_overwrite_existing_revisions(migrate: ModuleType) -> None:

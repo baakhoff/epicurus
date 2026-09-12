@@ -36,7 +36,7 @@ from epicurus_core.db.migrations import (
 from epicurus_storage.db import FileIndex, _Base
 from epicurus_storage.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 
-HEAD = "0001"
+HEAD = "0002"
 
 
 @pytest.fixture
@@ -202,6 +202,55 @@ async def test_the_baseline_adds_the_index_a_reconciled_table_never_got(
     await _migrate(engine)
     async with engine.connect() as conn:
         assert "ix_storage_files_tenant" in await conn.run_sync(indexes)
+
+
+async def test_revision_0002_normalises_the_doubled_quote_source_default(
+    engine: AsyncEngine,
+) -> None:
+    """The first change the additive reconcile could never have made — it *alters* a column.
+
+    ``source`` was declared ``server_default="'fs'"``, a *plain string*, which SQLAlchemy quotes
+    as a literal: ``create_all`` therefore wrote ``DEFAULT '''fs'''`` while the reconcile, pasting
+    the same string in as raw SQL, wrote ``DEFAULT 'fs'``. Two databases, two different defaults,
+    and an insert that omitted the column got a value with quotes in it. Nothing noticed because
+    every insert sets ``source`` and the row-reader treats anything but ``"object"`` as ``"fs"``.
+
+    So this is the state an existing deployment is really in, and 0002 is what fixes it. The
+    baseline cannot: additive repair adds columns, it never touches one that is already there.
+    """
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql(
+            "CREATE TABLE storage_files ("
+            "id INTEGER PRIMARY KEY, tenant VARCHAR(63) NOT NULL, path VARCHAR(4096) NOT NULL, "
+            "name VARCHAR(255) NOT NULL, size BIGINT NOT NULL, mtime FLOAT NOT NULL, "
+            "kind VARCHAR(8) NOT NULL, updated_at DATETIME NOT NULL, "
+            "source VARCHAR(16) DEFAULT '''fs''' NOT NULL, "
+            "CONSTRAINT uq_storage_tenant_path UNIQUE (tenant, path))"
+        )
+        # A row the old default produced: its stored `source` carries the quotes.
+        await conn.exec_driver_sql(
+            "INSERT INTO storage_files (tenant, path, name, size, mtime, kind, updated_at) "
+            "VALUES ('test', 'old.txt', 'old.txt', 1, 0, 'file', '2026-01-01 00:00:00')"
+        )
+    async with engine.connect() as conn:
+        stored = (await conn.execute(sa.text("SELECT source FROM storage_files"))).scalar()
+    assert stored == "'fs'", "this test is pointless unless the old default really did this"
+
+    assert await _migrate(engine) == "adopted"
+    assert await _version(engine) == HEAD
+
+    async with engine.connect() as conn:
+        repaired = (await conn.execute(sa.text("SELECT source FROM storage_files"))).scalar()
+        ddl = (
+            await conn.execute(
+                sa.text("SELECT sql FROM sqlite_master WHERE name = 'storage_files'")
+            )
+        ).scalar()
+    assert repaired == "fs", "the row the old default produced is repaired"
+    assert "DEFAULT 'fs'" in str(ddl) and "'''fs'''" not in str(ddl)
+    # The table was rebuilt by batch mode; its constraint and index have to survive that.
+    entry = await FileIndex(engine).get(tenant="test", path="old.txt")
+    assert entry is not None and entry.source == "fs"
 
 
 # ── Restart, and the lock that makes a second replica safe ────────────────────

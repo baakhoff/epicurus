@@ -200,6 +200,44 @@ render as `postgresql.JSONB()` and needs the import added by hand, plus a second
 
 A baseline is written **once**; the generator refuses to overwrite an existing `versions/`.
 
+## Expect the gate to fail on `server_default="'…'"` — and what to do
+
+**Every service still carrying a plain-string `server_default` will fail its first `migrations`
+run, on the adoption arm.** This is a real defect the gate surfaces, not a gate bug, and each
+lane fixes it the same way.
+
+A *plain string* `server_default` is a **literal SQLAlchemy quotes for you**, not raw SQL. So the
+house pattern `server_default="'fs'"` compiles to `DEFAULT '''fs'''` — a default whose value is
+the four characters `'fs'`, quotes included:
+
+```text
+server_default="'fs'"        ->  DEFAULT '''fs'''     (value: 'fs'  — wrong)
+server_default=text("'fs'")  ->  DEFAULT 'fs'         (value: fs    — intended)
+server_default="0"           ->  DEFAULT '0'          (a quoted zero)
+```
+
+The additive reconcile pasted the same string into `ALTER TABLE … ADD COLUMN` as **raw SQL** and
+produced `DEFAULT 'fs'`. So a table created fresh and a table that gained the column through the
+reconcile have disagreed about their own default for as long as both paths have existed. Nothing
+noticed because inserts set these columns explicitly and the row-readers coerce anything
+unexpected to the intended value — but the defaults in the database are wrong, and only a
+migration can fix them.
+
+The fix, per service:
+
+1. Change the model to `server_default=text("'…'")` (keep the quotes — `text()` means "this is
+   SQL"). Do **not** drop to the bare `server_default="fs"`: the reconcile would then emit
+   `DEFAULT fs`, which is a column reference.
+2. Write a revision that normalises an existing database — the default, and any row the old one
+   produced. `services/storage/.../versions/0002_normalise_the_storage_files_source_default.py`
+   is the worked example: an `op.execute` for the rows, then an `alter_column` **inside
+   `op.batch_alter_table`** (SQLite has no `ALTER COLUMN` at all, so the batch block is what
+   makes the revision runnable under `task migrate:check`).
+3. Re-run `task migrate:check -- <service>` and watch the gate's adoption arm.
+
+Columns affected repo-wide: the `"'fs'"` / `"'{}'"` / `"'[]'"` / `"''"` / `"0"` server defaults.
+`storage` is done (#926); each remaining lane does its own.
+
 ## The backfill rule
 
 The additive reconcile had one documented limit: a column the model marks `NOT NULL` with no

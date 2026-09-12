@@ -241,6 +241,13 @@ database and keeps its own head revision.
   which reconciles an existing table rather than failing to create one.
 - Storage has **no** `default=`-without-`server_default=` NOT NULL column, so the #903 backfill
   rule does not apply to it.
+- Revision **0002** normalises `storage_files.source`'s default. It was declared
+  `server_default="'fs'"` — a *plain string*, which SQLAlchemy quotes as a literal, so
+  `create_all` wrote `DEFAULT '''fs'''` (value: the four characters `'fs'`) while the reconcile,
+  treating the same string as raw SQL, wrote `DEFAULT 'fs'`. Two deployments, two different
+  defaults; invisible because every insert sets `source` and the row-reader maps anything that is
+  not `object` to `fs`. The model now says `text("'fs'")` and 0002 fixes the default and any row
+  the old one produced — the first change here the additive reconcile could never have made.
 - Changing a column here means writing a revision: `task migrate:new -- storage "<what changed>"`,
   then `task migrate:check -- storage`. See **[Schema migrations](../developer/migrations.md)**.
 

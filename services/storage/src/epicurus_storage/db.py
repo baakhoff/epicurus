@@ -22,6 +22,7 @@ from sqlalchemy import (
     func,
     or_,
     select,
+    text,
 )
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -85,10 +86,17 @@ class _StoredFile(_Base):
     )
     # "fs" (scanned, read-only) or "object" (MinIO-backed upload). Defaults to "fs"
     # so existing rows and the scanner need no change; a rescan only purges "fs".
-    # ``server_default`` is raw SQL, hence the quoted literal — and, because it is a literal,
-    # the baseline revision can restore this column on a pre-migration database exactly as
-    # ``create_all`` would have made it (``NOT NULL DEFAULT 'fs'``, existing rows backfilled).
-    source: Mapped[str] = mapped_column(String(16), server_default="'fs'", default="fs")
+    #
+    # ``text("'fs'")``, not the bare string ``"'fs'"`` this used to be. A *plain string*
+    # ``server_default`` is a literal SQLAlchemy quotes for you, so ``"'fs'"`` compiled to
+    # ``DEFAULT '''fs'''`` — a default whose value is the four characters ``'fs'``, quotes and
+    # all. The additive reconcile, which pasted the same string into ``ALTER TABLE … ADD
+    # COLUMN`` as raw SQL, produced ``DEFAULT 'fs'`` — so a table created fresh and a table
+    # that gained this column through the reconcile disagreed about their own default. Nothing
+    # ever noticed: every insert sets ``source`` explicitly, and the row-reader maps anything
+    # that is not ``"object"`` to ``"fs"``. ``text()`` makes the value what the comment always
+    # claimed it was, and revision 0002 normalises databases built the old way (#926).
+    source: Mapped[str] = mapped_column(String(16), server_default=text("'fs'"), default="fs")
 
 
 def _row_to_entry(row: _StoredFile) -> FileEntry:

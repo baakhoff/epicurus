@@ -28,8 +28,15 @@ images to GHCR.
   reference; authoring is `task migrate:new` and `task migrate:check` (a second, on SQLite), and
   a new **`migrations`** CI gate proves every migrated service on real Postgres: fresh install,
   restart, adoption of a pre-Alembic database, and adoption of a *drifted* one. A model change
-  with no revision now fails review instead of production. `epicurus-core` 0.38.0→0.39.0 (MINOR),
-  `storage` 0.11.0→0.12.0 (MINOR).
+  with no revision now fails review instead of production. The gate earned its keep on its very
+  first run: a *plain string* `server_default` is a literal SQLAlchemy quotes for you, so the
+  house pattern `server_default="'fs'"` has been compiling to `DEFAULT '''fs'''` — a default whose
+  value carries the quote characters — while the additive reconcile, pasting the same string in as
+  raw SQL, produced `DEFAULT 'fs'`: two deployments of the same release could disagree about their
+  own column defaults. Storage's is corrected and an existing database normalised by a revision —
+  the first change here the reconcile could never have made. The remaining services carry the same
+  pattern and each lane fixes its own. `epicurus-core` 0.38.0→0.39.0 (MINOR), `storage`
+  0.11.0→0.12.0 (MINOR).
 - **MinIO images now pull from Quay** — Docker Hub no longer serves the `minio/minio` and
   `minio/mc` repositories (a `404` on the repository itself, not just the tag), so every
   fresh `compose up`, the `runtime-smoke` and `k8s-smoke` gates, and a chart install failed

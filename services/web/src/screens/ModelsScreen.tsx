@@ -12,6 +12,7 @@ import {
   EyeOff,
   KeyRound,
   MemoryStick,
+  Plus,
   RefreshCw,
   Search,
   Sparkles,
@@ -44,6 +45,7 @@ import {
   PROVIDER_LABELS,
   PROVIDER_MODEL_HINTS,
   formatBytes,
+  hostedModelIdHint,
   isHostedModelId,
   relativeTime,
 } from "@/lib/format";
@@ -1723,6 +1725,117 @@ function Providers() {
   );
 }
 
+/**
+ * The key-state warning for a hosted provider, in the "add a hosted model" row (#922) — the
+ * first place `key_state` is rendered (`docs/services/core-app.md` notes nothing in
+ * `services/web` read it before this). `missing`/`unavailable` are both allowed here: a saved
+ * id is just a row, and the operator may add one before or between key changes. `null` for
+ * `present`/`not_required` — the normal case needs no hint.
+ */
+function keyStateHint(provider: ProviderInfo): string | null {
+  const label = PROVIDER_LABELS[provider.alias] ?? provider.alias;
+  if (provider.key_state === "missing") {
+    return `No key stored for ${label} — chats with this model will fail until one is.`;
+  }
+  if (provider.key_state === "unavailable") {
+    return `Key status unknown for ${label}${
+      provider.key_error ? ` (${provider.key_error})` : ""
+    } — chats with this model may fail until it can be checked.`;
+  }
+  return null;
+}
+
+/**
+ * Add a hosted model (#922) — the Hosted models card's own add row, so setting up a hosted
+ * provider no longer detours through a chat: enter the key above (Providers), then add the
+ * model id right here. Providers come from the core's own registry (`GET …/llm/providers`),
+ * never the static `HOSTED_PROVIDER_ALIASES` — a provider the core doesn't know can't be
+ * picked. The alias is prepended from the select, so OpenRouter's two-slash ids
+ * (`openrouter/anthropic/claude-sonnet-4.6`) are entered as their model part only and never
+ * mis-split by hand.
+ */
+function AddHostedModel() {
+  const queryClient = useQueryClient();
+  const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers });
+  const hosted = (providers.data ?? []).filter((p) => !p.local);
+
+  const [alias, setAlias] = useState("");
+  const [modelId, setModelId] = useState("");
+
+  // Default to the first hosted provider once the list arrives; an explicit pick always wins,
+  // and a stale pick that's dropped out of the list falls back the same way.
+  const effectiveAlias = hosted.some((p) => p.alias === alias) ? alias : (hosted[0]?.alias ?? "");
+  const provider = hosted.find((p) => p.alias === effectiveAlias) ?? null;
+
+  const add = useMutation({
+    mutationFn: (model: string) => api.addSavedModel(model),
+    onSuccess: () => {
+      setModelId("");
+      void queryClient.invalidateQueries({ queryKey: ["savedModels"] });
+    },
+  });
+
+  const trimmedId = modelId.trim();
+  // Mirrors the core's `is_hosted`: a known alias plus a non-empty model part. The alias is
+  // fixed by the select (only aliases the core reports appear there), so the only thing left to
+  // validate client-side is that the model part isn't blank — the server's 400 still covers
+  // anything this misses, and is surfaced verbatim below rather than swallowed.
+  const canAdd = effectiveAlias !== "" && trimmedId !== "";
+
+  return (
+    <div className="mt-3 border-t border-edge pt-3">
+      <p className="mb-2 text-[11px] uppercase tracking-wide text-ink-faint">
+        Add a hosted model
+      </p>
+      {providers.isLoading ? (
+        <Spinner />
+      ) : hosted.length === 0 ? (
+        <p className="text-sm text-ink-dim">No hosted providers reported by the core yet.</p>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              className="w-44 shrink-0"
+              value={effectiveAlias}
+              aria-label="Hosted provider"
+              onChange={(e) => setAlias(e.target.value)}
+            >
+              {hosted.map((p) => (
+                <option key={p.alias} value={p.alias}>
+                  {PROVIDER_LABELS[p.alias] ?? p.alias}
+                </option>
+              ))}
+            </Select>
+            <div className="flex min-w-0 flex-1 items-center gap-1.5">
+              <span className="shrink-0 font-mono text-sm text-ink-faint">{effectiveAlias}/</span>
+              <TextInput
+                value={modelId}
+                onChange={(e) => setModelId(e.target.value)}
+                placeholder={hostedModelIdHint(effectiveAlias)}
+                aria-label="Model id"
+                className="min-w-0 flex-1 font-mono"
+              />
+            </div>
+            <Button
+              variant="outline"
+              busy={add.isPending}
+              disabled={!canAdd || add.isPending}
+              onClick={() => canAdd && add.mutate(`${effectiveAlias}/${trimmedId}`)}
+            >
+              <Plus size={14} />
+              Add
+            </Button>
+          </div>
+          {provider && keyStateHint(provider) && (
+            <p className="mt-2 text-xs text-warn">{keyStateHint(provider)}</p>
+          )}
+          {add.isError && <p className="mt-2 text-sm text-danger">{(add.error as Error).message}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Saved hosted models (#496) ──────────────────────────────────────────────────
 
 /**
@@ -1760,16 +1873,13 @@ export function SavedHostedModels() {
       <h3 className="mb-1 font-serif text-base text-ink">Hosted models</h3>
       <p className="mb-3 text-xs leading-relaxed text-ink-dim">
         The hosted model ids you've used, saved to your account so they follow you across
-        devices. Star one to make it the global default, or remove it — add new ids from the
-        model picker in a chat.
+        devices. Star one to make it the global default, or remove it — add one below, or it's
+        saved automatically the first time you pick it in a chat.
       </p>
       {saved.isLoading ? (
         <Spinner />
       ) : (saved.data ?? []).length === 0 ? (
-        <p className="text-sm text-ink-dim">
-          None yet — pick a hosted model in a chat (e.g.{" "}
-          <code className="font-mono">claude/…</code>) and it's saved here.
-        </p>
+        <p className="text-sm text-ink-dim">None yet — add one below to get started.</p>
       ) : (
         <div className="flex flex-col gap-3">
           {[...groups.entries()].map(([provider, models]) => (
@@ -1838,6 +1948,7 @@ export function SavedHostedModels() {
           {((setDefault.error ?? remove.error) as Error)?.message}
         </p>
       )}
+      <AddHostedModel />
       <HostedModelSettingsSheet
         model={settingsFor?.model ?? null}
         override={settingsFor?.override}

@@ -12,6 +12,13 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`notes` adopts the migration foundation** (#834, #930) — the note bodies, folders, version
+  history and the suggestion queue + its audit trail are now Alembic-managed, one baseline
+  revision applied at startup in place of the four `create_all` calls the lifespan used to make.
+  Unlike several other services, notes carried no plain-string `server_default` bug, so no
+  normalisation revision was needed; a backfill audit of its seven `default=`-without-
+  `server_default=` `NOT NULL` columns found none at risk — every one was introduced alongside
+  its table, never added to a populated one. `notes` 0.14.0→0.15.0 (MINOR).
 - **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
   the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
   was un-shippable, a `NOT NULL` column added without a server default reached existing rows as

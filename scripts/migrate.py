@@ -636,7 +636,7 @@ async def _database(admin_url: str, name: str) -> AsyncIterator[str]:
     admin = sa.engine.make_url(admin_url)
 
     async def run(*statements: str) -> None:
-        engine = create_async_engine(str(admin), isolation_level="AUTOCOMMIT")
+        engine = create_async_engine(_render(admin), isolation_level="AUTOCOMMIT")
         try:
             async with engine.connect() as conn:
                 for statement in statements:
@@ -646,9 +646,21 @@ async def _database(admin_url: str, name: str) -> AsyncIterator[str]:
 
     await run(f'DROP DATABASE IF EXISTS "{name}"', f'CREATE DATABASE "{name}"')
     try:
-        yield str(admin.set(database=name))
+        yield _render(admin.set(database=name))
     finally:
         await run(f'DROP DATABASE IF EXISTS "{name}"')
+
+
+def _render(url: sa.engine.URL) -> str:
+    """A URL string that still carries its password.
+
+    ``str(URL)`` renders the password as ``***`` — that is SQLAlchemy protecting a credential
+    from ending up in a log or a repr, and it is exactly wrong when the string is about to be
+    handed back to ``create_async_engine``. Round-tripping a URL through ``str`` therefore
+    produces a connection attempt with the literal password ``***``, which fails as
+    ``InvalidPasswordError`` a long way from the line that caused it.
+    """
+    return url.render_as_string(hide_password=False)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

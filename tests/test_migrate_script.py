@@ -242,3 +242,25 @@ def test_storages_reconcilable_column_is_the_one_the_reconcile_added(
         for column in migrate._reconcilable_columns(table)
     ]
     assert columns == ["source"]
+
+
+# ── The throwaway databases the gate runs each arm on ─────────────────────────
+
+
+def test_a_rendered_url_still_carries_its_password(migrate: ModuleType) -> None:
+    """``str(URL)`` masks the password; the gate's per-arm URLs must not be built that way.
+
+    SQLAlchemy hides a password in ``str``/``repr`` so it cannot leak into a log — correct, and
+    exactly wrong when the string is handed straight back to ``create_async_engine``. Round-tripping
+    through ``str`` produces a connection attempt with the literal password ``***``, which surfaces
+    as an `InvalidPasswordError` a long way from the line that caused it. (It did: the first CI run
+    of the `migrations` gate failed this way.)
+    """
+    import sqlalchemy as sa_
+
+    url = sa_.engine.make_url("postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus")
+    assert "***" in str(url), "this test is pointless if SQLAlchemy stops masking"
+    rendered = migrate._render(url.set(database="epi_gate_storage_fresh"))
+    assert "epicurus-dev" in rendered
+    assert "***" not in rendered
+    assert rendered.endswith("/epi_gate_storage_fresh")

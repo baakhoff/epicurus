@@ -1,10 +1,14 @@
 [project]
 name = "epicurus-storage"
-version = "0.11.0"
+version = "0.12.0"
 description = "Storage module — agent file tools over the core file space, MinIO object store, upload ingest, and inline object read."
 requires-python = ">=3.11"
 dependencies = [
-    "epicurus-core",
+    # The `db` extra, not bare `epicurus-core`: this service's schema is Alembic-managed
+    # (ADR-XXXX), and the runner lives behind that extra. SQLAlchemy was always declared
+    # directly below, so the extra is what actually puts Alembic in the runtime image —
+    # the Dockerfile installs `--package epicurus-storage` with no extras of its own.
+    "epicurus-core[db]",
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.52.0",
     "sqlalchemy[asyncio]>=2.0.51",

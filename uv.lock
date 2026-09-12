@@ -229,6 +229,20 @@ wheels = [
 ]
 
 [[package]]
+name = "alembic"
+version = "1.20.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mako" },
+    { name = "sqlalchemy" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ed/aa/02910bdb8e2f1444f6654d5b296cd827d126f82209050ee7b1000f92ac4b/alembic-1.20.0.tar.gz", hash = "sha256:db505480647bc60386c5369402f4a57a506b7539c9e9ef5e270d45cbbe4939bf", size = 2093272, upload-time = "2026-09-11T19:09:11.126Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3f/27/78a89b55b0904d222183164e079b4ca56208e94eff1d35ad1f1ad5be9b06/alembic-1.20.0-py3-none-any.whl", hash = "sha256:77eb101048d95f982c0353e9233404889dcd7a6fc244c107836c0e2fc9cf7d9d", size = 268719, upload-time = "2026-09-11T19:09:12.88Z" },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1000,7 +1014,7 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-core"
-version = "0.38.0"
+version = "0.39.0"
 source = { editable = "libs/epicurus-core" }
 dependencies = [
     { name = "fastapi" },
@@ -1020,6 +1034,7 @@ dependencies = [
 
 [package.optional-dependencies]
 db = [
+    { name = "alembic" },
     { name = "sqlalchemy" },
 ]
 s3 = [
@@ -1029,6 +1044,7 @@ s3 = [
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", marker = "extra == 's3'", specifier = ">=13.0" },
+    { name = "alembic", marker = "extra == 'db'", specifier = ">=1.13" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "hvac", specifier = ">=2.1" },
@@ -1206,12 +1222,12 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-storage"
-version = "0.11.0"
+version = "0.12.0"
 source = { editable = "services/storage" }
 dependencies = [
     { name = "aioboto3" },
     { name = "asyncpg" },
-    { name = "epicurus-core" },
+    { name = "epicurus-core", extra = ["db"] },
     { name = "fastapi" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
@@ -1222,7 +1238,7 @@ dependencies = [
 requires-dist = [
     { name = "aioboto3", specifier = ">=13.0" },
     { name = "asyncpg", specifier = ">=0.29" },
-    { name = "epicurus-core", editable = "libs/epicurus-core" },
+    { name = "epicurus-core", extras = ["db"], editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.0" },
@@ -1231,11 +1247,11 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-tasks"
-version = "0.24.0"
+version = "0.25.0"
 source = { editable = "services/tasks" }
 dependencies = [
     { name = "asyncpg" },
-    { name = "epicurus-core" },
+    { name = "epicurus-core", extra = ["db"] },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "python-dateutil" },
@@ -1246,7 +1262,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
-    { name = "epicurus-core", editable = "libs/epicurus-core" },
+    { name = "epicurus-core", extras = ["db"], editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
@@ -2247,6 +2263,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/0a/63/195dfdde380a84df309e3bccf4384b034b745dba43426886f7ae623b4fba/lxml_html_clean-0.4.5.tar.gz", hash = "sha256:e2a4c7d5beedd17cd7b484d848a0571e54baa239a4f9df5546e3acba7f990560", size = 24142, upload-time = "2026-05-20T12:17:53.574Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6a/bd/6e2b76a6c5dee10397db9c929f0c5066766ec1036046f0335b7ca7ca08b8/lxml_html_clean-0.4.5-py3-none-any.whl", hash = "sha256:c76fcadd1e5bfb9b8bafc2200d51e4e78eb0dad67f56881c21dfb6484c7e7746", size = 14573, upload-time = "2026-05-20T12:17:52.215Z" },
+]
+
+[[package]]
+name = "mako"
+version = "1.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markupsafe" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2a/12/b5fa2353e2754cd67fb9f83793fa48ff42c213a5da7e719869d2301f6ab8/mako-1.4.1.tar.gz", hash = "sha256:d7904710b662996425a21627710c4777c45053146942cf8a7aebf757c92b8c27", size = 410165, upload-time = "2026-08-05T06:10:56.611Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/54/12ed58d458474aaab5c3d180173e745a4fe131bb330370596876d19ff60f/mako-1.4.1-py3-none-any.whl", hash = "sha256:a359d9a94a541213958742b2698d0a7757bb83551767bc468a74b9905aba9617", size = 80010, upload-time = "2026-08-05T06:10:58.248Z" },
 ]
 
 [[package]]

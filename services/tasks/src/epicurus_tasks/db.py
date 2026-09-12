@@ -19,20 +19,12 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from epicurus_core.db import ensure_columns
 from epicurus_tasks.models import Task, TaskScope
 
 _TaskStatus = Literal["open", "in_progress", "done"]
-
-# Columns added after the table's first release. create_all never alters an existing table,
-# so a database provisioned before a column existed lacks it; they are reconciled in place at
-# startup by ``TaskStore._ensure_columns``. ``status``/``priority``/``tags`` arrived in v0.5.0
-# (#218); ``repeat`` (the local recurrence rule) in v0.14.0 (#471, ADR-0082).
-_ADDED_COLUMNS = ("status", "priority", "tags", "repeat")
 
 
 class _Base(DeclarativeBase):
@@ -93,20 +85,15 @@ class TaskStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (#929, ADR-XXXX). It survives for the tests, where a fresh SQLite file per
+        test is cheaper to build from the models than to migrate. Honest only because the
+        `migrations` CI gate proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``status`` / ``priority`` / ``tags`` arrived in v0.5.0 (#218); a database provisioned
-        before then lacks them and every task read 500s on Postgres until they are added in
-        place. See :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(sync_conn, _StoredTask.__table__, _ADDED_COLUMNS)
 
     async def list_tasks(self, *, tenant_id: str, scope: TaskScope = "open") -> list[Task]:
         """Return tasks for *tenant_id*, newest first, filtered by *scope* (ADR-0049).

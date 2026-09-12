@@ -44,21 +44,32 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Backfill any NULL row to the model's default, then enforce it as a server default."""
+    """Backfill any NULL row to the model's default, then enforce it as a server default.
+
+    ``nullable=False`` is passed explicitly, not just ``existing_nullable=False``: the CI
+    `migrations` gate's drift arm drops each unconstrained, literal-default column
+    (``_reconcilable_columns``) and lets the baseline's ``ep.create_table`` reconcile arm add it
+    back — and that reconcile, working from 0001's column definition (no server default yet,
+    since it predates this revision), adds it back **nullable**. Asserting only
+    ``existing_nullable=False`` would have been describing a state that, on exactly that arm, is
+    false — Alembic would then see nothing to change and leave the column nullable. Passing the
+    target ``nullable=False`` makes this revision correct regardless of which state it finds the
+    column in, matching the recipe's own worked example.
+    """
     op.execute("UPDATE calendar_events SET all_day = FALSE WHERE all_day IS NULL")
     op.execute("UPDATE calendar_events SET excluded = FALSE WHERE excluded IS NULL")
     with op.batch_alter_table("calendar_events") as batch_op:
         batch_op.alter_column(
             "all_day",
             existing_type=sa.Boolean(),
-            existing_nullable=False,
             server_default=sa.false(),
+            nullable=False,
         )
         batch_op.alter_column(
             "excluded",
             existing_type=sa.Boolean(),
-            existing_nullable=False,
             server_default=sa.false(),
+            nullable=False,
         )
 
     op.execute("UPDATE calendar_sync_state SET collection = '' WHERE collection IS NULL")
@@ -66,8 +77,8 @@ def upgrade() -> None:
         batch_op.alter_column(
             "collection",
             existing_type=sa.String(length=255),
-            existing_nullable=False,
             server_default=sa.text("''"),
+            nullable=False,
         )
 
     op.execute("UPDATE calendar_synced_event SET collection = '' WHERE collection IS NULL")
@@ -78,26 +89,26 @@ def upgrade() -> None:
         batch_op.alter_column(
             "collection",
             existing_type=sa.String(length=255),
-            existing_nullable=False,
             server_default=sa.text("''"),
+            nullable=False,
         )
         batch_op.alter_column(
             "title",
             existing_type=sa.String(length=512),
-            existing_nullable=False,
             server_default=sa.text("''"),
+            nullable=False,
         )
         batch_op.alter_column(
             "all_day",
             existing_type=sa.Boolean(),
-            existing_nullable=False,
             server_default=sa.false(),
+            nullable=False,
         )
         batch_op.alter_column(
             "change_hash",
             existing_type=sa.String(length=32),
-            existing_nullable=False,
             server_default=sa.text("''"),
+            nullable=False,
         )
 
 
@@ -107,46 +118,46 @@ def downgrade() -> None:
         batch_op.alter_column(
             "change_hash",
             existing_type=sa.String(length=32),
-            existing_nullable=False,
             server_default=None,
+            nullable=False,
         )
         batch_op.alter_column(
             "all_day",
             existing_type=sa.Boolean(),
-            existing_nullable=False,
             server_default=None,
+            nullable=False,
         )
         batch_op.alter_column(
             "title",
             existing_type=sa.String(length=512),
-            existing_nullable=False,
             server_default=None,
+            nullable=False,
         )
         batch_op.alter_column(
             "collection",
             existing_type=sa.String(length=255),
-            existing_nullable=False,
             server_default=None,
+            nullable=False,
         )
 
     with op.batch_alter_table("calendar_sync_state") as batch_op:
         batch_op.alter_column(
             "collection",
             existing_type=sa.String(length=255),
-            existing_nullable=False,
             server_default=None,
+            nullable=False,
         )
 
     with op.batch_alter_table("calendar_events") as batch_op:
         batch_op.alter_column(
             "excluded",
             existing_type=sa.Boolean(),
-            existing_nullable=False,
             server_default=None,
+            nullable=False,
         )
         batch_op.alter_column(
             "all_day",
             existing_type=sa.Boolean(),
-            existing_nullable=False,
             server_default=None,
+            nullable=False,
         )

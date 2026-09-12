@@ -289,11 +289,10 @@ async def test_revision_0002_backfills_null_all_day_and_excluded_rows(engine: As
 async def test_revision_0002_sets_the_server_default_on_the_unique_constrained_columns(
     engine: AsyncEngine,
 ) -> None:
-    """``collection``/``title``/``change_hash`` have always been ``NOT NULL`` — nothing to
-    backfill, since neither ``create_all`` nor the baseline could ever have left a row without
-    a value — but 0002 still gives the database the same server default the model has always
-    supplied at the application layer, per the audit rule (#928): decide the value per row
-    rather than a blanket constant, which here means the model's own existing default.
+    """A database built straight from the models has always had these ``NOT NULL`` — nothing to
+    backfill there — but 0002 still gives the database the same server default the model has
+    always supplied at the application layer, per the audit rule (#928): decide the value per
+    row rather than a blanket constant, which here means the model's own existing default.
     """
     await _create_all_directly(engine)
     sync_store = CalendarSyncStore(engine)
@@ -329,6 +328,38 @@ async def test_revision_0002_sets_the_server_default_on_the_unique_constrained_c
     # The rows from before the migration are untouched — no value collided.
     cached = await sync_store.get_events(tenant="test", account="google", collection="")
     assert "e1" in cached
+
+
+async def test_a_column_dropped_and_reconciled_still_ends_up_not_null(engine: AsyncEngine) -> None:
+    """The CI `migrations` gate's own drift arm, reproduced here (#928 follow-up).
+
+    That gate drops every *unconstrained* column carrying a literal server default
+    (``scripts/migrate.py:_reconcilable_columns``) and lets the baseline's ``ep.create_table``
+    reconcile arm add it back — which, working from 0001's column definition (no server default
+    yet; 0002 is what adds it), adds it back **nullable**. `calendar_synced_event.title` and
+    `.change_hash` are exactly such columns (unconstrained, literal `''` default); `collection`
+    is excluded by being part of `uq_calendar_synced_event`, and `all_day`'s boolean default
+    is not a string literal the gate's helper recognises. 0002 must therefore force
+    ``nullable=False`` explicitly rather than merely assert ``existing_nullable=False`` — this
+    caught a real gate failure on the first `migrations` CI run (the `existing_nullable=False`-
+    only version left the column nullable, since Alembic had nothing asserted to change).
+    """
+    await _create_all_directly(engine)
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql('ALTER TABLE calendar_synced_event DROP COLUMN "title"')
+        await conn.exec_driver_sql('ALTER TABLE calendar_synced_event DROP COLUMN "change_hash"')
+
+    assert await _migrate(engine) == "adopted"
+
+    def nullable_of(sync_conn: sa.Connection, column: str) -> bool:
+        for reflected in sa.inspect(sync_conn).get_columns("calendar_synced_event"):
+            if reflected["name"] == column:
+                return bool(reflected["nullable"])
+        raise AssertionError(f"column {column!r} is missing")
+
+    async with engine.connect() as conn:
+        assert await conn.run_sync(nullable_of, "title") is False
+        assert await conn.run_sync(nullable_of, "change_hash") is False
 
 
 # ── Restart, and the lock that makes a second replica safe ────────────────────

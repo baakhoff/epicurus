@@ -21,10 +21,10 @@ The cursor is stored as an opaque string, never parsed: the store speaks no Goog
 CalDAV backend fills the same column with its own ctag/sync-token and reuses this schema
 unchanged — the same neutrality ADR-0096 holds for mail's cursor.
 
-There is no migration framework; like every epicurus store these evolve via ``create_all`` +
-the shared additive :func:`epicurus_core.db.ensure_columns` reconcile (ADR-0067). This is the
-tables' first release, so the reconciled-column lists are empty — they exist so a *later*
-column lands in an already-provisioned database instead of 500ing every read.
+The schema of all three tables comes from the revisions in :mod:`epicurus_calendar.migrations`
+(#834, #928, ADR-XXXX). Change a column here and you owe a revision —
+``uv run python scripts/migrate.py check calendar`` says so in a second, and CI's `migrations`
+gate fails the PR if you skip it.
 """
 
 from __future__ import annotations
@@ -44,14 +44,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     delete,
+    false,
     func,
     select,
+    text,
 )
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from epicurus_core.db import ensure_columns
 
 
 class _SyncBase(DeclarativeBase):
@@ -73,7 +72,7 @@ class _StoredSyncState(_SyncBase):
     account: Mapped[str] = mapped_column(String(64))
     # The collection (calendar) id within the account. The empty string means "the account's
     # own default calendar", exactly as ``CollectionRef.collection`` uses it.
-    collection: Mapped[str] = mapped_column(String(255), default="")
+    collection: Mapped[str] = mapped_column(String(255), server_default=text("''"), default="")
     # The provider's opaque cursor (Google ``nextSyncToken``). NULL means "primed but without a
     # replayable cursor" — the next pass does a full sync and diffs, never a silent skip.
     sync_token: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -98,7 +97,7 @@ class _StoredSyncedEvent(_SyncBase):
     pk: Mapped[int] = mapped_column(primary_key=True)
     tenant: Mapped[str] = mapped_column(String(63), index=True)
     account: Mapped[str] = mapped_column(String(64))
-    collection: Mapped[str] = mapped_column(String(255), default="")
+    collection: Mapped[str] = mapped_column(String(255), server_default=text("''"), default="")
     # Provider event id. Google's expanded-instance ids are ``<series>_<original start>``, so
     # this is comfortably wider than the local store's bare-uuid column.
     event_id: Mapped[str] = mapped_column(String(255), index=True)
@@ -106,12 +105,12 @@ class _StoredSyncedEvent(_SyncBase):
     # denormalised (rather than derived from the id) because a *tombstone* has no event object
     # left to read it from, and collapsing a series' occurrences into one emission needs it.
     series_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    title: Mapped[str] = mapped_column(String(512), default="")
+    title: Mapped[str] = mapped_column(String(512), server_default=text("''"), default="")
     start_dt: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     end_dt: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    all_day: Mapped[bool] = mapped_column(Boolean, default=False)
+    all_day: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
     # ``spine.event_change_hash`` of the last observed state — 12 hex chars.
-    change_hash: Mapped[str] = mapped_column(String(32), default="")
+    change_hash: Mapped[str] = mapped_column(String(32), server_default=text("''"), default="")
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -166,16 +165,20 @@ class CalendarSyncStore:
         )
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build these stores' tables straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment in :mod:`epicurus_calendar.migrations`, applied once at startup by
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-XXXX) — which is
+        also what retired the additive reconcile this method used to run after ``create_all``
+        (ADR-0067).
+
+        It survives for the tests, where a fresh SQLite file per test is cheaper to build from
+        the models than to migrate. That is only honest because the `migrations` CI gate
+        proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_SyncBase.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        ensure_columns(sync_conn, _StoredSyncState.__table__, ())
-        ensure_columns(sync_conn, _StoredSyncedEvent.__table__, ())
-        ensure_columns(sync_conn, _StoredSelfWrite.__table__, ())
 
     # ── sync cursor ──────────────────────────────────────────────────────────
 
@@ -388,10 +391,14 @@ class SelfWriteLedger:
         )
 
     async def init(self) -> None:
-        """Create the schema (shared metadata with :class:`CalendarSyncStore`; idempotent)."""
+        """Build the schema from the models (shared metadata with :class:`CalendarSyncStore`).
+
+        The **unit-test** path only — the deployed service's schema comes from
+        :mod:`epicurus_calendar.migrations` (#834, #928, ADR-XXXX). See
+        :meth:`CalendarSyncStore.init` for the full rationale.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_SyncBase.metadata.create_all)
-            await conn.run_sync(CalendarSyncStore._ensure_columns)
 
     async def record(self, *, tenant: str, keys: Iterable[str]) -> None:
         """Mark each key as "written by us", expiring after the configured TTL.

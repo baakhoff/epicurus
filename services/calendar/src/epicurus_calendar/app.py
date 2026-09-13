@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_calendar.db import LocalEventStore
 from epicurus_calendar.lead_time_prefs import LeadTimePrefsStore
+from epicurus_calendar.migrations import METADATAS, SCRIPT_LOCATION
 from epicurus_calendar.models import Event
 from epicurus_calendar.portability import CalendarPortability
 from epicurus_calendar.providers.base import CalendarProvider
@@ -50,6 +51,7 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
+from epicurus_core.db.migrations import run_migrations
 
 
 def _service_version() -> str:
@@ -117,13 +119,21 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
-            # The local store always backs the module now (it is the silent default), so
-            # it is always initialised — not only when "local" was the chosen provider.
-            await store.init()
-            await lead_prefs.init()
-            await markers.init()
-            await sync_store.init()
-            await ledger.init()
+            # Schema first, before anything reads or writes a row. In-process rather than a
+            # separate init step: a container has one entry point on both runtimes this stack
+            # supports, and a Kubernetes-only init container would put the schema behind a
+            # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
+            # start — is handled by the Postgres advisory lock inside run_migrations, not by
+            # assuming this process is alone (#834, #928, ADR-XXXX). The five stores above
+            # share this one engine/database, so one migration environment covers all of them
+            # (:mod:`epicurus_calendar.migrations`); their own `init()` calls now only build
+            # the unit-test SQLite schema and are not called here.
+            await run_migrations(
+                engine,
+                service=MODULE_NAME,
+                script_location=SCRIPT_LOCATION,
+                metadatas=METADATAS,
+            )
             await bus.connect()
             # The lead-time scheduler (#664) — calendar's first periodic background job.
             # Started/cancelled around the app lifetime like knowledge's vault watcher.

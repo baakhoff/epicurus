@@ -12,6 +12,20 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`calendar`'s schema is migration-managed now** (#834, #928) — the second service to adopt
+  the Alembic foundation (#926), after `storage`. A baseline revision covers all four
+  `DeclarativeBase`s (six tables: the local event store, the lead-time preference, the
+  lead-time scheduler's fire-once markers, and the reconcile layer's sync cursor /
+  observed-event cache / self-write ledger); the startup reconcile calls
+  (`epicurus_core.db.ensure_columns`, `_ADDED_COLUMNS`) are gone from every store, replaced by
+  one `run_migrations` call in the lifespan. The backfill audit found **seven** `NOT NULL`
+  columns with a Python-side default and no server default — `calendar_events.{all_day,
+  excluded}` (which the old reconcile could only add *nullable* to a populated table, so an
+  upgraded deployment could genuinely hold `NULL` there, #903's shape of bug) and
+  `calendar_sync_state.collection` / `calendar_synced_event.{collection,title,all_day,
+  change_hash}` (always `NOT NULL` in practice, since those tables have no reconcile history) —
+  a revision backfills any real `NULL` and adds the server default to all seven. `calendar`
+  0.21.1→0.22.0 (MINOR).
 - **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
   the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
   was un-shippable, a `NOT NULL` column added without a server default reached existing rows as

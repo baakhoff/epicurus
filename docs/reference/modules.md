@@ -179,12 +179,16 @@ the module's own door (`epicurus_core.schema_verdict`):
 
 ### Errors on `/import` (#918)
 
-Every non-2xx response `add_portability_routes` can produce carries a JSON body with a
-`detail` string — never a bodyless response. A schema refusal already answered this way
+Every non-2xx response **`POST /import`** can produce carries a JSON body with a `detail`
+string — never a bodyless response. A schema refusal already answered this way
 (**409**, `detail` names
 the incompatibility); since #918 an exception the store's `import_` raises and does *not* turn
 into a deliberate `HTTPException` is caught at the route and answered the same way: **500**,
-`detail: "<exception type>: <message>"`. Before this, an unhandled exception escaped as
+`detail: "<exception type>: <message>"`. A deliberate one passes through untouched, with its
+own status. (The guarantee is `/import`'s alone: `GET /export` and `GET /export/blobs` are
+`StreamingResponse`s whose status line is on the wire before the generator runs, and
+`PUT /import/blobs/{id}` answers a malformed body with **400** but leaves anything else to
+Starlette's default.) Before this, an unhandled exception escaped as
 Starlette's default 500 — `text/plain`, no JSON — so the core's import report had nothing the
 module said and the operator's only recourse was `docker compose logs`. A malformed request
 (an unreadable line, a truncated blob body) is still **400** with `detail` naming what broke,

@@ -453,6 +453,12 @@ def add_portability_routes(
             )
         except ValueError as exc:  # a malformed line — the caller's stream, not our bug
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except HTTPException:
+            # A store's *deliberate* refusal already carries a status and a detail, and is an
+            # ``Exception`` like any other — without this it would be re-answered below as a
+            # 500 with its own status folded into the detail string, which is the opposite of
+            # the fix. The store's answer is the better one; pass it through untouched.
+            raise
         except Exception as exc:
             # Anything the store did not expect. Left alone, this would escape as
             # Starlette's default 500 — `text/plain`, no JSON, nothing a caller can carry

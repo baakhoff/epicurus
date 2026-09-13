@@ -181,7 +181,7 @@ fix. So the baseline is made idempotent and there is one code path.
 | Function | Table absent | Table present |
 | --- | --- | --- |
 | `create_table(name, *columns, **kw)` | `op.create_table` | additive reconcile over the declared columns ([`ensure_columns`](#ensure_columns)) |
-| `create_index(name, table, columns, unique=False)` | — | creates it, or skips if an index by that name exists; warns and skips if a column it covers could not be added |
+| `create_index(name, table, columns, *, unique=False, **kw)` | raises `RuntimeError` — `create_table` runs first | creates it, or skips if an index **by that name** exists; warns and skips if a column it covers could not be added |
 | `f(name)` | `op.f` verbatim — "this name is final" | same |
 
 `create_table`'s present-arm deliberately does **not** add a constraint or alter an existing

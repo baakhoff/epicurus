@@ -1,0 +1,2 @@
+litellm.BadRequestError: OpenrouterException - {"error":{"message":"Provider returned error","code":400,"metadata":{"raw":"{\"error\": {\"message\": \"{\\\"error\\\":{\\\"message\\\":\\\"\\\"auto\\\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\\\",\\\"type\\\":\\\"BadRequestError\\\",\\\"param\\\":null,\\\"code\\\":400}}\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": 400}}","provider_name":"NextBit","is_byok":false,"provider_error_code":"400"}},"user_id":"user_2abcDEF3ghiJKL4mnoPQR5stu"}
+LiteLLM Retried: 2 times

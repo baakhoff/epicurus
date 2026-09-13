@@ -207,6 +207,27 @@ async def test_messages_without_activity_default_to_none() -> None:
     assert record.activity is None
 
 
+async def test_stopped_round_trips_so_a_reopened_turn_knows_it_failed() -> None:
+    # #944/ADR-0142: the reason a turn ended is what the transcript renders its inline "this
+    # reply was interrupted" affordance from, so it has to survive the round trip — a live SSE
+    # frame cannot help a reader who reloaded, or who re-attached onto history.
+    store, _ = await _fresh_store()
+    await store.append(
+        tenant="t", session_id="s", role="assistant", content="half an answer", stopped="error"
+    )
+    record = (await store.messages(tenant="t", session_id="s"))[0]
+    assert record.stopped == "error"
+
+
+async def test_a_turn_that_completed_stores_no_stop_reason() -> None:
+    # NULL is the value every ordinary row carries — including every row written before the
+    # column existed — so "is this reply incomplete?" is exactly "is this column set?".
+    store, _ = await _fresh_store()
+    await store.append(tenant="t", session_id="s", role="assistant", content="a whole answer")
+    await store.append(tenant="t", session_id="s", role="user", content="thanks")
+    assert [m.stopped for m in await store.messages(tenant="t", session_id="s")] == [None, None]
+
+
 async def test_attachment_store_save_and_get_is_tenant_scoped() -> None:
     _, engine = await _fresh_store()
     blobs = AttachmentStore(engine)

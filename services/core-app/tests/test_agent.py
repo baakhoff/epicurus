@@ -595,6 +595,7 @@ class _FakeMemory:
         self.remembered_refs: list[dict[str, Any]] = []  # refs of the last remember()
         self.remembered_attachments: list[dict[str, Any]] = []  # attachments of the last remember()
         self.remembered_activity: dict[str, Any] | None = None  # activity of the last remember()
+        self.remembered_stopped: str | None = None  # stop reason of the last remember() (#944)
 
     async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
         if self._fail:
@@ -616,6 +617,7 @@ class _FakeMemory:
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         activity: dict[str, Any] | None = None,
+        stopped: str | None = None,
     ) -> None:
         if self._fail:
             raise RuntimeError("db down")
@@ -623,6 +625,7 @@ class _FakeMemory:
         self.remembered_refs = entity_refs or []
         self.remembered_attachments = attachments or []
         self.remembered_activity = activity
+        self.remembered_stopped = stopped
 
 
 async def test_agent_uses_memory_when_session_given() -> None:

@@ -74,13 +74,16 @@ class Memory:
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         activity: dict[str, Any] | None = None,
+        stopped: str | None = None,
     ) -> None:
         """Persist a message to the session transcript.
 
         ``entity_refs`` (assistant-emitted), ``attachments`` (user-supplied) and ``activity``
         (the assistant turn's thinking + tool steps, ADR-0041) are stored alongside so the
-        transcript renders them again. Messages are *not* indexed for cross-chat recall — the
-        recall corpus is the user-fact store, written deliberately (the ``remember`` tool and
+        transcript renders them again. ``stopped`` records why an assistant turn ended when it
+        did not end by answering (#944, ADR-0142), so a reopened transcript can still say the
+        reply was cut short. Messages are *not* indexed for cross-chat recall — the recall
+        corpus is the user-fact store, written deliberately (the ``remember`` tool and
         background extraction), not a dump of every turn (ADR-0045).
         """
         if not content:
@@ -93,6 +96,7 @@ class Memory:
             entity_refs=entity_refs,
             attachments=attachments,
             activity=activity,
+            stopped=stopped,
         )
 
     async def remember_fact(

@@ -38,7 +38,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `doc_preview` (a slice of a document *as the model types it* — `text` carries a coalesced body delta and `preview` `{module, target?, title?}` names the document, #654/ADR-0121; purely ephemeral — see **The document typewriter** below) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `doc_preview` (a slice of a document *as the model types it* — `text` carries a coalesced body delta and `preview` `{module, target?, title?}` names the document, #654/ADR-0121; purely ephemeral — see **The document typewriter** below) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error` (why the turn failed, in words written for the operator — never a provider payload; ADR-0142). **`error` is a reason, not an end**: a turn that failed after streaming a partial answer emits the note, then `error`, then `done` carrying the persisted turn (`stopped="error"`), so a client keeps reading for the terminal frame. A failure that produced nothing ends at `error` with no `done`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. **Invisible sessions are excluded** (#772), and every list read also runs the **orphan sweep**: any flagged session not named by the optional `?active=<session_id>` query param (the invisible chat the requesting client is currently *in*) and with no turn in flight is fully erased via the #771 cascade — so a crash never strands an invisible chat on disk. The sweep is best-effort; a hiccup never fails the list. |
 | `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
 | `PUT /platform/v1/agent/sessions/{id}/ephemeral` | Flag a session **invisible** (#772) — see *Invisible chats* below. Idempotent (a mid-chat reload re-marks so the flag is server truth, not client memory); **503** if no flag store is wired. Returns `{ephemeral: true}`. There is deliberately **no un-mark**: toggling invisibility off *is* an exit, and every exit deletes (`DELETE /sessions/{id}`). |
@@ -176,8 +176,12 @@ the turn ends with a real answer — "here's what I found / what failed" — nev
 `AgentTurn.stopped` is now one of `completed` · `max_steps` · `repeat_call` · `tool_errors` ·
 `unsupported_media` (an image attachment blocked before any provider call, #633; plus `error` on a
 mid-stream failure, streaming only); the streamed `done` event carries it for the web to key
-stop-reason copy off. The repeated / errored tool steps stay in the activity timeline (errors
-render red), so the process that led to the cut is visible.
+stop-reason copy off. It is also **persisted**, on `agent_messages.stopped` (#944, ADR-0142) —
+`NULL` for a turn that completed, for a user message and for every row written before the column
+existed, so "is this reply incomplete?" is exactly "is this column set?". That is what lets the
+transcript mark a cut-short reply after a reload, when no live stream is left to say so. The
+repeated / errored tool steps stay in the activity timeline (errors render red), so the process
+that led to the cut is visible.
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
 
@@ -923,10 +927,54 @@ component is `None` — verified against the pinned litellm 1.89.3 by calling `r
 
 If a stream still dies part-way, the agent loop **degrades gracefully** instead of dumping the raw
 litellm/aiohttp exception into chat: it keeps whatever answer + activity streamed so far, appends a
-short friendly note ("the model stopped responding before the answer was finished…"), **persists**
-that partial turn, and ends the stream with `done` — so a reopen still shows it. Only a failure
-that produced *nothing* yet ends with `error` (a friendly banner; a non-connection error like
-`paused` passes its own text through, which the web keys on for its paused state).
+short note saying why, **persists** that partial turn (with `stopped="error"`), emits a terminal
+`error` event, and ends the stream with `done` — so a reopen still shows both the answer and the
+fact that it was cut short. A failure that produced *nothing* yet ends with `error` alone, and
+persists no turn.
+
+#### The failed-turn contract (#944, #947 — ADR-0142)
+
+Two rules, and `agent/failures.py` is the only place either is decided.
+
+**A failed turn always fires a terminal `error`.** Before #944 the retained-partial branch emitted
+the note and `done` and nothing else, so the shell's danger card — which fires on `error` — was
+unreachable for exactly the failure mode users hit most: a lead-in sentence, then silence. The
+`error` event now precedes `done` on that branch. A client reads `error` as *the reason*, not as
+*the end*: it keeps reading for the terminal frame, and `done` still carries the persisted turn
+(which is what makes the shell reconcile with history rather than keep its live copy). A client
+that stops at `error` — the pre-#944 shape — still behaves correctly.
+
+**A provider payload never reaches the browser.** `classify_stream_failure(exc, model=…)` writes
+the banner; `str(exc)` is never it. The classes, in order:
+
+| Class | Banner |
+| --- | --- |
+| `GatewayPausedError` | passes its own text through — the **one** allowance, because the web tests `/paused/i` on the detail to show the asleep card. Explicit by exception type, not "whatever didn't match". |
+| `ModelCapabilityError` (ADR-0140) | its `message` + `hint`, both already written for a person. |
+| the connection/stall class (#453) | the "model stopped responding" note, unchanged. |
+| a provider rejection — `BadRequestError`, `AuthenticationError`, `RateLimitError`, `ServiceUnavailableError`, `HTTPStatusError`, … matched on the exception's **type name**, so nothing here imports litellm's hierarchy | one sentence naming the model and the provider, plus the provider's own message *when it survives redaction*. |
+| anything else | `"<model> failed with an unexpected error (<ExceptionClass>)."` — the class, and nothing else. |
+
+Redaction is `readable_provider_message`. Aggregators wrap each other: #947's real payload is
+OpenRouter reporting "Provider returned error" with the upstream's actual refusal escaped three
+levels down inside `metadata.raw`, and vLLM's own quotes left unescaped so it is not valid JSON at
+any depth. The helper unwinds one escape level at a time, collects every `"message"` value at each
+level, and keeps the **deepest** one that passes a plain-sentence test: no braces, brackets or JSON
+punctuation; no `user_id` / `api_key` / `authorization` / … substring; no long letters-and-digits
+run (a uuid, a hash, a key); 8–240 characters; mostly letters. Nothing that fails the test is
+quoted at all, so an unreadable payload produces no quotation rather than a leak. The provider
+named in the sentence is the upstream the aggregator routed to (`"provider_name":"NextBit"`) when
+the payload says so, else litellm's routing label, else the model id's prefix — never an account
+id, a URL or a key.
+
+The raw exception is logged once, at **ERROR**, with `error_type`, `reason` and `model` — a turn
+that could not answer is an operator's problem, not a warning — and nowhere else.
+
+**Metric.** `epicurus_core_llm_stream_failures_total{tenant, reason}` counts failed streaming
+turns. `reason` is the closed set `paused` · `capability` · `stalled` · `rejected` · `auth` ·
+`rate_limited` · `unavailable` · `unknown` — never a provider string, so cardinality stays bounded
+per tenant. Kubernetes parity: this is all in-process streaming logic, so both ADR-0134 runtime
+arms behave identically and no container, image or deployment surface is touched.
 
 **`embed()` carries the same bound, but enforced differently (#466).** LiteLLM's `ollama`
 embeddings dispatch never threads a `timeout=` kwarg through to its HTTP call (unlike the chat
@@ -1682,8 +1730,11 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `agent_messages`** — conversation history (append-only in normal use; the last
   turn can be edited/truncated for regenerate/edit, #302): `id`, `tenant`,
   `session_id`, `role`, `content`, `created_at`, plus JSON `entity_refs` / `attachments`
-  (ADR-0019) and `activity` — the assistant turn's persisted process, rendered as the folded
-  activity timeline on reopen (ADR-0041). `activity.timeline` is the **chronological**
+  (ADR-0019), `activity` — the assistant turn's persisted process, rendered as the folded
+  activity timeline on reopen (ADR-0041) — and `stopped`, why the turn ended when it did not end
+  by answering (#944, ADR-0142): `NULL` for a completed turn, a user message and every pre-#944
+  row, `"error"` for a mid-stream failure, which is what the transcript renders its inline "this
+  reply was interrupted" affordance from. `activity.timeline` is the **chronological**
   interleaving of thinking blocks and tool steps (think → call → think, #300); the flat
   `thinking`/`steps` are derived and kept for backward compatibility (older rows have only
   those). Tenant-scoped; its schema, like every table below, comes from this service's

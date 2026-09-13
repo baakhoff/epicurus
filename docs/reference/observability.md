@@ -54,11 +54,20 @@ same `/metrics` route — no extra wiring. Currently exported beyond the client 
 | `epicurus_core_file_scan_fuse_trips_total` | counter | `tenant`, `namespace` | core-app | File-space index purges refused by the fuse, cumulatively. |
 | `epicurus_knowledge_index_fuse_tripped` | gauge | `tenant`, `source` | knowledge | `1` while a knowledge index source is refusing to de-index (#848). `source` ∈ `knowledge` (the vault), `docs` (bundled platform docs), `module_docs`. |
 | `epicurus_knowledge_index_fuse_trips_total` | counter | `tenant`, `source` | knowledge | Knowledge index passes refused by the fuse, cumulatively. |
+| `epicurus_core_llm_stream_failures_total` | counter | `tenant`, `reason` | core-app | Streaming agent turns that ended in a failure rather than an answer (#944, ADR-0142). `reason` ∈ `paused` · `capability` · `stalled` · `rejected` · `auth` · `rate_limited` · `unavailable` · `unknown` — a closed set, never a provider string, so cardinality stays bounded per tenant. |
 
 A tripped fuse is worth alerting on: it means derived state is **intact but stale**, and an
 operator has to decide whether the source really lost its contents (see
 [file space](files.md#configuration-core-app) and
 [knowledge](../services/knowledge.md#the-mass-de-index-fuse-848)).
+
+**What to alert on for `epicurus_core_llm_stream_failures_total`:** not the overall failure rate —
+`paused` is the operator's own power toggle and `stalled` is usually a local model loading, both
+expected. Alert on a **sustained** rate of `reason` in `rejected` · `auth` · `capability`: each
+means the configured model is wrong for the job (a chat turn routed to an embedding model, a key
+the provider refuses, a model that cannot do what was asked), and every turn will keep failing the
+same way until somebody changes it on the Models page. `unavailable` and `rate_limited` deserve a
+slower, longer-window alert — they usually clear on their own.
 
 ---
 

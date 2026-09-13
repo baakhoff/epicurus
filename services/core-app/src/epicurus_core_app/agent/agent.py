@@ -45,6 +45,7 @@ from epicurus_core_app.agent.doc_preview import (
     DocumentToolLookup,
     PreviewFrame,
 )
+from epicurus_core_app.agent.failures import STREAM_FAILURES, classify_stream_failure
 from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
@@ -227,42 +228,10 @@ def _attach_images(convo: list[ChatMessage], images: list[ImagePart]) -> list[Ch
     return convo
 
 
-# Mid-stream failure handling (#453). When a streaming turn dies part-way — most often the local
-# model stopping mid-answer as it loads another model / evaluates a long prompt and the socket
-# read aborts — we keep the partial answer + activity instead of discarding the turn, and show a
-# friendly note rather than the raw litellm/aiohttp exception chain. Markers identify that
-# connection/stall class loosely (by exception type + message) so the agent needn't import
-# litellm's exception types; anything else keeps its own short text (e.g. "paused", which the web
-# keys on for its paused state).
-_STREAM_CONNECTION_MARKERS = (
-    "timeout",
-    "timed out",
-    "socket",
-    "apiconnection",
-    "connection",
-    "midstreamfallback",
-    "read error",
-    "econnreset",
-)
-_STREAM_STALLED_MESSAGE = (
-    "The model stopped responding before the answer was finished — it may have been busy loading "
-    "another model. Please try again."
-)
-_STREAM_INTERRUPTED_MESSAGE = "The answer was interrupted before it finished. Please try again."
-
-
-def _stream_failure_messages(exc: Exception) -> tuple[str, str]:
-    """Return ``(banner_detail, retained_note)`` for a mid-stream failure (#453).
-
-    For the connection/stall class both are the friendly "model stopped responding" message, so
-    the raw exception text never reaches the UI. For any other error the banner passes the
-    exception's own (short) text through — so signals the web relies on, like "paused", survive —
-    while a *retained* partial turn still gets a generic interrupted note rather than raw text.
-    """
-    blob = f"{type(exc).__name__}: {exc}".lower()
-    if any(marker in blob for marker in _STREAM_CONNECTION_MARKERS):
-        return _STREAM_STALLED_MESSAGE, _STREAM_STALLED_MESSAGE
-    return str(exc), _STREAM_INTERRUPTED_MESSAGE
+# Mid-stream failure handling lives in `agent.failures` (#453, #944, #947 — ADR-0142): what the
+# user is told when a streaming turn dies part-way, what a *retained* partial answer is annotated
+# with, and the metric label for the failure class. The agent decides only when to ask, and what
+# to do with the answer.
 
 
 def _tool_detail(arguments: dict[str, Any]) -> str | None:
@@ -1158,22 +1127,34 @@ class Agent:
                         append_thinking(timeline, event.reasoning)
                         yield AgentEvent(type="thinking", text=event.reasoning)
         except Exception as exc:  # the response already started — degrade gracefully (#453)
-            log.warning("streaming turn failed", error=str(exc))
-            banner, note = _stream_failure_messages(exc)
+            failure = classify_stream_failure(exc, model=model)
+            # ERROR, not WARNING: a turn that could not answer is an operator's problem, and the
+            # raw exception belongs here — this is the only place it is ever written (#947).
+            log.error(
+                "streaming turn failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                reason=failure.reason,
+                model=model,
+            )
+            STREAM_FAILURES.labels(tenant=tenant, reason=failure.reason).inc()
             partial = "".join(parts)
             if not (partial.strip() or timeline):
-                # Nothing was produced before the failure — no partial worth keeping. Surface a
-                # friendly banner (or the error's own short text, e.g. "paused"), then stop.
-                yield AgentEvent(type="error", detail=banner)
+                # Nothing was produced before the failure — no partial worth keeping. Surface the
+                # operator-readable banner (or the gateway's own "paused" signal), then stop.
+                yield AgentEvent(type="error", detail=failure.banner)
                 return
             # Keep the partial answer + activity rather than discarding the turn: stream the note
-            # (the in-chat "friendly error"), persist the partial so a reopen still shows it, and
-            # finish the stream cleanly. The raw exception stays in the log only. `stopped=error`
-            # marks the turn incomplete without leaking internals (it is not surfaced to the user).
+            # (the in-chat "friendly error"), emit a *terminal* error event so the shell shows
+            # something happened instead of a reply that merely stops (#944 part 3), persist the
+            # partial so a reopen still shows it, and finish the stream cleanly. The raw exception
+            # stays in the log only; `stopped=error` is persisted so the inline "this reply was
+            # interrupted" affordance survives a reload or a re-attach that lands on history.
             lead = "\n\n" if partial.strip() else ""
-            yield AgentEvent(type="delta", text=f"{lead}{note}")
+            yield AgentEvent(type="delta", text=f"{lead}{failure.note}")
+            yield AgentEvent(type="error", detail=failure.banner)
             turn = AgentTurn(
-                content=f"{partial}{lead}{note}",
+                content=f"{partial}{lead}{failure.note}",
                 tools_used=tools_used,
                 stopped="error",
                 entity_refs=refs.refs,
@@ -1305,6 +1286,11 @@ class Agent:
                 entity_refs=[ref.model_dump() for ref in turn.entity_refs],
                 # Persist the process only when there is one — keep plain turns blob-free.
                 activity=None if turn.activity.is_empty() else turn.activity.model_dump(),
+                # Why the turn ended, when it did not end by answering (#944). A completed turn
+                # stores nothing, so the column stays NULL for the ordinary case and for every
+                # row written before this existed; "error" is what the shell renders the inline
+                # "this reply was interrupted" affordance from, after a reload included.
+                stopped=None if turn.stopped == "completed" else turn.stopped,
             )
         except Exception as exc:  # a failed write must not lose the answer
             log.warning("memory write failed", error=str(exc))

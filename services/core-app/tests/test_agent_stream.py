@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,7 +19,6 @@ from epicurus_core_app.agent.agent import (
     _STOPPED_REPEAT_CALL,
     _STOPPED_TOOL_ERRORS,
     _STOPPED_UNSUPPORTED_MEDIA,
-    _STREAM_STALLED_MESSAGE,
     _TOOL_DETAIL_CAP,
     _VISION_UNSUPPORTED_MESSAGE,
     Agent,
@@ -26,11 +26,21 @@ from epicurus_core_app.agent.agent import (
 )
 from epicurus_core_app.agent.attachments import ExpandedAttachments, ImagePart
 from epicurus_core_app.agent.doc_preview import DocumentToolLookup
+from epicurus_core_app.agent.failures import STREAM_STALLED_MESSAGE
 from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent, ToolCallFragment
+from epicurus_core_app.llm.power import GatewayPausedError
+
+# #947's transcript verbatim (only the account identifier is a stand-in) — see
+# `test_agent_failures.py` for the redaction helper this exercises end-to-end.
+NEXTBIT_PAYLOAD = (
+    (Path(__file__).parent / "fixtures" / "provider_tool_rejection.txt")
+    .read_text(encoding="utf-8")
+    .strip()
+)
 
 
 class _FakeStreamGateway:
@@ -189,20 +199,60 @@ async def test_stream_tool_reported_failure_shows_error_status() -> None:
     )
 
 
-async def test_stream_gateway_error_yields_error_event() -> None:
+def _exploding(exc: Exception) -> Any:
+    """A gateway whose stream raises *exc* before producing anything."""
+
     class _Exploding:
         async def supports_tools(self, *args: Any, **kwargs: Any) -> bool:
             return True
 
         async def stream_chat(self, *args: Any, **kwargs: Any) -> AsyncIterator[StreamEvent]:
-            raise RuntimeError("paused")
+            raise exc
             yield StreamEvent()  # pragma: no cover - makes this an async generator
 
-    events = await _collect(Agent(gateway=_Exploding(), mcp=_FakeMcp()), "hi")  # type: ignore[arg-type]
+    return _Exploding()
+
+
+async def test_stream_gateway_error_yields_error_event() -> None:
+    events = await _collect(
+        Agent(gateway=_exploding(GatewayPausedError("paused")), mcp=_FakeMcp()),  # type: ignore[arg-type]
+        "hi",
+    )
     assert [e.type for e in events] == ["error"]
-    # A non-connection error with no partial output passes its own short text through — the web
-    # keys on "paused" for its paused-state UI, so it must not be rewritten (#453).
+    # The gateway's paused signal is the one deliberate passthrough — the web keys on "paused"
+    # for its asleep UI, so it must not be rewritten (#453; by exception type now, ADR-0142).
     assert events[0].detail == "paused"
+
+
+async def test_stream_provider_payload_never_reaches_the_error_event() -> None:
+    # #947: a hosted 400 used to arrive as the banner verbatim — provider JSON, account id and
+    # all. The banner is written by us now: it names the model and the upstream provider, quotes
+    # only the readable sentence, and carries nothing else out of the payload.
+    class BadRequestError(Exception):  # matched by type *name*, as litellm's is
+        pass
+
+    events = await _collect(
+        Agent(gateway=_exploding(BadRequestError(NEXTBIT_PAYLOAD)), mcp=_FakeMcp()),  # type: ignore[arg-type]
+        "hi",
+    )
+    assert [e.type for e in events] == ["error"]
+    detail = events[0].detail or ""
+    assert "NextBit" in detail
+    assert "tool choice requires --enable-auto-tool-choice" in detail
+    for leak in ("user_id", "user_2abcDEF3ghiJKL4mnoPQR5stu", "{", "}", "LiteLLM Retried"):
+        assert leak not in detail
+
+
+async def test_stream_unknown_failure_names_only_its_class() -> None:
+    # The fallthrough is generic by design: `str(exc)` is never the banner again (ADR-0142).
+    events = await _collect(
+        Agent(gateway=_exploding(ValueError("internals nobody should read")), mcp=_FakeMcp()),  # type: ignore[arg-type]
+        "hi",
+    )
+    assert [e.type for e in events] == ["error"]
+    detail = events[0].detail or ""
+    assert "ValueError" in detail
+    assert "internals nobody should read" not in detail
 
 
 class _StallingGateway:
@@ -232,6 +282,8 @@ class _StallingGateway:
 class _RecordingMem:
     def __init__(self) -> None:
         self.remembered: list[tuple[str, str]] = []
+        # Every non-None `stopped` the agent persisted (#944) — a completed turn passes None.
+        self.stopped: list[str] = []
 
     async def history(self, *, tenant: str, session_id: str) -> list[ChatMessage]:
         return []
@@ -243,6 +295,8 @@ class _RecordingMem:
         self, *, tenant: str, session_id: str, role: str, content: str, **_kw: Any
     ) -> None:
         self.remembered.append((role, content))
+        if _kw.get("stopped") is not None:
+            self.stopped.append(str(_kw["stopped"]))
 
 
 async def test_stream_socket_timeout_keeps_partial_and_finishes_friendly() -> None:
@@ -260,16 +314,49 @@ async def test_stream_socket_timeout_keeps_partial_and_finishes_friendly() -> No
     ]
 
     assert events[-1].type == "done"  # a clean finish, not a raw error bubble
-    assert not any(e.type == "error" for e in events)
+    # …and a terminal `error` frame ahead of it (#944 part 3): the reply no longer merely stops.
+    assert [e.type for e in events[-3:]] == ["delta", "error", "done"]
+    assert events[-2].detail == STREAM_STALLED_MESSAGE
     # the friendly note streamed; the raw litellm text never did
-    assert any(e.type == "delta" and _STREAM_STALLED_MESSAGE in (e.text or "") for e in events)
+    assert any(e.type == "delta" and STREAM_STALLED_MESSAGE in (e.text or "") for e in events)
     assert not any("APIConnectionError" in (e.text or "") for e in events)
     turn = events[-1].turn
     assert turn is not None
     assert turn.content.startswith("Here is the plan")
-    assert _STREAM_STALLED_MESSAGE in turn.content
+    assert STREAM_STALLED_MESSAGE in turn.content
     # persisted, so a reopen still shows the partial (not discarded)
     assert ("assistant", turn.content) in mem.remembered
+    # …and persisted as *incomplete*, so the reopened transcript can say so (#944, ADR-0142).
+    assert mem.stopped == ["error"]
+
+
+async def test_stream_failure_with_a_partial_still_emits_a_terminal_error() -> None:
+    # #944's own scenario: a lead-in sentence, then the provider refuses. The partial is kept and
+    # persisted as before, but the turn now ends with an `error` frame carrying an
+    # operator-readable reason — and the note appended to the reply carries the same sentence, so
+    # a reload still explains itself. The provider's payload reaches neither.
+    class BadRequestError(Exception):
+        pass
+
+    mem = _RecordingMem()
+    gw = _StallingGateway(["Let me check "], BadRequestError(NEXTBIT_PAYLOAD))
+    agent = Agent(gateway=gw, mcp=_FakeMcp(), memory=mem)  # type: ignore[arg-type]
+    events = [
+        e async for e in agent.run_stream([ChatMessage(role="user", content="hi")], session_id="s1")
+    ]
+
+    assert [e.type for e in events[-3:]] == ["delta", "error", "done"]
+    banner = events[-2].detail or ""
+    assert "NextBit" in banner and "tool choice requires" in banner
+    turn = events[-1].turn
+    assert turn is not None
+    assert turn.content.startswith("Let me check ")
+    assert "tool choice requires" in turn.content  # the reason is in the persisted reply too
+    assert turn.stopped == "error"
+    assert mem.stopped == ["error"]
+    for leak in ("user_2abcDEF3ghiJKL4mnoPQR5stu", "user_id", "LiteLLM Retried"):
+        assert leak not in banner
+        assert leak not in turn.content
 
 
 async def test_stream_failure_before_any_output_yields_friendly_error() -> None:
@@ -280,7 +367,7 @@ async def test_stream_failure_before_any_output_yields_friendly_error() -> None:
     events = await _collect(Agent(gateway=gw, mcp=_FakeMcp()), "hi")  # type: ignore[arg-type]
 
     assert [e.type for e in events] == ["error"]
-    assert events[0].detail == _STREAM_STALLED_MESSAGE
+    assert events[0].detail == STREAM_STALLED_MESSAGE
     assert "APIConnectionError" not in (events[0].detail or "")
 
 

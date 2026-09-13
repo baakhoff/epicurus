@@ -414,6 +414,12 @@ export const MessageRecord = z.object({
   entity_refs: z.array(EntityRef).default([]),
   attachments: z.array(Attachment).default([]),
   activity: MessageActivity.nullish(),
+  /** Why the turn stopped, when it did not stop by answering (#944, ADR-0142). `"error"` is
+   *  the one value the transcript branches on — it renders the inline "this reply was
+   *  interrupted" affordance under the bubble, so a reload (or a re-attach that lands on
+   *  history rather than on the live stream) still says what happened. Null on user messages,
+   *  on a turn that completed, and on every row written before the field existed. */
+  stopped: z.string().nullish(),
 });
 export type MessageRecord = z.infer<typeof MessageRecord>;
 

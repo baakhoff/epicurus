@@ -30,7 +30,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { api } from "@/lib/api";
-import { useChat } from "@/stores/chat";
+import { REATTACH_LOST_MESSAGE, useChat } from "@/stores/chat";
 
 const delta = (text: string, id?: string): SseMessage => ({
   event: "delta",
@@ -128,6 +128,57 @@ describe("re-attach on a dropped stream (#376)", () => {
 
     expect(onDone).toHaveBeenCalled(); // gone → refetch history (the answer is durable)
     expect(useChat.getState().streaming).toBe(false);
+  });
+});
+
+describe("a failed turn always says what happened (#944, ADR-0142)", () => {
+  const errorFrame = (detail: string, id?: string): SseMessage => ({
+    event: "error",
+    data: JSON.stringify({ type: "error", detail }),
+    id,
+  });
+
+  it("keeps the banner and still reconciles history when `error` precedes `done`", async () => {
+    // The shape a turn that failed *after* streaming a partial answer now sends: the note, the
+    // terminal error, then the persisted turn. Both matter — the banner says why, and `done` is
+    // what refetches history (which carries `stopped: "error"` for the inline affordance).
+    sseScript = async function* () {
+      yield delta("Let me check ", "1");
+      yield errorFrame("openrouter/m was rejected by its provider (provider: NextBit).", "2");
+      yield done("3");
+    };
+
+    const onDone = vi.fn(async () => {});
+    await useChat.getState().send("hi", null, onDone);
+
+    expect(useChat.getState().error).toContain("rejected by its provider");
+    expect(onDone).toHaveBeenCalled(); // history reconciled — not left on the live copy
+    expect(useChat.getState().segments).toEqual([]);
+    expect(useChat.getState().streaming).toBe(false);
+    expect(api.activeRun).not.toHaveBeenCalled(); // an error is an end, never a drop
+  });
+
+  it("treats an error with no terminal frame after it as the end, not a drop", async () => {
+    // The older shape (nothing was produced, so the server stops at `error`) must not be taken
+    // for a lost connection — re-attaching to a run that already failed is a wild goose chase.
+    sseScript = async function* () {
+      yield errorFrame("The model failed with an unexpected error (ValueError).", "1");
+    };
+
+    const onDone = vi.fn(async () => {});
+    await useChat.getState().send("hi", null, onDone);
+
+    expect(useChat.getState().error).toContain("ValueError");
+    expect(api.activeRun).not.toHaveBeenCalled();
+    expect(useChat.getState().streaming).toBe(false);
+  });
+
+  it("still reads the gateway's paused signal out of the detail", async () => {
+    sseScript = async function* () {
+      yield errorFrame("LLM gateway is paused; no non-local model is available", "1");
+    };
+    await useChat.getState().send("hi", null, vi.fn(async () => {}));
+    expect(useChat.getState().paused).toBe(true);
   });
 });
 
@@ -235,7 +286,7 @@ describe("reattach exhaustion classifies probe vs recovery (#477)", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     await sent;
 
-    expect(useChat.getState().error).toBe("lost connection to the running turn");
+    expect(useChat.getState().error).toBe(REATTACH_LOST_MESSAGE);
     expect(useChat.getState().reconnectable).toBe(true);
   });
 
@@ -260,7 +311,7 @@ describe("reattach exhaustion classifies probe vs recovery (#477)", () => {
     // This is the case a naive `mode === "recovery"` check would get wrong: the loop was
     // *entered* as a probe, but finding a real run partway through makes its exhaustion a
     // genuine recovery failure — the user has real state to reconcile with.
-    expect(useChat.getState().error).toBe("lost connection to the running turn");
+    expect(useChat.getState().error).toBe(REATTACH_LOST_MESSAGE);
     expect(useChat.getState().reconnectable).toBe(true);
   });
 

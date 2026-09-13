@@ -12,6 +12,19 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A failed reply always says so, and never in the provider's words** (#944, #947) — a streaming
+  turn that died *after* it had started answering left the transcript with a sentence that simply
+  stopped: no banner, no note, just Copy and Regenerate under half a reply. The terminal error
+  event now fires on that path too, the message itself is persisted as interrupted so the mark
+  survives a reload (or a re-attach that lands on history rather than on the failing stream), and
+  a re-attach that gives up says the connection was lost and the reply may be incomplete instead
+  of going quiet. The other half is what the banner *says*: a hosted model's refusal used to be
+  rendered verbatim, which put the provider's raw JSON — account identifier included — in the
+  browser. Every failure is now described in a sentence written here, naming the model and the
+  provider it was routed to and quoting the provider's own message only when that message survives
+  a redaction test; the raw exception stays in the log, at ERROR, once. A new
+  `epicurus_core_llm_stream_failures_total{tenant,reason}` counter gives the observability stack
+  something to alert on. `core-app` 0.126.0→0.127.0 (MINOR), `web` 0.148.0→0.149.0 (MINOR).
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
   startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own

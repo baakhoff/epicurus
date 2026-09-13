@@ -12,6 +12,13 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Add a hosted model straight from the Models page** (#922) — the Hosted models card's
+  "None yet" copy used to send the operator to a chat's model picker just to save an id; now an
+  **Add a hosted model** row sits on the card itself, with a provider select drawn from what the
+  core actually reports (never the client's static alias list, so an unregistered provider can't
+  be picked), a model-id field that prepends the alias for you (OpenRouter's two-slash ids stay
+  intact), and an inline hint when the chosen provider's key is `missing`/`unavailable` — the
+  first place the core's `key_state` (#728) is rendered. `web` 0.145.0→0.146.0 (MINOR).
 - **MinIO images now pull from Quay** — Docker Hub no longer serves the `minio/minio` and
   `minio/mc` repositories (a `404` on the repository itself, not just the tag), so every
   fresh `compose up`, the `runtime-smoke` and `k8s-smoke` gates, and a chart install failed

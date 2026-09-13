@@ -198,15 +198,16 @@ report line verbatim, the same courtesy `ValueError`/`HTTPException` already got
 ### Column-metadata-backed stores — `epicurus_core.portability_columns.PortableTable` (#918)
 
 A store whose travelling table is a plain SQLAlchemy `Table` — read and written generically,
-column by column, rather than through a domain API — should build its table specs from
+off the table's own column metadata rather than field by field — should build its table specs from
 `PortableTable` (`table_of(Model)` for the `Table`) rather than reinventing the
 encode/decode/normalize loop. It is what `calendar` and the core's own core-data set do, and it
 carries the #903 null-normalisation rule (a `NULL` in a column the model gives a Python-side
 default, with no `server_default`, is filled rather than travelling as `NULL` and failing a
-fresh target's `NOT NULL`) for free. A store that instead goes through a domain API with its
-own explicit per-field defaults (`tasks`, `notes`, `knowledge`, `storage`) has no need of it —
-that shape never had the bug `PortableTable` fixes, because it never passes an *absent* field
-through to the database as an explicit `None` in the first place.
+fresh target's `NOT NULL`) for free. A store that instead **names its travelling fields
+explicitly**, each with its own fallback — whether through a domain API (`tasks`, `knowledge`,
+`storage`) or as a per-table column list written out in the module (`notes`) — has no need of
+it: that shape never had the bug `PortableTable` fixes, because it never passes an *absent*
+field through to the database as an explicit `None` in the first place.
 
 `portability_columns` is a **submodule, not a package-root export** — it imports SQLAlchemy,
 which `epicurus_core` itself does not depend on (a module with no database, like `websearch`,

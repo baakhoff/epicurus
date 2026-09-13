@@ -1,0 +1,63 @@
+# A stand-in for the Ollama workload, for the `k8s-smoke` gate only (#919).
+#
+# Why this exists. `infra/ci/values-ci.yaml` turns the chart's Ollama off — the image
+# is multi-gigabyte and its pod asks for 4Gi before it has done anything, and nothing
+# the smoke asserts needs a model. The cost of that was silent: with no Ollama
+# workload in the namespace, `KubernetesController.restart_service` had nothing to
+# find, the `statefulsets` verb in the chart's Role was never exercised, and the
+# second Kubernetes arm of ADR-0134 stayed mock-only while the Compose gate exercised
+# its counterpart on every push.
+#
+# Why a stub rather than "a tiny image standing in for Ollama" (the issue's other
+# option): the restart path does not talk to Ollama at all. The core writes the env
+# file and asks the *Kubernetes API* to roll the workload; what the container serves
+# is irrelevant to every assertion. An image that answered on :11434 would only buy a
+# readiness probe, against the gate's real constraint — it already runs ~10 minutes of
+# a 20-minute budget with 11 uncached image builds inside. So: no Service, no probes,
+# no port, and the image is the one the gate already pulls for its curl pod, so this
+# costs one `kubectl apply` and no extra pull.
+#
+# What has to stay exactly as it is: the name `ollama` and the label pair
+# `app.kubernetes.io/part-of: epicurus` + `app.kubernetes.io/component: ollama`. That
+# pair is how the seam finds the workload (kubernetes_control.py `_workloads`), and
+# `_owns` re-reads the component label off the object before patching it. A StatefulSet
+# rather than a Deployment because that is how the chart runs Ollama (it holds a model
+# volume), and because the seam tries StatefulSets *first* — a Deployment stub would
+# leave the chart's `statefulsets` RBAC verb untested, which is the hole being closed.
+#
+# tests/test_smoke_gates.py pins the name, the labels and the kind.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ollama
+  labels:
+    app.kubernetes.io/name: epicurus
+    app.kubernetes.io/component: ollama
+    app.kubernetes.io/part-of: epicurus
+    epicurus.dev/ci-stub: "true"
+spec:
+  serviceName: ollama
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: epicurus
+      app.kubernetes.io/component: ollama
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: epicurus
+        app.kubernetes.io/component: ollama
+        app.kubernetes.io/part-of: epicurus
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: ollama
+          image: curlimages/curl:8.11.1
+          imagePullPolicy: IfNotPresent
+          # POSIX `sleep` takes a number; busybox accepts no "infinity" here.
+          command: ["sh", "-c", "while true; do sleep 300; done"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi

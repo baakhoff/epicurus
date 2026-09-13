@@ -25,7 +25,7 @@ images to GHCR.
   adopt. And a `DELETE .../imports/{id}` racing a `POST .../apply` for the same job could delete
   the row (and the staging directory the applier was about to open) between the apply's read and
   its write; `PortabilityService` now holds one lock per job id so the two requests serialize.
-  `epicurus-core` 0.39.0→0.41.0 (MINOR), `core-app` 0.124.0→0.124.2 (PATCH),
+  `epicurus-core` 0.40.0→0.41.0 (MINOR), `core-app` 0.124.1→0.124.2 (PATCH),
   `calendar` 0.22.0→0.22.1 (PATCH).
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every

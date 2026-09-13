@@ -25,6 +25,26 @@ images to GHCR.
   a redaction test; the raw exception stays in the log, at ERROR, once. A new
   `epicurus_core_llm_stream_failures_total{tenant,reason}` counter gives the observability stack
   something to alert on. `core-app` 0.126.0→0.127.0 (MINOR), `web` 0.148.0→0.149.0 (MINOR).
+- **A dimension change is healed or named, never silently degraded** (#944 part 2, #879, #860) —
+  switch the embedding model to one with a different output size and every vector already stored
+  becomes unqueryable. Cross-chat memory was supposed to repair itself when that happened; on the
+  owner's install it did not, and said nothing: the reconcile met a vector configuration it did
+  not recognise, resolved no width, repaired nothing — and still cached the collection as
+  repaired, so every later recall repeated the same rejected query while the assistant quietly
+  answered with no memory at all. The cache now records a width that was actually **confirmed**,
+  a configuration it cannot read is raised instead of shrugged off, and the rebuild is shielded
+  from the recall time-box, so a corpus too large to re-embed inside that budget finishes healing
+  instead of being restarted and cancelled on every turn. What cannot be healed is now *said*:
+  recall logs the two widths and the cure, `knowledge` search answers "the embedding model
+  changed — run Re-embed everything" instead of forwarding Qdrant's raw dimension error, and the
+  Models page shows the stuck state on the embedding card and names the cure — which, for
+  recall memory, is the **Memory facts re-embed** maintenance job rather than "Re-embed
+  everything" (that one fans out to the modules only). The
+  same card stops calling a **refused** re-embed a failure: a module that declines to rebuild
+  from a source reading empty is protecting your data, and now says so, with its reason, in its
+  own third state. `core-app` 0.125.0→0.126.0 (MINOR) · `web` 0.147.0→0.148.0 (MINOR) ·
+  `knowledge` 0.31.0→0.31.2 (PATCH) · `notes` 0.15.0→0.15.2 (PATCH) — the wave's ladder
+  reserved a patch each for a lane that turned out not to touch them.
 - **A model's capabilities are known, not assumed — and a turn that cannot work says so before
   it starts** (#944, #947, #879; ADR-0140). Two dogfood failures with one cause: the core knew
   nothing about a model beyond "is it hosted". An embedding model starred as the chat default
@@ -46,6 +66,68 @@ images to GHCR.
   the core says otherwise, and an id the shipped catalogue has never heard of now says
   **unlisted** instead of showing an empty chip. `core-app` 0.124.3→0.125.0 (MINOR), `web`
   0.146.0→0.147.0 (MINOR).
+- **`auto` model bootstrap now seeds an empty runtime only, instead of every restart** (#923,
+  ADR-0118 amendment) — "first-boot" was a docstring, not a guard: the bootstrap diffed the
+  effective chat + embedding defaults against the local runtime on *every* start, so a model
+  deleted on the Models page was silently pulled back on the next restart — routine on both
+  Compose and Kubernetes (a rollout-restart, ADR-0134). `auto` now no-ops the instant `/api/tags`
+  reports any installed model at all — logged at INFO with the count — and never resolves the
+  defaults again; a from-scratch install still gets its defaults exactly as ADR-0118 intends. An
+  explicit `LLM_BOOTSTRAP_MODELS` list is unchanged: a stated pin, ensured on every start
+  regardless of what else is installed. `core-app` 0.124.2→0.124.3 (PATCH).
+
+- **The portability seam's last two gaps: a bodyless crash, and a remove/apply race** (#918) —
+  an unhandled exception inside a module's `/import` route used to escape as Starlette's default
+  500 (`text/plain`, no JSON), so a module's own crash reached the operator's report line as
+  nothing at all and the only recourse was `docker compose logs`; `add_portability_routes` now
+  catches it and answers with a `detail` naming it, the same courtesy a deliberate refusal
+  already got. `#903`'s null-normalisation helper (`TableSpec.encode`/`.normalize`) existed as
+  two identical copies in `calendar` and the core's own `core_data`; it is promoted once into
+  `epicurus_core.PortableTable`, and both adopt it — the other five portable modules
+  (`tasks`, `notes`, `knowledge`, `storage`, `mail`) go through a domain store with explicit
+  per-field defaults and never had the defect to begin with, so there was nothing there to
+  adopt. And a `DELETE .../imports/{id}` racing a `POST .../apply` for the same job could delete
+  the row (and the staging directory the applier was about to open) between the apply's read and
+  its write; `PortabilityService` now holds one lock per job id so the two requests serialize.
+  `epicurus-core` 0.40.0→0.41.0 (MINOR), `core-app` 0.124.1→0.124.2 (PATCH),
+  `calendar` 0.22.0→0.22.1 (PATCH).
+- **A degraded web search no longer looks like an empty one** (#936, #920) — SearXNG can answer
+  `200 {"results": [], "unresponsive_engines": [...]}` when every engine it asked timed out,
+  was blocked, or got rate-limited, and `web_search` used to discard that field, making a
+  genuinely empty query indistinguishable from a search instance quietly failing. The tool now
+  tells the three outcomes apart — results, genuinely empty, degraded — logs a WARNING naming
+  the unresponsive engines, and `GET /status` gains a `degraded` flag reflecting the most recent
+  search rather than a separate probe. `web_search` also stopped swallowing every exception into
+  a clean `[]`: a SearXNG failure now reaches the model as an actionable message through the
+  ADR-0136 tool-error seam, which is why `httpx.HTTPStatusError`/`TransportError` joined
+  `epicurus-core`'s anticipated-exception set in the same change — a provider HTTP error is
+  expected traffic, not a crash, so it logs at WARNING instead of ERROR-with-traceback (fixing
+  the same misclassification for mail's Gmail client along the way). The default agent prompt
+  now says plainly when search is unavailable instead of narrating "no results" and quietly
+  falling back to training data. `epicurus-core` 0.39.0→0.40.0 (MINOR), `websearch`
+  0.3.1→0.4.0 (MINOR), `core-app` 0.124.0→0.124.1 (PATCH).
+- **The backup archives your files, and the gates stop grading themselves on a curve**
+  (#919, #895, #864) — three quiet failures of the same kind: something reported success while
+  doing less than it said. `infra/backups/backup.sh` looped over two volumes that had not
+  existed since the file space moved to `epicurus-files`, and it never archived
+  `epicurus-files` itself — the core's `/data`, and the bytes behind every knowledge document
+  and note. A backup taken before this holds no user files at all, and it exited 0. The loop
+  is now correct, the file space is archived whether it lives in the named volume or in the
+  host directory `EPICURUS_FILES_ROOT` points at, a restore puts it back wherever *this*
+  machine keeps it, the `valkey` cache is no longer archived (nothing in the codebase reads
+  it), and a repo test holds both scripts to the volumes the compose files really declare — so
+  the next stale name fails CI instead of silently shrinking a backup. **Take a fresh backup.**
+  On the CI side the two smoke gates now assert the same things on both runtimes: the Compose
+  gate was never starting the web shell (so nginx's runtime-derived resolver was gated on
+  Kubernetes only), neither gate checked that the MinIO bucket seed succeeded, the Kubernetes
+  gate had no Ollama workload so the restart arm of the container-runtime seam — and the chart
+  Role's `statefulsets` verb — never ran, nothing proved a file write reaches the cluster's
+  RWO volume, and every cluster boot was a *fresh* install, the one shape that cannot show an
+  upgrade defect. All five are closed, the gate-parity test no longer passes on needles that
+  match a comment, Helm's download is checksummed like every other pinned tool, and the
+  JetStream integration suite is isolated by per-test stream and subject names instead of by
+  wiping a shared stream — which is what it had actually been failing on in three CI runs.
+  Version bumps: none — no shipped component changed.
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
   startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own

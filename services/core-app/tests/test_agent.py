@@ -38,6 +38,7 @@ from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.llm.gateway import NO_TOOLS_SYSTEM_NOTE
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.memory.facts import EmbeddingDimensionChanged
 from epicurus_core_app.memory.profile import StandingProfile
 
 
@@ -1446,6 +1447,35 @@ async def test_agent_recall_backend_error_is_logged_distinctly() -> None:
     assert turn.content == "answer"  # still degrades to no recall, never blocks
     error_logs = [e for e in logs if e["event"] == "recall skipped: backend error"]
     assert error_logs and error_logs[0]["error_type"] == "RuntimeError"
+
+
+class _DimensionChangedMemory(_FakeMemory):
+    """Recall fails because the embedding model's output width changed (#944)."""
+
+    async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
+        raise EmbeddingDimensionChanged(
+            "embedding dimension changed 768→4096; recall memory needs a rebuild — "
+            "run “Re-embed everything” on the Models page"
+        )
+
+
+async def test_agent_recall_names_a_dimension_change_rather_than_a_backend_error() -> None:
+    # The one recall failure no retry fixes and the operator *can* act on. Logging it as a
+    # generic backend error carrying Qdrant's raw 400 is what made #944 invisible for days.
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=_DimensionChangedMemory(),  # type: ignore[arg-type]
+        recall_timeout_s=5,
+    )
+    with capture_logs() as logs:
+        turn = await agent.run([ChatMessage(role="user", content="hi")], session_id="s1")
+    assert turn.content == "answer"  # still degrades to no recall, never blocks the turn
+    assert not [e for e in logs if e["event"] == "recall skipped: backend error"]
+    named = [e for e in logs if e["event"] == "recall skipped: embedding dimension changed"]
+    assert named and "768→4096" in named[0]["reason"]
+    assert "Re-embed everything" in named[0]["reason"]
 
 
 async def test_agent_blank_step_is_nudged_into_an_answer() -> None:

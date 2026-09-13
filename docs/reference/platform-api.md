@@ -361,6 +361,36 @@ takes effect on the next message with no restart. Edited in the web
 
 ---
 
+## `GET /platform/v1/agent/memory/dimension`
+
+What the core's **recall store** last observed about its own Qdrant vector width (#944,
+ADR-0141). Switching the embedding model to one with a different output size makes every stored
+vector unqueryable; the fact store heals that in place on the next save or recall, and this
+route names the cases it could not — so a dead recall is visible on the Models page rather than
+only in a `WARN` line.
+
+Returns `{status, stored_dim, expected_dim, detail}`:
+
+| `status` | Meaning |
+| --- | --- |
+| `ok` | Nothing has gone wrong since this process started. |
+| `healed` | A change was found and the collection was rebuilt at the new width. |
+| `changed` | A change was found and the rebuild has not (yet) succeeded. |
+| `unreadable` | The collection's vector configuration is not a single width, so it cannot be reconciled at all. |
+
+`stored_dim` / `expected_dim` are the old and new widths (either may be `null` when unknown);
+`detail` is an operator-facing sentence naming the cure — never a provider payload, and never
+the tenant-scoped collection name. The cure it names is the **Memory facts re-embed**
+maintenance job, *not* the Models page's "Re-embed everything", which fans out to the modules'
+`/reindex` and never touches the fact collection. The value is **observation-based and
+process-local**: it reports what a real save/recall saw for **the caller's tenant** (the
+observation is kept per collection, so one tenant's drift is never reported to another), so
+the call costs no embed, and it resets when that tenant's memory facts re-embed runs. The web's **Models → Embedding model** card renders `changed` and
+`unreadable`; `ok` and `healed` render nothing. Identical on Docker and Kubernetes — the check
+is lazy, driven by request handling rather than container start-up (ADR-0134).
+
+---
+
 ## `GET /platform/v1/maintenance` · `PUT .../schedule` · `POST .../run`
 
 The maintenance orchestrator (ADR-0060) — one coordinated batch over the core's background jobs
@@ -730,6 +760,13 @@ core cannot read, which nothing useful can be salvaged from.
 Applies a staged import in the background. **202**. **409** if the job is not `staged`
 (including a second apply of the same job — upload it again), or if the preview said
 `compatible: false`; **410** if staging has been swept.
+
+Serialized against `DELETE .../imports/{id}` for the same job (#918): both read the row and
+then act on it, and without a lock a `DELETE` landing between this route's read and its write
+could remove the row — and the staging directory the background apply is about to open — out
+from under a job that had just been told to start. Whichever request the service's per-job
+lock lets through first wins; the loser sees the state the winner left (`JobNotFound`/`None` if
+the delete went first, `JobRunning`/409 if the apply did).
 
 The **202 already carries the whole job**: `status: "running"` and a complete `progress` list,
 seeded from the preview, every entry `pending`. That is deliberate (#893) — the shell used to

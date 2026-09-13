@@ -1582,6 +1582,16 @@ export function EmbedDefault() {
   // embedding model. Changing the model above doesn't re-embed existing data on its own.
   const reembed = useMutation({ mutationFn: () => api.reembed() });
 
+  // What the core's recall store last observed about its own vector width (#944, ADR-0141).
+  // Reported, not probed — it costs no embed call — and refetched after a re-embed, which is
+  // the action that clears a state the lazy heal could not.
+  const recallDim = useQuery({
+    queryKey: ["recallDimension"],
+    queryFn: () => api.recallDimension(),
+  });
+  const dim = recallDim.data;
+  const dimStuck = dim?.status === "changed" || dim?.status === "unreadable";
+
   return (
     <Card>
       <h3 className="mb-1 font-serif text-base text-ink">Embedding model</h3>
@@ -1656,7 +1666,32 @@ export function EmbedDefault() {
           with the old model won't match new queries. Re-embed to rebuild every module's index
           with the current model. It runs in the background and can take a while.
         </p>
-        <Button variant="outline" busy={reembed.isPending} onClick={() => reembed.mutate()}>
+        {/* A stuck recall store (#944): the embedding model changed under vectors built at the
+            old width, and the lazy heal either hasn't run or couldn't. Named here because this
+            is the screen the operator is on when they change the model — a WARN line in the log
+            is not a surface. The cure is in `detail`, and it is *not* the button below:
+            "Re-embed everything" fans out to the modules' indexes, while recall is rebuilt by
+            the Maintenance card's "Memory facts re-embed" job. One action covering both is a
+            follow-up (#944). Identical on Docker and Kubernetes: the check is lazy, driven by
+            request handling, not container start. */}
+        {dimStuck && dim && (
+          <p
+            className="mb-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-warn"
+            data-testid="recall-dimension-warning"
+          >
+            <TriangleAlert size={13} className="mt-px shrink-0" />
+            <span>Cross-chat memory: {dim.detail}</span>
+          </p>
+        )}
+        <Button
+          variant="outline"
+          busy={reembed.isPending}
+          onClick={() =>
+            reembed.mutate(undefined, {
+              onSuccess: () => void recallDim.refetch(),
+            })
+          }
+        >
           <RefreshCw size={14} />
           Re-embed everything
         </Button>
@@ -1670,10 +1705,36 @@ export function EmbedDefault() {
               Re-embedding started — rebuilding in the background:
               <ul className="mt-1 flex flex-col gap-0.5">
                 {reembed.data.modules.map((m) => (
-                  <li key={m.module} className="flex items-center gap-1.5">
-                    <Dot tone={m.status === "started" ? "accent" : "danger"} />
-                    <span className="font-mono">{m.module}</span>
-                    <span>· {m.status === "started" ? "started" : "failed to start"}</span>
+                  <li key={m.module} className="flex flex-col gap-0.5">
+                    <span className="flex items-center gap-1.5">
+                      <Dot
+                        tone={
+                          m.status === "started"
+                            ? "accent"
+                            : m.status === "refused"
+                              ? "dim"
+                              : "danger"
+                        }
+                      />
+                      <span className="font-mono">{m.module}</span>
+                      {/* Three states, not two (#848, #860): a module that *refuses* a rebuild
+                          is telling you your data is intact and its source is not — the
+                          opposite of a failure, and it used to render as one. */}
+                      <span>
+                        ·{" "}
+                        {m.status === "started"
+                          ? "started"
+                          : m.status === "refused"
+                            ? "refused — nothing was rebuilt"
+                            : "failed to start"}
+                      </span>
+                    </span>
+                    {m.status === "refused" && (
+                      <span className="pl-3.5 text-ink-faint">
+                        {m.reason ? `${m.reason}. ` : ""}Your vectors are untouched. Re-run it
+                        with force from the module’s own page if the source really is empty.
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>

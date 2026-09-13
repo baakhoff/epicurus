@@ -65,14 +65,20 @@ private deployment.
 ## Secrets
 
 Secrets (API keys, OAuth client secrets, tokens) are stored in **OpenBao**, not
-in environment files or git. The compose stack runs OpenBao in dev mode for local
-development; a production deployment uses a non-dev OpenBao. Modules fetch their
-own secrets from OpenBao at runtime.
+in environment files or git. Modules never hold them: they fetch their own secrets
+through the core at runtime.
 
-> **Warning — dev mode is in-memory.** Restarting the `openbao` container wipes
-> every stored secret; re-seed them afterwards. A persistent, non-dev OpenBao
-> (file storage, init + unseal) replaces this when OpenBao becomes the live
-> credential source (Phase 3).
+The shipped stack runs a **persistent, non-dev OpenBao** — file storage, a one-time
+bootstrap that initialises and seals it, and a sidecar that unseals it on every
+start. Secrets survive a restart. See
+[Secrets (OpenBao)](../infrastructure/secrets.md) for the bootstrap, the policy and
+the app token.
+
+> **Warning — the unseal key is the only way back in.** The bootstrap writes
+> `OPENBAO_UNSEAL_KEY` and `OPENBAO_TOKEN` into `infra/compose/.env.secrets` (which
+> is gitignored). Copy the unseal key into a password manager before running the
+> stack unattended: without it, a backup of the vault volume is unreadable. See
+> [Backup and restore](../infrastructure/backup-and-restore.md).
 
 > **AI access.** Modules do not hold model API keys. All AI/LLM access goes
 > through the core, which owns the model keys and routing — so there is one place

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -108,19 +109,23 @@ class _StatefulQdrant:
         self.created: list[int] = []
         self.dropped = 0
         self.stored: list[list[float]] = []
+        # Several named vectors: a shape with no single width to compare against (#944).
+        self.multi_named = False
+        self.get_collection_calls = 0
 
     async def collection_exists(self, name: str) -> bool:
         return self.dim is not None
 
     async def get_collection(self, name: str) -> Any:
         assert self.dim is not None  # only called when the collection exists
-        return SimpleNamespace(
-            config=SimpleNamespace(
-                params=SimpleNamespace(
-                    vectors=VectorParams(size=self.dim, distance=Distance.COSINE)
-                )
-            )
+        self.get_collection_calls += 1
+        params = VectorParams(size=self.dim, distance=Distance.COSINE)
+        vectors: Any = (
+            {"text": params, "title": VectorParams(size=8, distance=Distance.COSINE)}
+            if self.multi_named
+            else params
         )
+        return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(vectors=vectors)))
 
     async def create_collection(self, name: str, *, vectors_config: VectorParams) -> None:
         self.dim = vectors_config.size
@@ -194,3 +199,28 @@ async def test_reindex_rebuilds_at_the_current_width_without_a_heal() -> None:
     assert qdrant.dim == 1536
     assert all(len(v) == 1536 for v in qdrant.stored)
     assert qdrant.dropped == 1  # by reindex itself, not by a drift heal
+
+
+async def test_a_width_that_could_not_be_read_is_never_cached_as_confirmed() -> None:
+    """#944, in the notes twin: unconfirmed must not read as confirmed.
+
+    Caching the *requested* width after failing to read the *actual* one claims a check that
+    never happened — so every later write would skip the check for the process's lifetime while
+    each upsert kept failing. The indexer must re-read instead.
+    """
+    qdrant = _StatefulQdrant()
+    platform = _WidthPlatform(768)
+    idx = _indexer(qdrant, platform)
+    await idx.index_note("a", "# A\n\nbody a")
+
+    qdrant.multi_named = True
+    platform.dim = 1536
+    before = qdrant.get_collection_calls
+    # The upsert still fails (the collection really is 768-d) — that is honest; what must not
+    # happen is the collection being dropped on a guessed width, or the check being skipped.
+    for _ in range(2):
+        with contextlib.suppress(ValueError):
+            await idx.index_note("b", "# B\n\nbody b")
+
+    assert qdrant.get_collection_calls == before + 2  # re-read each time, never a false cache
+    assert qdrant.dropped == 0  # no width was guessed, so nothing was recreated on a guess

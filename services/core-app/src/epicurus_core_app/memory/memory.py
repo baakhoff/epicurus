@@ -16,7 +16,12 @@ from typing import Any
 from pydantic import BaseModel
 
 from epicurus_core_app.llm.models import ChatMessage
-from epicurus_core_app.memory.facts import UserFact, UserFactHit, UserFactStore
+from epicurus_core_app.memory.facts import (
+    RecallDimensionState,
+    UserFact,
+    UserFactHit,
+    UserFactStore,
+)
 from epicurus_core_app.memory.store import (
     ConversationStore,
     MessageRecord,
@@ -114,6 +119,10 @@ class Memory:
     async def recall(self, *, tenant: str, query: str, limit: int = 8) -> list[str]:
         """The agent's recall path: the text of the facts most relevant to ``query``."""
         return await self._facts.recall(tenant=tenant, query=query, limit=limit)
+
+    def recall_dimension(self, *, tenant: str) -> RecallDimensionState:
+        """What this process last observed about *tenant*'s fact collection width (#944)."""
+        return self._facts.recall_dimension(tenant=tenant)
 
     async def sessions(self, *, tenant: str) -> list[SessionSummary]:
         """The tenant's conversations, most recently active first."""

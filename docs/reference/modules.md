@@ -63,8 +63,18 @@ so the 37 tests that pin "the model reads a tool's own failure text" needed no c
 
 The wrapper still tells anticipated failures from real crashes **in the server log**, even
 though both reach the model as a `ToolError`: `KeyError`, `LookupError`, `ValueError`,
-`PermissionError`, and `FileNotFoundError` log at WARNING (expected traffic); anything else logs
-at ERROR with a traceback, so an operator watching the log still sees a genuine bug stand out.
+`PermissionError`, `FileNotFoundError`, `httpx.HTTPStatusError`, and `httpx.TransportError`
+log at WARNING (expected traffic); anything else logs at ERROR with a traceback, so an
+operator watching the log still sees a genuine bug stand out.
+
+The two `httpx` exceptions joined the set later (#920, amending ADR-0136): a tool that talks to
+a provider over HTTP — websearch's SearXNG client, mail's Gmail client — routinely sees a
+4xx/5xx, a timeout, or a refused connection as a normal cost of doing business (an expired
+token, a rate limit, a provider blip), not a bug in the tool. `HTTPStatusError` covers the
+status-code family and `TransportError` the connection/timeout family; `TooManyRedirects` and
+a decoding error stay outside both and still log at ERROR as genuine bugs. A tool is always
+free to catch a specific `httpx` exception itself and translate it into a more model-actionable
+message before it reaches this wrapper.
 
 ### `add_manifest_route`
 
@@ -176,6 +186,45 @@ the module's own door (`epicurus_core.schema_verdict`):
 | **older** | applied, with a warning; the store owns any field-level migration |
 | **newer** | **409** — refused whole, never half-applied |
 | a different module | **409** |
+
+### Errors on `/import` (#918)
+
+Every non-2xx response **`POST /import`** can produce carries a JSON body with a `detail`
+string — never a bodyless response. A schema refusal already answered this way
+(**409**, `detail` names
+the incompatibility); since #918 an exception the store's `import_` raises and does *not* turn
+into a deliberate `HTTPException` is caught at the route and answered the same way: **500**,
+`detail: "<exception type>: <message>"`. A deliberate one passes through untouched, with its
+own status. (The guarantee is `/import`'s alone: `GET /export` and `GET /export/blobs` are
+`StreamingResponse`s whose status line is on the wire before the generator runs, and
+`PUT /import/blobs/{id}` answers a malformed body with **400** but leaves anything else to
+Starlette's default.) Before this, an unhandled exception escaped as
+Starlette's default 500 — `text/plain`, no JSON — so the core's import report had nothing the
+module said and the operator's only recourse was `docker compose logs`. A malformed request
+(an unreadable line, a truncated blob body) is still **400** with `detail` naming what broke,
+unchanged. Write a store's own domain errors as readable sentences — they reach the operator's
+report line verbatim, the same courtesy `ValueError`/`HTTPException` already got.
+
+### Column-metadata-backed stores — `epicurus_core.portability_columns.PortableTable` (#918)
+
+A store whose travelling table is a plain SQLAlchemy `Table` — read and written generically,
+off the table's own column metadata rather than field by field — should build its table specs from
+`PortableTable` (`table_of(Model)` for the `Table`) rather than reinventing the
+encode/decode/normalize loop. It is what `calendar` and the core's own core-data set do, and it
+carries the #903 null-normalisation rule (a `NULL` in a column the model gives a Python-side
+default, with no `server_default`, is filled rather than travelling as `NULL` and failing a
+fresh target's `NOT NULL`) for free. A store that instead **names its travelling fields
+explicitly**, each with its own fallback — whether through a domain API (`tasks`, `knowledge`,
+`storage`) or as a per-table column list written out in the module (`notes`) — has no need of
+it: that shape never had the bug `PortableTable` fixes, because it never passes an *absent*
+field through to the database as an explicit `None` in the first place.
+
+`portability_columns` is a **submodule, not a package-root export** — it imports SQLAlchemy,
+which `epicurus_core` itself does not depend on (a module with no database, like `websearch`,
+must be able to `import epicurus_core` without one). Import it directly:
+`from epicurus_core.portability_columns import PortableTable, table_of` — the same pattern as
+`epicurus_core.db`. Every module that reaches for it already declares SQLAlchemy for its own
+store.
 
 ### Rules
 

@@ -194,6 +194,19 @@ class PortabilityService:
         # be closed the moment after). Hold a reference so the loop cannot garbage-collect a
         # running task out from under the operator — the #376 lesson, in miniature.
         self._tasks: set[asyncio.Task[None]] = set()
+        # One lock per job id, serializing :meth:`remove` against :meth:`start_apply` (#918).
+        # Both do a read-then-act: check the row, then either flip it to ``running`` and spawn
+        # the applier, or ``rmtree`` its staging directory and delete it. Without a lock a
+        # ``remove`` between another request's read and its write can delete the row (and the
+        # directory an apply is about to open) out from under a job that has just been told to
+        # start — same tenant, two presses, one job. Keyed by id rather than a single service
+        # lock: unrelated jobs (even of the same tenant) never wait on each other.
+        self._job_locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, job_id: str) -> asyncio.Lock:
+        """This job's lock, created on first use. No ``await`` runs between lookup and
+        insertion, so two concurrent callers can never race each other into creating two."""
+        return self._job_locks.setdefault(job_id, asyncio.Lock())
 
     # ── staging ──────────────────────────────────────────────────────────────
 
@@ -227,6 +240,7 @@ class PortabilityService:
                 shutil.rmtree, str(self.job_dir(tenant, job.id)), ignore_errors=True
             )
             await self._jobs.delete(tenant=tenant, job_id=job.id)
+            self._job_locks.pop(job.id, None)
             removed += 1
         if removed:
             log.info("swept expired portability jobs", tenant=tenant, jobs=removed)
@@ -246,16 +260,24 @@ class PortabilityService:
         turn a running apply into a silent one. There is no cancel here — an apply is
         additive and half-applying is a real state, so stopping one mid-flight would need a
         contract of its own, not a delete.
+
+        Guarded by this job's own lock (#918): without it, a ``POST /apply`` racing this call
+        could read the row as ``staged`` here — passing the check above — and only flip it to
+        ``running`` (and spawn the background applier) *after* this method has already
+        ``rmtree``'d its staging directory and deleted the row out from under it. The lock
+        makes the two operations serialize instead of interleave, whichever one wins the race.
         """
-        job = await self._jobs.get(tenant=tenant, job_id=job_id)
-        if job is None:
-            raise JobNotFound(f"no portability job {job_id!r}")
-        if job.status == "running":
-            raise JobRunning(f"job is {job.status}; it cannot be removed while it is working")
-        await asyncio.to_thread(
-            shutil.rmtree, str(self.job_dir(tenant, job_id)), ignore_errors=True
-        )
-        await self._jobs.delete(tenant=tenant, job_id=job_id)
+        async with self._lock_for(job_id):
+            job = await self._jobs.get(tenant=tenant, job_id=job_id)
+            if job is None:
+                raise JobNotFound(f"no portability job {job_id!r}")
+            if job.status == "running":
+                raise JobRunning(f"job is {job.status}; it cannot be removed while it is working")
+            await asyncio.to_thread(
+                shutil.rmtree, str(self.job_dir(tenant, job_id)), ignore_errors=True
+            )
+            await self._jobs.delete(tenant=tenant, job_id=job_id)
+        self._job_locks.pop(job_id, None)
         log.info("portability job removed", tenant=tenant, job=job_id, kind=job.kind)
 
     def _spawn(self, coro: Any) -> None:
@@ -704,18 +726,23 @@ class PortabilityService:
         list of steps. Building it in the background task instead would leave the card with an
         empty list for the first poll or two, and a progress display that arrives late is very
         nearly a progress display that never arrives.
+
+        Guarded by this job's own lock, the same one :meth:`remove` takes (#918): the read of
+        the row and the flip to ``running`` have to happen without a concurrent ``remove``
+        deleting the row (and the staging directory the applier is about to open) in between.
         """
-        job = await self._jobs.get(tenant=tenant, job_id=job_id)
-        if job is None:
-            return None
-        plan = _apply_plan(ImportPreview.model_validate(job.preview) if job.preview else None)
-        await self._jobs.update(
-            tenant=tenant,
-            job_id=job_id,
-            status="running",
-            progress=[as_json(e) for e in plan],
-        )
-        self._spawn(self._run_apply(tenant, job_id, Path(job.archive_path or ""), plan))
+        async with self._lock_for(job_id):
+            job = await self._jobs.get(tenant=tenant, job_id=job_id)
+            if job is None:
+                return None
+            plan = _apply_plan(ImportPreview.model_validate(job.preview) if job.preview else None)
+            await self._jobs.update(
+                tenant=tenant,
+                job_id=job_id,
+                status="running",
+                progress=[as_json(e) for e in plan],
+            )
+            self._spawn(self._run_apply(tenant, job_id, Path(job.archive_path or ""), plan))
         updated = await self._jobs.get(tenant=tenant, job_id=job_id)
         return updated
 

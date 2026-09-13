@@ -310,6 +310,16 @@ written again. The documented step after switching models is therefore unchanged
 and rebuilds every note from the database. Nothing queries this collection today, so the window
 in between degrades nothing.
 
+The cached width is one the indexer **confirmed**, never one it merely asked for (#944,
+ADR-0141). `config.params.vectors` can report one unnamed `VectorParams`, a mapping of named
+ones, or nothing; a single-entry mapping is still one unambiguous width and is read as such,
+while several named vectors have no single width to compare — so that collection is left alone
+*and* left uncached, with a warning, rather than cached as if it had been checked. Caching an
+unconfirmed width claims a check that never happened, which is exactly how the core's twin of
+this code silently stopped reconciling for the life of a process. Notes deliberately exposes no
+search method (attach-only), so the read-side naming `knowledge` search grew for #879 has no
+counterpart here.
+
 ## Configuration
 
 `NotesSettings` extends [`CoreSettings`](../reference/config.md):

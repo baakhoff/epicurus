@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from mcp.types import ContentBlock, TextContent
 from pydantic import ValidationError
 
+import epicurus_core.module as module_mod
 from epicurus_core.manifest import CONTRACT_VERSION, ModelSlot, WritesDocument
 from epicurus_core.module import EpicurusModule, ToolError, add_manifest_route
 
@@ -94,6 +98,86 @@ async def test_call_tool_raises_tool_error_for_a_failing_tool() -> None:
 async def test_call_tool_raises_tool_error_for_an_unknown_tool() -> None:
     with pytest.raises(ToolError, match="nope"):
         await _greeter().call_tool("nope", {})
+
+
+# ── anticipated vs. unexpected exceptions logged at the seam (ADR-0136, #920) ─────────
+
+
+class _RecordingLogger:
+    """Stand-in for the module-level ``logger``, so the WARNING/ERROR split is assertable.
+
+    Monkeypatched over ``epicurus_core.module.logger`` rather than using structlog's
+    ``capture_logs()``: the logger is bound once at import time, and other tests in the
+    same process may have already configured structlog and cached a bound logger, which
+    makes a capture-based assertion here unreliable (the same reasoning as
+    ``services/mail/tests/test_mail_poller.py``'s ``_RecordingLog``).
+    """
+
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+        self.errors: list[str] = []
+
+    def warning(self, event: str, **_kwargs: Any) -> None:
+        self.warnings.append(event)
+
+    def error(self, event: str, **_kwargs: Any) -> None:
+        self.errors.append(event)
+
+
+def _raise(exc: BaseException) -> EpicurusModule:
+    module = EpicurusModule("provider")
+
+    @module.tool()
+    def call() -> str:
+        raise exc
+
+    return module
+
+
+async def test_httpx_http_status_error_is_anticipated(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A provider's 4xx/5xx (an expired token, a rate limit) is expected traffic, not a
+    # crash — websearch's SearXNGClient and mail's Gmail client both raise this on purpose.
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(module_mod, "logger", recorder)
+    request = httpx.Request("GET", "https://searxng.internal/search")
+    response = httpx.Response(500, request=request)
+    error = httpx.HTTPStatusError("server error", request=request, response=response)
+
+    with pytest.raises(ToolError, match="server error"):
+        await _raise(error).call_tool("call", {})
+
+    assert recorder.warnings == ["tool raised an anticipated exception"]
+    assert recorder.errors == []
+
+
+async def test_httpx_transport_error_is_anticipated(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A refused connection or a timeout is likewise a provider communication failure, not a
+    # bug in the tool — covers the connect/read/timeout family without also swallowing
+    # TooManyRedirects/DecodingError, which stay genuine ERRORs.
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(module_mod, "logger", recorder)
+    error = httpx.ConnectError("connection refused")
+
+    with pytest.raises(ToolError, match="connection refused"):
+        await _raise(error).call_tool("call", {})
+
+    assert recorder.warnings == ["tool raised an anticipated exception"]
+    assert recorder.errors == []
+
+
+async def test_httpx_too_many_redirects_is_still_an_unexpected_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # RequestError but not TransportError: stays an ERROR-with-traceback, a genuine bug.
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(module_mod, "logger", recorder)
+    error = httpx.TooManyRedirects("too many redirects")
+
+    with pytest.raises(ToolError, match="too many redirects"):
+        await _raise(error).call_tool("call", {})
+
+    assert recorder.errors == ["tool crashed"]
+    assert recorder.warnings == []
 
 
 def test_http_app_builds() -> None:

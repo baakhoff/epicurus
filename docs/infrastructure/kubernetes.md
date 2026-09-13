@@ -520,12 +520,15 @@ shellchecked by the `shell-lint` gate like every other script in the repo.
 
 **Proven by the [`k8s-smoke` gate](../developer/testing.md#kubernetes-smoke-gate).**
 Every push installs this chart on a kind cluster and runs `infra/ci/smoke-assert.sh`
-— the same assertions the Compose `runtime-smoke` gate runs — plus the OpenBao
-bootstrap Job and unseal loop, the web shell's `/platform/` proxy,
-`CONTAINER_RUNTIME=auto` resolving to the Kubernetes arm inside a pod, and a
-confirmed module removal scaling that module's Deployment to zero through the
-chart's Role. It is not a required check until it has been green for two weeks
-(#894).
+— the same assertions the Compose `runtime-smoke` gate runs, including the web
+shell's `/platform/` proxy, a file round trip on the RWO PVC and a KV-cache change
+that rollout-restarts a StatefulSet — plus the OpenBao bootstrap Job and unseal
+loop, the `minio-init` bucket seed, `CONTAINER_RUNTIME=auto` resolving to the
+Kubernetes arm inside a pod, a confirmed module removal scaling that module's
+Deployment to zero through the chart's Role, and (since #919) a `helm upgrade` over
+the running release, after which every module is still available and the secret
+stored earlier is still readable. It is not a required check until it has been
+green for two weeks (#894).
 
 ### Upgrading
 
@@ -639,19 +642,16 @@ See [Secrets (OpenBao)](secrets.md) for what lives in the vault.
   `OLLAMA_FLASH_ATTENTION`) in values instead — a `helm upgrade` restarts the pod
   with them.
 - **No observability stack.** Pods carry scrape annotations and there is an
-  optional PodMonitor; rules, dashboards and alert routing on Kubernetes are
-  phase 2.
-- **No backup/restore.** `infra/backups/` is compose-shaped (it loops over Docker
-  volumes). PVC-aware backup is a filed follow-up; until then, back up
-  `epicurus-openbao` and snapshot the PVCs with your cluster's own tooling.
+  optional PodMonitor; rules, dashboards and alert routing on Kubernetes are a
+  filed follow-up (#896).
+- **No backup/restore on Kubernetes.** `infra/backups/` is compose-shaped: it
+  addresses Docker named volumes and the host directory `EPICURUS_FILES_ROOT` may
+  point at. A PVC-aware backup — a `CronJob` in this chart and the restore runbook
+  to match — is the open half of #895. Until then, back up the `epicurus-openbao`
+  Secret (it holds the unseal key) and snapshot the PVCs with your cluster's own
+  tooling. See [Backup and restore](backup-and-restore.md).
 - **No `/ready` distinct from `/health`.** Both probes hit the same endpoint, so a
   service that is up but not yet warm still reports ready.
-- **No `helm upgrade` proof.** The [`k8s-smoke`](../developer/testing.md#kubernetes-smoke-gate)
-  gate boots this chart on a kind cluster on every push, so the stack is known to
-  come up — but only ever as a *fresh* install. A second install into the same
-  cluster (`helm upgrade`, or a reinstall over surviving PVCs) is still unproven,
-  and the OpenBao `DAC_OVERRIDE` defect was exactly that class: fine on a fresh
-  volume, a crash-loop on a populated one.
 
 ## What is *not* in the chart, on purpose
 

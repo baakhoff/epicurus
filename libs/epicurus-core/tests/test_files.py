@@ -302,12 +302,16 @@ def test_build_s3_constructs() -> None:
 
 # ── S3FileStore (integration: requires Docker/MinIO) ──────────────────────────
 
+MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"
+
 
 @pytest.mark.integration
 async def test_s3_round_trip() -> None:
     from testcontainers.minio import MinioContainer
 
-    with MinioContainer() as minio:
+    # Docker Hub no longer serves minio/minio (the testcontainers default); pin the stack's
+    # Quay image (infra/compose/docker-compose.yml) so the suite pulls from the same place.
+    with MinioContainer(image=MINIO_IMAGE) as minio:
         store = S3FileStore(
             url=f"http://{minio.get_container_host_ip()}:{minio.get_exposed_port(9000)}",
             access_key=minio.access_key,

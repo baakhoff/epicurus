@@ -14,6 +14,9 @@
 #
 #   * core-app comes up healthy and discovers every module via module_urls     (#68)
 #   * each module's status_url is reachable THROUGH core                       (#92)
+#   * the web shell proxies /platform/ to the core through the runtime's DNS    (#891)
+#   * the tenant file space round-trips write/read/list on its real storage     (#919)
+#   * a KV-cache change restarts the LLM runtime through the container seam     (#307)
 #   * one MCP tool round-trips through core
 #   * an attachable module's chat-attachment picker round-trips through core    (#136)
 #   * a module event reaches the durable log and the raw feed                   (#662)
@@ -29,8 +32,11 @@
 #   log / ok / die      the output helpers (die must exit non-zero)
 #   restart_openbao     restart the vault, block until it is unsealed and healthy
 #   restart_core_app    restart core-app, block until it is healthy again
+#   settle_llm_runtime  block until the Ollama workload is back after a restart
 #   EXPECT_MODULES      space-separated module names this deployment should have
 #                       (`smoke_modules` below derives the canonical list)
+#
+# Every hook named above is checked by tests/test_smoke_gates.py against both gates.
 
 # The module set both runtimes are gated on, derived from the root compose
 # `include:` list (services/<name>/...) minus the core app and the web shell — so a
@@ -68,6 +74,58 @@ smoke_assert() {
     esac
   done
   ok "every module reachable through core (live status where declared)"
+
+  # The web shell, on every runtime. nginx derives its upstream resolver from the
+  # container's own /etc/resolv.conf at start (#891) — Docker's embedded DNS under
+  # Compose, cluster DNS in a pod — and when that is wrong BOTH probes stay green
+  # while every proxied request dies at name resolution. Only a live boot can ask.
+  # It lived in the Kubernetes gate alone until #919; the Compose gate never even
+  # started `web`, so the Docker half of the same code path was ungated.
+  http -f "http://web:8080/healthz" >/dev/null || die "web /healthz unreachable or non-200"
+  winfo="$(http "http://web:8080/platform/v1/info" || true)"
+  printf '%s' "$winfo" | grep -q '"core_app_version"' \
+    || die "web did not proxy /platform/ to the core (nginx resolver wrong for this runtime?): $winfo"
+  ok "the web shell proxies /platform/ to the core through the runtime's own DNS (#891)"
+
+  # The tenant file space, through the platform API onto whatever really backs it: a
+  # named volume under Compose, a ReadWriteOnce PVC in a cluster. Unit tests drive
+  # LocalFileStore directly and so say nothing about the mount the deployment hands the
+  # core — and the failure is uid-shaped (the core runs as 10001, ADR-0069), which only
+  # a real filesystem can show. The Compose gate additionally round-trips a *declared
+  # external mount* (#731); this is the tenant tree, which every runtime has.
+  FILE_PATH="smoke-files-$$.txt"
+  fw="$(http -X PUT "http://core-app:8080/platform/v1/files/write?path=$FILE_PATH" \
+    -H 'Content-Type: application/json' -d '{"content":"file space round trip"}' || true)"
+  printf '%s' "$fw" | grep -q "\"path\":\"$FILE_PATH\"" \
+    || die "writing into the tenant file space failed (volume/PVC not writable by uid 10001?): $fw"
+  fr="$(http "http://core-app:8080/platform/v1/files/read?path=$FILE_PATH" || true)"
+  printf '%s' "$fr" | grep -q 'file space round trip' \
+    || die "read-after-write through the tenant file space did not round-trip: $fr"
+  fl="$(http "http://core-app:8080/platform/v1/files/list" || true)"
+  printf '%s' "$fl" | grep -q "\"name\":\"$FILE_PATH\"" \
+    || die "the file just written is not listed at the tenant root: $fl"
+  ok "the tenant file space round-trips write/read/list on its real storage (#919)"
+
+  # The operator's KV-cache choice is applied by *restarting* the LLM runtime through
+  # the container-runtime seam (#307, #891, ADR-0134): Docker via docker-proxy-core
+  # under Compose, a rollout-restart through the namespace-scoped Role in a cluster.
+  # `applied:true` is the whole assertion — it means a workload was found and actually
+  # restarted, which is the one thing the seam's mock-transport unit tests cannot say.
+  # It does NOT claim the new value reached the server: in a cluster the env file sits
+  # on an emptyDir only the core can see (a documented limitation, see
+  # docs/infrastructure/kubernetes.md#known-limitations). The restart is the assertion.
+  # Set, then clear, so the shared runtime state is left as this run found it.
+  kv="$(http -X PUT "http://core-app:8080/platform/v1/llm/prefs/kv-cache-type" \
+    -H 'Content-Type: application/json' -d '{"value":"q8_0"}' || true)"
+  printf '%s' "$kv" | grep -q '"applied":true' \
+    || die "the KV-cache change was staged but not applied — the restart path is broken: $kv"
+  ok "a KV-cache change restarted the LLM runtime through the container-runtime seam (#307)"
+  http -X PUT "http://core-app:8080/platform/v1/llm/prefs/kv-cache-type" \
+    -H 'Content-Type: application/json' -d '{"value":null}' >/dev/null 2>&1 || true
+  # Both calls above restart the LLM workload. A later assertion does reach it — the
+  # automations run (#666) goes agent -> LLM -> Ollama — so block until it is back
+  # rather than racing a cold container/pod from here on.
+  settle_llm_runtime
 
   # Messaging foundation (ADR-0058): the module's status must report the active bridge, proving
   # the provider seam is wired at runtime. The inbound->turn->outbound path itself needs a model,

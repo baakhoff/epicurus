@@ -13,8 +13,8 @@ The edge gateway **only routes; it does not authenticate** (ADR-0008), and neith
 gateway root and its nginx **proxies `/platform/v1/*` straight to `core-app`** — agent
 runs, the Files browser, OAuth connect flows, model and provider-key settings. So the
 moment the web entrypoint is reachable off-box, **everything the UI can do is reachable
-by anyone who can reach it.** There is no login screen behind it yet (operator identity
-is the Phase-5 Identity component).
+by anyone who can reach it.** There is no login screen behind it yet — operator identity
+is a post-1.0 component, not something this stack has today.
 
 Two rules follow, and the recipes below all obey them:
 

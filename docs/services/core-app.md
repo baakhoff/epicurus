@@ -1829,13 +1829,17 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   ladder (module data first, then web search, then — since #739 — *reading* a link the message
   carries instead of guessing at what is behind it, keeping the source URL and retrieval date
   on anything filed into the knowledge base, and saying plainly what the link did not yield;
-  never an unsourced guess, #703); resolved per turn
-  and injected first in `Agent._assemble`. **Porting note (#742):** these are prompt *text*,
-  not code — a tenant that has already replaced the default via `PUT /agent/instructions` does
-  not pick up new rules automatically. An operator running a heavily customized prompt should
-  port the verify-before-mutate/recover-on-not-found paragraph (or the gist of it) into their
-  own instructions if they want the same behavior; there is no mechanism that layers the shipped
-  default's rules onto a custom one.
+  never an unsourced guess, #703) — extended (#920, #936) so a search tool reporting **degraded
+  or unavailable** search (not a clean empty result) is narrated as such ("search is down right
+  now"), rather than quietly folded into the empty-result wording and answered from stale
+  training data with a caveat; resolved per turn
+  and injected first in `Agent._assemble`. **Porting note (#742, extended by #920):** these are
+  prompt *text*, not code — a tenant that has already replaced the default via
+  `PUT /agent/instructions` does not pick up new rules automatically. An operator running a
+  heavily customized prompt should port the verify-before-mutate/recover-on-not-found paragraph
+  and the degraded-search sentence (or the gist of them) into their own instructions if they
+  want the same behavior; there is no mechanism that layers the shipped default's rules onto a
+  custom one.
 - **Postgres `agent_instructions_versions`** — snapshots of the base prompt (ADR-0046 via
   ADR-0093 §3): `id`, `vid`, `tenant`, `content`, `created_at`. Each `set_instructions` records the
   prompt it **replaced** (the first edit therefore captures the shipped default), deduplicated,

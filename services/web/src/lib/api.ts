@@ -71,7 +71,7 @@ import {
   TimezonePrefs,
   type ChannelPrefs,
   type PowerState,
-  type SavedModelOverride,
+  type SavedModelOverrideInput,
 } from "@/lib/contracts";
 import { epFetch } from "@/lib/http";
 import { parseFrame, sseRequest } from "@/lib/sse";
@@ -230,14 +230,32 @@ export const api = {
       body: JSON.stringify({ model }),
     }),
   // Re-embed everything (#332): fan out to every reindexable module's /reindex so existing
-  // vectors are rebuilt with the current embedding model. Returns a per-module status.
+  // vectors are rebuilt with the current embedding model. Returns a per-module status —
+  // "started", "refused" (the module declined; `reason` says why, e.g. the mass de-index fuse
+  // found its source empty), or "error". A refusal is not a failure and must not read as one
+  // (#848, #860), so `reason` is carried rather than dropped.
   reembed: () =>
     request(
       z.object({
-        modules: z.array(z.object({ module: z.string(), status: z.string() })),
+        modules: z.array(
+          z.object({ module: z.string(), status: z.string(), reason: z.string().optional() }),
+        ),
       }),
       "/platform/v1/modules/reembed",
       { method: "POST" },
+    ),
+  // What the core's recall store last observed about its vector width (#944, ADR-0141). An
+  // embedding model with a different output size makes every stored vector unqueryable; the
+  // fact store heals that in place, and this names the cases it could not.
+  recallDimension: () =>
+    request(
+      z.object({
+        status: z.enum(["ok", "healed", "changed", "unreadable"]),
+        stored_dim: z.number().nullish(),
+        expected_dim: z.number().nullish(),
+        detail: z.string(),
+      }),
+      "/platform/v1/agent/memory/dimension",
     ),
   // Maintenance orchestrator (#383, ADR-0060): the registered jobs + schedule + last run + any
   // in-flight run, and the manual "run everything" trigger that starts the background jobs as
@@ -541,17 +559,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ model }),
     }),
-  // Correct what the core believes a saved hosted model can do (#711) — LiteLLM's static cost
-  // map omits some ids and mislabels others, which makes the image gate refuse a vision-capable
-  // model. `vision: "auto"` with a null context_length clears the override back to the map's
-  // answers. 404s for an id that isn't saved: an override is a property of a saved row, never a
-  // way to create one.
-  setSavedModelOverride: (model: string, override: SavedModelOverride) =>
+  // Correct what the core believes a saved hosted model can do (#711, extended by ADR-0140 to
+  // tool calling and the model's role) — the shipped catalogue omits some ids and mislabels
+  // others, which makes the image gate refuse a vision-capable model, hides tool support, or
+  // leaves a chat-vs-embedding mix-up undetectable until a turn dies. All-`auto` with a null
+  // context_length clears the record back to the catalogue's answers *and* clears whatever the
+  // gateway learned from the provider. 404s for an id that isn't saved: an override is a
+  // property of a saved row, never a way to create one.
+  setSavedModelOverride: (model: string, override: SavedModelOverrideInput) =>
     request(z.object({ status: z.string() }), "/platform/v1/llm/saved-models/capabilities", {
       method: "PUT",
       body: JSON.stringify({
         model,
         vision: override.vision,
+        tools: override.tools,
+        role: override.role,
         context_length: override.context_length ?? null,
       }),
     }),

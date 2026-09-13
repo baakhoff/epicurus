@@ -45,16 +45,18 @@ from epicurus_core_app.agent.doc_preview import (
     DocumentToolLookup,
     PreviewFrame,
 )
+from epicurus_core_app.agent.failures import STREAM_FAILURES, classify_stream_failure
 from epicurus_core_app.agent.instructions import AgentInstructionsStore
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
-from epicurus_core_app.llm.gateway import LlmGateway
+from epicurus_core_app.llm.gateway import LlmGateway, with_no_tools_note
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.memory.extraction import FactExtractor
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
+from epicurus_core_app.memory.facts import RecallDimensionError
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.profile import StandingProfileStore
 from epicurus_core_app.memory.store import EphemeralSessionStore
@@ -227,42 +229,10 @@ def _attach_images(convo: list[ChatMessage], images: list[ImagePart]) -> list[Ch
     return convo
 
 
-# Mid-stream failure handling (#453). When a streaming turn dies part-way — most often the local
-# model stopping mid-answer as it loads another model / evaluates a long prompt and the socket
-# read aborts — we keep the partial answer + activity instead of discarding the turn, and show a
-# friendly note rather than the raw litellm/aiohttp exception chain. Markers identify that
-# connection/stall class loosely (by exception type + message) so the agent needn't import
-# litellm's exception types; anything else keeps its own short text (e.g. "paused", which the web
-# keys on for its paused state).
-_STREAM_CONNECTION_MARKERS = (
-    "timeout",
-    "timed out",
-    "socket",
-    "apiconnection",
-    "connection",
-    "midstreamfallback",
-    "read error",
-    "econnreset",
-)
-_STREAM_STALLED_MESSAGE = (
-    "The model stopped responding before the answer was finished — it may have been busy loading "
-    "another model. Please try again."
-)
-_STREAM_INTERRUPTED_MESSAGE = "The answer was interrupted before it finished. Please try again."
-
-
-def _stream_failure_messages(exc: Exception) -> tuple[str, str]:
-    """Return ``(banner_detail, retained_note)`` for a mid-stream failure (#453).
-
-    For the connection/stall class both are the friendly "model stopped responding" message, so
-    the raw exception text never reaches the UI. For any other error the banner passes the
-    exception's own (short) text through — so signals the web relies on, like "paused", survive —
-    while a *retained* partial turn still gets a generic interrupted note rather than raw text.
-    """
-    blob = f"{type(exc).__name__}: {exc}".lower()
-    if any(marker in blob for marker in _STREAM_CONNECTION_MARKERS):
-        return _STREAM_STALLED_MESSAGE, _STREAM_STALLED_MESSAGE
-    return str(exc), _STREAM_INTERRUPTED_MESSAGE
+# Mid-stream failure handling lives in `agent.failures` (#453, #944, #947 — ADR-0142): what the
+# user is told when a streaming turn dies part-way, what a *retained* partial answer is annotated
+# with, and the metric label for the failure class. The agent decides only when to ask, and what
+# to do with the answer.
 
 
 def _tool_detail(arguments: dict[str, Any]) -> str | None:
@@ -987,8 +957,17 @@ class Agent:
             specs = [*specs, ASK_APPROVAL_SPEC]
             # Offer tools only to a model that can use them; otherwise the runtime errors and
             # the turn fails. A tool-less model just answers in text (the UI flags it).
-            can_use_tools = bool(specs) and await self._gateway.supports_tools(model, tenant_id)
+            tool_capable = await self._gateway.supports_tools(model, tenant_id)
+            can_use_tools = bool(specs) and tool_capable
             offer = specs if can_use_tools else None
+            # Retract the base prompt's "act through the tools you are given" when the *model*
+            # cannot call them, so it answers instead of narrating tool use it never made
+            # (#947). Conditioned on the model, not on `offer`: a deployment with no modules
+            # wired has nothing to retract, and saying so on every turn of a bare core would be
+            # noise. The sentence lives in the gateway beside the capability resolution that
+            # decided this; both turn paths reach it through one call.
+            if specs and not tool_capable:
+                convo = with_no_tools_note(convo)
             for _ in range(max_steps):
                 if rounds and guard.past_deadline():
                     # The turn's wall-clock budget is spent (#925). Never on the first round —
@@ -1251,22 +1230,34 @@ class Agent:
                         append_thinking(timeline, event.reasoning)
                         yield AgentEvent(type="thinking", text=event.reasoning)
         except Exception as exc:  # the response already started — degrade gracefully (#453)
-            log.warning("streaming turn failed", error=str(exc))
-            banner, note = _stream_failure_messages(exc)
+            failure = classify_stream_failure(exc, model=model)
+            # ERROR, not WARNING: a turn that could not answer is an operator's problem, and the
+            # raw exception belongs here — this is the only place it is ever written (#947).
+            log.error(
+                "streaming turn failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                reason=failure.reason,
+                model=model,
+            )
+            STREAM_FAILURES.labels(tenant=tenant, reason=failure.reason).inc()
             partial = "".join(parts)
             if not (partial.strip() or timeline):
-                # Nothing was produced before the failure — no partial worth keeping. Surface a
-                # friendly banner (or the error's own short text, e.g. "paused"), then stop.
-                yield AgentEvent(type="error", detail=banner)
+                # Nothing was produced before the failure — no partial worth keeping. Surface the
+                # operator-readable banner (or the gateway's own "paused" signal), then stop.
+                yield AgentEvent(type="error", detail=failure.banner)
                 return
             # Keep the partial answer + activity rather than discarding the turn: stream the note
-            # (the in-chat "friendly error"), persist the partial so a reopen still shows it, and
-            # finish the stream cleanly. The raw exception stays in the log only. `stopped=error`
-            # marks the turn incomplete without leaking internals (it is not surfaced to the user).
+            # (the in-chat "friendly error"), emit a *terminal* error event so the shell shows
+            # something happened instead of a reply that merely stops (#944 part 3), persist the
+            # partial so a reopen still shows it, and finish the stream cleanly. The raw exception
+            # stays in the log only; `stopped=error` is persisted so the inline "this reply was
+            # interrupted" affordance survives a reload or a re-attach that lands on history.
             lead = "\n\n" if partial.strip() else ""
-            yield AgentEvent(type="delta", text=f"{lead}{note}")
+            yield AgentEvent(type="delta", text=f"{lead}{failure.note}")
+            yield AgentEvent(type="error", detail=failure.banner)
             turn = AgentTurn(
-                content=f"{partial}{lead}{note}",
+                content=f"{partial}{lead}{failure.note}",
                 tools_used=tools_used,
                 stopped="error",
                 entity_refs=refs.refs,
@@ -1402,6 +1393,11 @@ class Agent:
                 entity_refs=[ref.model_dump() for ref in turn.entity_refs],
                 # Persist the process only when there is one — keep plain turns blob-free.
                 activity=None if turn.activity.is_empty() else turn.activity.model_dump(),
+                # Why the turn ended, when it did not end by answering (#944). A completed turn
+                # stores nothing, so the column stays NULL for the ordinary case and for every
+                # row written before this existed; "error" is what the shell renders the inline
+                # "this reply was interrupted" affordance from, after a reload included.
+                stopped=None if turn.stopped == "completed" else turn.stopped,
             )
         except Exception as exc:  # a failed write must not lose the answer
             log.warning("memory write failed", error=str(exc))
@@ -1584,6 +1580,13 @@ class Agent:
         embedder must not delay the first token, so it is time-boxed; on timeout or any error the
         turn proceeds with no recalled facts (the same best-effort degrade as the rest of
         assemble), rather than blocking until our interaction with the model itself stalls.
+
+        Degrading is fine; degrading *anonymously* is not (#944). A vector-width mismatch — the
+        operator switched the embedding model and the stored vectors were built by the old one —
+        is the one backend failure that no retry fixes and that the operator can act on, so it
+        is logged as itself, naming both widths and the cure, rather than as a generic backend
+        error carrying Qdrant's raw rejection text (#879). The same state is readable at
+        ``GET /platform/v1/agent/memory/dimension`` and rendered on the Models page.
         """
         if self._memory is None:
             return []
@@ -1599,6 +1602,15 @@ class Agent:
             log.warning(
                 "recall skipped: embed timed out",
                 timeout_s=self._recall_timeout_s,
+                elapsed_s=round(time.monotonic() - start, 2),
+            )
+            return []
+        except RecallDimensionError as exc:
+            # Named, not generic: the embedding model changed under a collection built at the
+            # old width. Nothing retries out of this — the heal or "Re-embed everything" does.
+            log.warning(
+                "recall skipped: embedding dimension changed",
+                reason=str(exc),
                 elapsed_s=round(time.monotonic() - start, 2),
             )
             return []
@@ -1767,8 +1779,11 @@ class Agent:
         max_steps = await self._effective_max_steps(tenant_id)
         # Offer tools only to a tool-capable model (else the runtime errors); a tool-less model
         # just answers in text.
-        offer = specs if specs and await self._gateway.supports_tools(model, tenant_id) else None
-        convo = list(messages)
+        tool_capable = await self._gateway.supports_tools(model, tenant_id)
+        offer = specs if specs and tool_capable else None
+        # A model that cannot call tools is told so, the same way the streamed path tells it,
+        # and on the same condition — tools exist, this model cannot use them (#947).
+        convo = with_no_tools_note(messages) if specs and not tool_capable else list(messages)
         tools_used: list[str] = []
         timeline: list[ActivityItem] = []
         refs = _RefCollector()

@@ -16,7 +16,12 @@ from typing import Any
 from pydantic import BaseModel
 
 from epicurus_core_app.llm.models import ChatMessage
-from epicurus_core_app.memory.facts import UserFact, UserFactHit, UserFactStore
+from epicurus_core_app.memory.facts import (
+    RecallDimensionState,
+    UserFact,
+    UserFactHit,
+    UserFactStore,
+)
 from epicurus_core_app.memory.store import (
     ConversationStore,
     MessageRecord,
@@ -74,13 +79,16 @@ class Memory:
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         activity: dict[str, Any] | None = None,
+        stopped: str | None = None,
     ) -> None:
         """Persist a message to the session transcript.
 
         ``entity_refs`` (assistant-emitted), ``attachments`` (user-supplied) and ``activity``
         (the assistant turn's thinking + tool steps, ADR-0041) are stored alongside so the
-        transcript renders them again. Messages are *not* indexed for cross-chat recall — the
-        recall corpus is the user-fact store, written deliberately (the ``remember`` tool and
+        transcript renders them again. ``stopped`` records why an assistant turn ended when it
+        did not end by answering (#944, ADR-0142), so a reopened transcript can still say the
+        reply was cut short. Messages are *not* indexed for cross-chat recall — the recall
+        corpus is the user-fact store, written deliberately (the ``remember`` tool and
         background extraction), not a dump of every turn (ADR-0045).
         """
         if not content:
@@ -93,6 +101,7 @@ class Memory:
             entity_refs=entity_refs,
             attachments=attachments,
             activity=activity,
+            stopped=stopped,
         )
 
     async def remember_fact(
@@ -110,6 +119,10 @@ class Memory:
     async def recall(self, *, tenant: str, query: str, limit: int = 8) -> list[str]:
         """The agent's recall path: the text of the facts most relevant to ``query``."""
         return await self._facts.recall(tenant=tenant, query=query, limit=limit)
+
+    def recall_dimension(self, *, tenant: str) -> RecallDimensionState:
+        """What this process last observed about *tenant*'s fact collection width (#944)."""
+        return self._facts.recall_dimension(tenant=tenant)
 
     async def sessions(self, *, tenant: str) -> list[SessionSummary]:
         """The tenant's conversations, most recently active first."""

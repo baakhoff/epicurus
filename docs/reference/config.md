@@ -85,7 +85,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `llm_temperature` | `LLM_TEMPERATURE` | `float \| None` | `None` | Sampling temperature passed to each chat completion (local + hosted). A blank env value means unset. |
 | `llm_top_p` | `LLM_TOP_P` | `float \| None` | `None` | Nucleus-sampling `top_p` passed to each chat completion (local + hosted). |
 | `llm_num_ctx` | `LLM_NUM_CTX` | `int \| None` | `None` | Ollama context-window size (`num_ctx`); applied to local models only. |
-| `llm_bootstrap_models` | `LLM_BOOTSTRAP_MODELS` | `str` | `auto` | First-boot model bootstrap (#773, ADR-0118): models the core ensures exist in the local runtime at startup, pulled in the background (never blocking readiness). `auto` = the effective chat + embedding defaults; blank = disabled (air-gapped / hosted-only builds; the CI smoke gate sets this); or an explicit comma-separated list. Hosted-prefixed ids are skipped. |
+| `llm_bootstrap_models` | `LLM_BOOTSTRAP_MODELS` | `str` | `auto` | First-boot model bootstrap (#773, ADR-0118, amended #923), pulled in the background (never blocking readiness). `auto` = seed an *empty* runtime with the effective chat + embedding defaults, then no-op on every later start once anything is installed (a deleted default stays deleted); blank = disabled (air-gapped / hosted-only builds; the CI smoke gate sets this); an explicit comma-separated list is a standing pin — ensured on *every* start regardless of what else is installed. Hosted-prefixed ids are skipped. |
 | `llm_catalog_url` | `LLM_CATALOG_URL` | `str` | `https://ollama.com/library` | Source the core parses the browsable model catalog from (#269). Point at a mirror for an air-gapped deployment. |
 | `llm_catalog_refresh_seconds` | `LLM_CATALOG_REFRESH_SECONDS` | `int` | `21600` (6h) | How often the background loop re-parses the catalog source. Floored to 60s. |
 | `llm_catalog_max_models` | `LLM_CATALOG_MAX_MODELS` | `int` | `0` | Cap on model families kept (the most-popular survive); `0` = unlimited. |
@@ -156,7 +156,7 @@ The **core** plus the file-owning module **knowledge** share **one** file tree �
 are the in-container paths under it. Since the file-space migration Phase 2 (ADR-0063) the
 **core** mounts the volume and owns the file index + the unified Files browser; **storage no
 longer mounts `/data`** (it reads the file space through the core file API — see
-[file space](files.md)), so its in-container root and scan/watch knobs are gone. Since Phase 4
+[file space](files.md)), so its in-container root and scan/watch knobs are gone. Since file-space Phase 4
 (#357/ADR-0065) **notes no longer mounts `/data`** either — it writes its `.md` mirror through
 the core file API, so only the core and knowledge still bind the volume.
 

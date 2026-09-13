@@ -27,7 +27,11 @@ from qdrant_client.models import (
 from epicurus_core import PlatformClient, get_logger, scope_collection
 from epicurus_knowledge.chunker import Chunk, chunk_note
 from epicurus_knowledge.db import DocIndex, NoteIndex
-from epicurus_knowledge.dimensions import CollectionDimensionGuard, EmbeddingDimensionChanged
+from epicurus_knowledge.dimensions import (
+    CollectionDimensionGuard,
+    EmbeddingDimensionChanged,
+    named_mismatch,
+)
 from epicurus_knowledge.fuse import FusePolicy, FuseTrip, IndexFuse
 from epicurus_knowledge.reader import DiskVaultReader, VaultReader
 
@@ -288,6 +292,11 @@ class KnowledgeIndexer:
         Qdrant collection.  Returns an empty list if the collection has not been
         created yet (i.e. no notes have been indexed).
 
+        Search deliberately **never rebuilds** — that is the indexer's job — but it does not
+        hand Qdrant's raw rejection back either: a query embedded at a new width against a
+        collection built at the old one raises :class:`EmbeddingDimensionMismatch`, which names
+        both widths and the cure (#879). The agent sees that sentence as the tool's error.
+
         Args:
             query: Natural-language question or search phrase.
             k: Maximum number of chunks to return.
@@ -300,12 +309,18 @@ class KnowledgeIndexer:
         [query_vec] = await self._platform.embed([query], model=model)
         # qdrant-client 1.14 removed the legacy `search`; `query_points` is the
         # current API (mirrors core-app's memory recall). Results are on `.points`.
-        response = await self._qdrant.query_points(
-            collection_name=self._collection,
-            query=query_vec,
-            limit=k,
-            with_payload=True,
-        )
+        try:
+            response = await self._qdrant.query_points(
+                collection_name=self._collection,
+                query=query_vec,
+                limit=k,
+                with_payload=True,
+            )
+        except Exception as exc:
+            named = await named_mismatch(self._qdrant, self._collection, query_dim=len(query_vec))
+            if named is not None:
+                raise named from exc
+            raise
         results: list[SearchHit] = []
         for hit in response.points:
             if not hit.payload:

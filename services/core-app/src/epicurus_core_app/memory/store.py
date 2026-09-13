@@ -69,6 +69,10 @@ class MessageRecord(BaseModel):
     # The assistant turn's process — thinking + tool steps (ADR-0041) — rendered as the
     # folded activity timeline. None on user messages and on pre-v0.19 assistant rows.
     activity: MessageActivity | None = None
+    # Why the turn stopped, when it did not stop by answering (#944, ADR-0142). "error" is what
+    # the shell renders its inline "this reply was interrupted" affordance from; None means the
+    # turn completed (or predates the column), which is the overwhelming majority of rows.
+    stopped: str | None = None
 
 
 class MessageMeta(BaseModel):
@@ -113,6 +117,11 @@ class StoredMessage(Base):
     attachments: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     # The assistant turn's thinking + tool steps (ADR-0041); null for user/old rows.
     activity: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # Why the assistant turn stopped, when it did not stop by answering (#944, ADR-0142) —
+    # "error", "max_steps", or one of the agent's other stop reasons. NULL on user messages, on
+    # a turn that completed normally, and on every row written before this column existed, so
+    # "is this turn incomplete?" is exactly "is this column set?".
+    stopped: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class StoredAttachment(Base):
@@ -189,6 +198,7 @@ class ConversationStore:
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         activity: dict[str, Any] | None = None,
+        stopped: str | None = None,
     ) -> int:
         """Persist a message; returns its id (used as the recall point id)."""
         async with self._session() as session:
@@ -200,6 +210,7 @@ class ConversationStore:
                 entity_refs=entity_refs,
                 attachments=attachments,
                 activity=activity,
+                stopped=stopped,
             )
             session.add(message)
             await session.commit()
@@ -288,6 +299,7 @@ class ConversationStore:
                     entity_refs=[EntityRef.model_validate(r) for r in (m.entity_refs or [])],
                     attachments=[Attachment.model_validate(a) for a in (m.attachments or [])],
                     activity=MessageActivity.model_validate(m.activity) if m.activity else None,
+                    stopped=m.stopped,
                 )
                 for m in rows
             ]

@@ -51,14 +51,20 @@ afterEach(() => {
 
 describe("Chat tool-capability hint", () => {
   it("warns when the selected local model can't use tools", async () => {
-    mockModelDetails.mockResolvedValue({ capabilities: ["completion", "vision"] });
+    mockModelDetails.mockResolvedValue({
+      capabilities: ["completion", "vision"],
+      supports_tools: false,
+    });
     render(<ChatScreen />, { wrapper });
-    await waitFor(() => expect(screen.getByText(/can't use tools/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText(/can't use tools/i).length).toBeGreaterThan(0));
     expect(mockModelDetails).toHaveBeenCalledWith("llama3.2");
   });
 
   it("shows no warning when the model supports tools", async () => {
-    mockModelDetails.mockResolvedValue({ capabilities: ["completion", "tools"] });
+    mockModelDetails.mockResolvedValue({
+      capabilities: ["completion", "tools"],
+      supports_tools: true,
+    });
     render(<ChatScreen />, { wrapper });
     // Let the details query resolve, then assert the hint is absent.
     await waitFor(() => expect(mockModelDetails).toHaveBeenCalled());
@@ -70,5 +76,17 @@ describe("Chat tool-capability hint", () => {
     render(<ChatScreen />, { wrapper });
     await waitFor(() => expect(mockModelDetails).toHaveBeenCalled());
     expect(screen.queryByText(/can't use tools/i)).toBeNull();
+  });
+
+  it("warns for a *hosted* model with no tool support (#947)", async () => {
+    // The old rule was `effectiveIsLocal && ...`, so this notice could never fire for a hosted
+    // id — which is exactly the case the owner hit. Capabilities are empty here too: a hosted
+    // model with no tools and no vision has nothing to badge, and list-emptiness must not be
+    // mistaken for "unknown" now that the core answers the question directly.
+    usePrefs.setState({ model: "openrouter/some/model" });
+    mockModelDetails.mockResolvedValue({ capabilities: [], supports_tools: false });
+    render(<ChatScreen />, { wrapper });
+    await waitFor(() => expect(screen.getAllByText(/can't use tools/i).length).toBeGreaterThan(0));
+    expect(mockModelDetails).toHaveBeenCalledWith("openrouter/some/model");
   });
 });

@@ -176,20 +176,29 @@ jobs:
     env:
       CHART: infra/k8s/epicurus
       HELM_VERSION: "3.16.4"
+      # Digests published by the projects themselves (get.helm.sh/…sha256sum, and
+      # kubeconform's release CHECKSUMS) and re-verified against a fetched tarball.
+      # Every `uses:` in this file is SHA-pinned; `curl | install` with no integrity
+      # check was the one supply-chain hole left in it (#919). Bumping a version
+      # means bumping its digest in the same commit, here and in k8s-smoke.
+      HELM_SHA256: "fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179"
       KUBECONFORM_VERSION: "0.6.7"
+      KUBECONFORM_SHA256: "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
       # Oldest Kubernetes the chart claims to support (Chart.yaml kubeVersion).
       KUBE_VERSION: "1.25.0"
       CRD_SCHEMAS: "https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Helm and kubeconform (pinned)
+      - name: Install Helm and kubeconform (pinned, checksummed)
         run: |
           set -euo pipefail
           curl -sSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o helm.tgz
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
           tar xzf helm.tgz linux-amd64/helm
           sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
           curl -sSL "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" -o kubeconform.tgz
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
           tar xzf kubeconform.tgz kubeconform
           sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
           helm version --short
@@ -338,10 +347,12 @@ jobs:
   # chart renders and schema-validates; it cannot prove the stack comes up, and
   # until this job existed nothing did — ADR-0135 says so in its own consequences.
   # This installs the chart on a kind cluster and runs infra/ci/smoke-assert.sh,
-  # the exact assertions runtime-smoke runs, plus the two things only a cluster
-  # can prove: that CONTAINER_RUNTIME=auto resolves to the Kubernetes arm inside a
-  # pod, and that a confirmed module removal scales that module's Deployment to
-  # zero through the namespace-scoped Role the chart renders (#891, ADR-0134).
+  # the exact assertions runtime-smoke runs, plus what only a cluster can prove:
+  # that CONTAINER_RUNTIME=auto resolves to the Kubernetes arm inside a pod, that a
+  # confirmed module removal scales that module's Deployment to zero and a KV-cache
+  # change rollout-restarts a StatefulSet — both arms of ADR-0134 — through the
+  # namespace-scoped Role the chart renders (#891), and that a `helm upgrade` over a
+  # running release keeps its state (#919).
   #
   # NOT a required check yet: the bar in #894 is "required once green two weeks
   # running". Until then a red here is a signal to investigate, not a merge block —
@@ -373,10 +384,14 @@ jobs:
           cluster_name: epicurus-ci
           wait: 180s
 
-      - name: Install Helm (pinned, same version as chart-validate)
+      - name: Install Helm (pinned + checksummed, same version as chart-validate)
+        env:
+          HELM_VERSION: "3.16.4"
+          HELM_SHA256: "fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179"
         run: |
           set -euo pipefail
-          curl -sSL "https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz" -o helm.tgz
+          curl -sSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz" -o helm.tgz
+          echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
           tar xzf helm.tgz linux-amd64/helm
           sudo install -m 0755 linux-amd64/helm /usr/local/bin/helm
           helm version --short

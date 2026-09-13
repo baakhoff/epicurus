@@ -19,8 +19,10 @@ from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.providers import is_hosted
 from epicurus_core_app.llm.saved_models import (
+    RoleOverride,
     SavedHostedModelStore,
     SavedModelOverride,
+    ToolsOverride,
     VisionOverride,
 )
 from epicurus_core_app.llm.variants import ModelVariantsResponse, VariantLookup
@@ -135,7 +137,15 @@ class SavedModel(BaseModel):
     # so a client renders badges from these and never has to merge the two itself (#711).
     context_length: int | None = None
     capabilities: list[str] = []
-    # What the operator set, so the editor round-trips. All-defaults = "trust the map".
+    # The resolved capability answers `capabilities` cannot express, because an empty list has
+    # to mean both "nothing to badge" and "we don't know" (ADR-0140). `role` drives the
+    # chat/embed pickers; `in_catalogue` is false for an id LiteLLM's map has never heard of,
+    # which is why such a row shows no context chip (#879).
+    role: str = "unknown"
+    in_catalogue: bool | None = None
+    # What the operator set, so the editor round-trips. All-defaults = "trust the map". Also
+    # carries `tools_learned` — what the gateway learned from the provider, which the sheet
+    # shows beside "Auto" so a learned "no tool support" is visible rather than mysterious.
     override: SavedModelOverride = SavedModelOverride()
 
 
@@ -152,10 +162,17 @@ class SaveModelRequest(BaseModel):
 
 
 class SaveModelOverrideRequest(BaseModel):
-    """Body for PUT /llm/saved-models/capabilities — one saved model's override (#711)."""
+    """Body for PUT /llm/saved-models/capabilities — one saved model's override (#711).
+
+    ``tools`` (#947) and ``role`` (#944) extend the same ``auto``/explicit vocabulary rather
+    than forking a new one. There is deliberately no field for the gateway's *learned* tool
+    answer: it is not the operator's to set, and any write here clears it (ADR-0140).
+    """
 
     model: str
     vision: VisionOverride = "auto"
+    tools: ToolsOverride = "auto"
+    role: RoleOverride = "auto"
     context_length: int | None = Field(default=None, gt=0)
 
 
@@ -309,19 +326,53 @@ def create_llm_router(
             hidden=hidden,
         )
 
+    async def _reject_wrong_role(model: str | None, *, want: str) -> None:
+        """400 if ``model``'s role is known and is not ``want`` (#944).
+
+        The write-time half of the role gate. It is not the whole fix — a row already stored
+        by an older build is still wrong, which is why the gateway refuses at *read* time too
+        (``_ensure_can_serve``) — but it is what stops the operator creating the state in the
+        first place, from the one screen that can. ``unknown`` is allowed through: the
+        catalogue is thin, and refusing an unlisted id here would make a perfectly good model
+        unselectable with no way around it.
+        """
+        if not model:
+            return
+        role = await gateway.model_role(model, default_tenant)
+        if role == "unknown" or role == want:
+            return
+        other = "an embedding model" if role == "embedding" else "a chat model"
+        needed = "a chat model" if want == "chat" else "an embedding model"
+        raise HTTPException(
+            status_code=400,
+            detail=f"{model!r} is {other}; this setting needs {needed}.",
+        )
+
     @router.put("/prefs/default")
     async def set_default(request: SetDefaultRequest) -> dict[str, str | None]:
-        """Set or clear the global default chat model for this tenant."""
+        """Set or clear the global default chat model for this tenant.
+
+        **400** for a model known to be an embedding model (#944): this used to write any
+        string at all, which is how a hosted embedding id became the chat default and every
+        turn died on an opaque provider 400.
+        """
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
+        await _reject_wrong_role(request.model, want="chat")
         await prefs.set_default(default_tenant, request.model)
         return {"status": "ok", "model": request.model}
 
     @router.put("/prefs/embed-default")
     async def set_embed_default(request: SetEmbedDefaultRequest) -> dict[str, str | None]:
-        """Set or clear the global default embedding model for this tenant."""
+        """Set or clear the global default embedding model for this tenant.
+
+        **400** for a model known to be a chat model — the mirror of ``/prefs/default``, and
+        what the Embedding-model card's old "a chat model will fail at embed time" warning
+        asked the operator to remember for themselves (#944).
+        """
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
+        await _reject_wrong_role(request.model, want="embedding")
         await prefs.set_embed_default(default_tenant, request.model)
         return {"status": "ok", "model": request.model}
 
@@ -423,6 +474,8 @@ def create_llm_router(
                     # Already override-resolved — ``gateway.show`` applies it (#711).
                     context_length=d.context_length,
                     capabilities=d.capabilities,
+                    role=d.role,
+                    in_catalogue=d.in_catalogue,
                     override=overrides.get(m, SavedModelOverride()),
                 )
                 for m, d in zip(ids, details, strict=True)
@@ -439,14 +492,21 @@ def create_llm_router(
         model. It affects **gating and display only**: routing, keys, and metering are
         untouched, and every model concern still lives in the core (constraint #8).
 
-        ``vision: "auto"`` with no ``context_length`` clears the override back to the map's
-        answers. **404** for an id the tenant hasn't saved — an override is a property of a
-        saved row, not a way to create one.
+        All-``auto`` with no ``context_length`` clears the override back to the catalogue's
+        answers, **and clears whatever the gateway learned** about tool support (ADR-0140) —
+        returning a control to Auto genuinely starts over, and the gateway learns again for
+        real if the provider rejects a tool list again. **404** for an id the tenant hasn't
+        saved — an override is a property of a saved row, not a way to create one.
         """
         if saved_models is None:
             raise HTTPException(status_code=503, detail="saved-models store not available")
         model = request.model.strip()
-        override = SavedModelOverride(vision=request.vision, context_length=request.context_length)
+        override = SavedModelOverride(
+            vision=request.vision,
+            tools=request.tools,
+            role=request.role,
+            context_length=request.context_length,
+        )
         if not await saved_models.set_override(default_tenant, model, override):
             raise HTTPException(status_code=404, detail=f"{model!r} is not a saved model")
         return {"status": "ok", "model": model}
@@ -458,6 +518,13 @@ def create_llm_router(
         Rejects anything that isn't a hosted id (a known ``<provider>/`` prefix) with 400, so a
         local ``hf.co/org/model:tag`` can never land here — the server-side half of the fix for
         the client's old ``includes("/")`` misclassification (#496).
+
+        It deliberately does **not** reject an embedding model, though #944 proposed it: since
+        #865 this one list is the tenant's hosted models for *both* roles — the Embedding-model
+        card picks from it too — so refusing an embedding id here would make a hosted embedding
+        model unreachable. The role is recorded on the row instead, and refused where it
+        actually matters: setting a default (``/prefs/default``) and running a turn
+        (``LlmGateway._ensure_can_serve``).
         """
         if saved_models is None:
             raise HTTPException(status_code=503, detail="saved-models store not available")

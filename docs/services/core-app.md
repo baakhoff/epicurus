@@ -38,7 +38,7 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | Method · Path | Purpose |
 | --- | --- |
 | `POST /platform/v1/agent/chat` | Run one turn (offer module tools → run tool calls over MCP → loop to an answer). The round bound is resolved **per turn** from the operator's stored pref, else the `AGENT_MAX_STEPS` env default (#297). The **model** is resolved per turn too (ADR-0113): the session's stored choice if it has one, else the request's `model` — so that field is the caller's default, not an override. Returns `AgentTurn`. |
-| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `doc_preview` (a slice of a document *as the model types it* — `text` carries a coalesced body delta and `preview` `{module, target?, title?}` names the document, #654/ADR-0121; purely ephemeral — see **The document typewriter** below) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
+| `POST /platform/v1/agent/chat/stream` | The same turn as **SSE**: an optional leading `readiness` (warming progress, ADR-0027) · `delta` (answer tokens) · `thinking` (chain-of-thought tokens, ADR-0041) · `doc_preview` (a slice of a document *as the model types it* — `text` carries a coalesced body delta and `preview` `{module, target?, title?}` names the document, #654/ADR-0121; purely ephemeral — see **The document typewriter** below) · `tool` (a tool ran — carrying `document` `{module, content, target, title}` when the module annotated that tool `writes_document`, so the shell can open the document pane, #541/ADR-0100/0101; on both the `running` and terminal frames, and never persisted into the turn's activity) · `awaiting_input` (the turn paused — for `ask_user` it carries `{run_id, question}`, ADR-0053; for a **draft-first send** it carries `{run_id, awaiting_kind: "draft_review", draft}`, ADR-0085/#563; for an **`ask_approval` pause** it carries `{run_id, awaiting_kind: "approval", summary, refs}`, #745/ADR-0117 — every shape additive, so a stale client ignores what it doesn't know) · `done` (final turn) · `error` (why the turn failed, in words written for the operator — never a provider payload; ADR-0142). **`error` is a reason, not an end**: a turn that failed after streaming a partial answer emits the note, then `error`, then `done` carrying the persisted turn (`stopped="error"`), so a client keeps reading for the terminal frame. A failure that produced nothing ends at `error` with no `done`. Each data frame carries an `id:` (a live-run seq) for re-attach. The turn runs **decoupled from this connection** (ADR-0055): a disconnect doesn't abort it — the answer still persists and the client re-attaches. A turn already running for the session yields **409** (+ `X-Run-Id`). The web shell speaks this. |
 | `GET /platform/v1/agent/sessions` | List conversations (title + last-active + count), each enriched with its persisted **model override** (`model`; #707, null if never set — see `PUT .../model` below) alongside the existing automation badge/grouping fields. Either enrichment degrades independently on a lookup hiccup — the list itself is never emptied by one. **Invisible sessions are excluded** (#772), and every list read also runs the **orphan sweep**: any flagged session not named by the optional `?active=<session_id>` query param (the invisible chat the requesting client is currently *in*) and with no turn in flight is fully erased via the #771 cascade — so a crash never strands an invisible chat on disk. The sweep is best-effort; a hiccup never fails the list. |
 | `PUT /platform/v1/agent/sessions/{id}/model` | An explicit picker change for **this** session (#707): `{model}` persists it, `{model: null}` clears the override (picking "core default" back). Writes the same field the `set_chat_model` tool does — the two paths share one owner of truth, whichever writes last stands. **400** on a blank (non-null) model; **503** if no model store is wired. Not validated against the model catalog — the picker only ever offers a real name, the same two sources (`GET /llm/models` + `GET /llm/saved-models`) the tool resolves against. |
 | `PUT /platform/v1/agent/sessions/{id}/ephemeral` | Flag a session **invisible** (#772) — see *Invisible chats* below. Idempotent (a mid-chat reload re-marks so the flag is server truth, not client memory); **503** if no flag store is wired. Returns `{ephemeral: true}`. There is deliberately **no un-mark**: toggling invisibility off *is* an exit, and every exit deletes (`DELETE /sessions/{id}`). |
@@ -62,10 +62,16 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions` | The agent's editable **base system prompt** (#497, ADR-0083). `GET` → `{instructions, is_default}` (the effective prompt — stored value else the shipped default — and whether it's the default). `PUT {instructions}` sets it; a `null`/blank body **resets** to the default. Optional `tenant_id`. Resolved per turn (no restart) and injected as the **first** message of every turn (chat + headless), ahead of recalled memory and attached context, so the compaction prefix rule protects it. Persisted in `agent_instructions`; edited in **Settings → Assistant instructions**. These routes read and write the **base prompt alone** — the enabled playbooks composed onto it for the turn (ADR-0093 §4, see *Governed playbooks* below) are not part of this editable document. Each `PUT` snapshots the prompt it replaced, so an edit is undoable (ADR-0046). |
 
 Tools are offered to the model **only when it can use them**: the loop checks the resolved
-model's capabilities (`gateway.supports_tools` → `/api/show`; hosted providers are assumed
-capable) and, for a tool-less local model, calls without tools so the turn falls back to a
-plain text answer instead of the runtime erroring. The web shell surfaces the same fact as a
-"can't use tools" hint in the composer.
+model's capabilities (`gateway.supports_tools` — see *Capability resolution* below; hosted
+models are no longer assumed capable, they are resolved and, where a provider refuses a tool
+list, learned) and, for a tool-less model of either kind, calls without tools so the turn falls
+back to a plain text answer instead of the provider erroring. Such a turn also carries one extra
+system line (`gateway.NO_TOOLS_SYSTEM_NOTE`, inserted inside the protected system prefix) saying
+there are no tools and not to claim otherwise — the base prompt's "act through the tools you are
+given" would otherwise stand unretracted and invite narrated tool use (#947). The note is
+conditioned on the *model*, not on an empty registry: a deployment with no modules wired has
+nothing to retract. The web shell surfaces the same fact as a "can't use tools" hint in the
+composer and beside the model picker, for a hosted model as well as a local one.
 
 **Image attachments are gated on vision support the same way — but stricter (#633).** An
 uploaded `image/*` file never goes through the text-attachment expander (decoding it as UTF-8
@@ -184,11 +190,15 @@ applied identically to `run` and `run_stream`:
 
 Every early stop then takes the **same single tool-less final round** `max_steps` already uses, so
 the turn ends with a real answer — "here's what I found / what failed" — never a silent stall. So
-`AgentTurn.stopped` is one of `completed` · `max_steps` · `repeat_call` · `tool_errors` ·
+`AgentTurn.stopped` is now one of `completed` · `max_steps` · `repeat_call` · `tool_errors` ·
 `deadline` (#925) · `unsupported_media` (an image attachment blocked before any provider call,
 #633; plus `error` on a mid-stream failure, streaming only); the streamed `done` event carries it
-for the web to key stop-reason copy off. The repeated / errored tool steps stay in the activity
-timeline (errors render red), so the process that led to the cut is visible.
+for the web to key stop-reason copy off. It is also **persisted**, on `agent_messages.stopped`
+(#944, ADR-0142) — `NULL` for a turn that completed, for a user message and for every row written
+before the column existed, so "is this reply incomplete?" is exactly "is this column set?". That is
+what lets the transcript mark a cut-short reply after a reload, when no live stream is left to say
+so. The repeated / errored tool steps stay in the activity timeline (errors render red), so the
+process that led to the cut is visible.
 
 **The bound is the operator's (#925, ADR-0143).** The round bound used to be clamped to 1–12 on the
 prefs route, and a larger value was silently rewritten — a long task (search → read → read →
@@ -518,7 +528,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) and trained `context_length` (#618) from `/api/show` — opt-in (one call per model), so the Models page can badge them and show a context-window chip while the chat picker stays light. `context_length` is `null` when the runtime doesn't report it — never a fake default. |
-| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a model: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported — never a fake default). Local models read the runtime's `/api/show`; **hosted** models (#633/#618) read LiteLLM's own model-cost/context map instead (no provider call) — `quantization`/`parameter_size`/`family` stay `null` there (Ollama-only concepts), `capabilities` always includes `tools` (hosted providers are assumed tool-capable) plus `vision` when LiteLLM's map says so. Backs the model-settings sheet, the Models page's context-window chip, and the chat "can't use tools" / "can't see images" hints. `model` is a query param (names carry `:`/`/`). |
+| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a model: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported — never a fake default). Local models read the runtime's `/api/show`; **hosted** models (#633/#618) read LiteLLM's own model-cost/context map instead (no provider call) — `quantization`/`parameter_size`/`family` stay `null` there (Ollama-only concepts), `capabilities` is what the resolution actually decided — `tools` only when the model is resolved tool-capable (no longer hard-coded), `vision` when the map or an override says so, `embedding` for an embedding model. Three resolved fields ride beside it (ADR-0140): `role` (`chat`|`embedding`|`unknown`), `supports_tools` (`true`/`false`, `null` when the local runtime could not be asked at all) and `in_catalogue` (`false` for a hosted id LiteLLM's map has never heard of — `null` for a local model). They exist because `capabilities` cannot express *unknown*: an empty list means both "nothing to badge" and "no idea", and a shell guessing between them shows the wrong hint. Backs the model-settings sheet, the Models page's context-window chip and **unlisted** badge, and the chat "can't use tools" / "can't see images" hints. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; each entry's `size_gb` is the **real on-disk size** backfilled from its family's tags page (#571; `null` until the size fill or a variant lookup reaches the family, and always `null` for `cloud` rows). `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
 | `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the model's public library **tags page** (the catalog index lists *sizes*, not quants). Returns `{model, variants:[{tag, quant, size_gb}]}` — `size_gb` is the tag row's real on-disk size (#571; `null` when upstream shows none, e.g. a cloud alias). Best-effort — an empty list (offline, or a model not in the public library) makes the UI fall back to a manual tag box. A successful lookup also piggybacks its sizes onto the catalog snapshot. `model` is a query param. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
@@ -526,13 +536,13 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `GET /platform/v1/llm/providers` | Providers and what the secret store knows about each one's key. Each row is `{alias, local, configured, needs_base_url, key_state, key_error}`. `key_state` is `not_required` (the local runtime holds no key) / `present` / `missing` (OpenBao answered and has nothing there) / `unavailable` (OpenBao could not be asked — an expired app token, the service down), with `key_error` naming the reason for the last one. `configured` is unchanged (`true` for `not_required` and `present`) — it was one bit over three facts, and collapsing "we could not ask" into "there is no key" is how #728's expired token read as a fleet of unconfigured providers, sending the operator to re-enter keys that were already set. The core reports the distinction; rendering it is the shell's job (ADR-0018) — the Models page's "Add a hosted model" row (#922) is the first place that reads `key_state`, hinting inline when it is `missing`/`unavailable`. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
 | `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `kv_cache_type` (Ollama KV-cache), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
-| `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
-| `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
+| `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). **400** for a model whose role is known to be `embedding` (#944) — this used to write any string at all, which is how an embedding id became the chat default and every turn died on an opaque provider 400. A role of `unknown` is allowed: a thin catalogue must not make a working model unselectable. Clearing is never checked. |
+| `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). **400** for a model known to be a `chat` model — the mirror rule (#944). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/context-window` | Set or clear the **global** Ollama context window (`{value: int|null}`); the default for models without their own setting. |
 | `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "q8_0"\|"q4_0"\|null}`, `null` = the f16 default). Server-wide; persisted, then **applied**: the core writes Ollama's start-up env file (enabling flash attention for the quantized types) and restarts the container (#307, amends ADR-0046). Returns `{value, applied, staged}` (#709) — **two** flags because there are two degraded modes. `applied` = the running server has the new value. `staged` = the env file holds it and only a container restart is missing (the usual case without Docker access: the entrypoint re-sources the file on every start, so `docker compose restart ollama` applies it and **no environment editing is needed**). `applied` implies `staged`. Only `staged: false` — the file could not be written at all — calls for setting `OLLAMA_KV_CACHE_TYPE`/`OLLAMA_FLASH_ATTENTION` by hand, which is what the UI used to say in every degraded case. Clearing back to the default stages identically (a successful unlink is the choice on disk). |
 | `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`; `null` = the `AGENT_MAX_STEPS` env default). **Floored at 1, no ceiling** since #925 (ADR-0143) — the old 1-12 clamp silently rewrote a 40 to 12, so a long task ran out of rounds with no way to give it more; `0` and negatives still floor to 1. What bounds a turn is the loop's behaviour guards (below), not this number. Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
-| `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` · `PUT …/capabilities` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities, override}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (add / remove / set-as-default / edit capabilities — #922 added the add form, which reads `GET …/llm/providers` for the hosted alias list and renders its `key_state`), and module model slots; persisted in `saved_models`. `PUT …/capabilities {model, vision, context_length}` sets the **capability override** (#711) — see *Capability resolution* below; **404** for an id the tenant hasn't saved. Mutations **503** without the store. |
+| `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` · `PUT …/capabilities` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities, role, in_catalogue, override}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). It deliberately accepts an **embedding** model: since #865 this one list serves both roles, and the role is enforced where it matters — setting a default, and running a turn. `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (add / remove / set-as-default / edit capabilities — #922 added the add form, which reads `GET …/llm/providers` for the hosted alias list and renders its `key_state`), and module model slots; persisted in `saved_models`. `PUT …/capabilities {model, vision, tools, role, context_length}` sets the **capability override** (#711, extended by ADR-0140) — see *Capability resolution* below. Any write also clears `override.tools_learned`, the gateway's own learned answer, so returning a control to Auto genuinely starts over. **404** for an id the tenant hasn't saved. Mutations **503** without the store. |
 | `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Works for a **hosted** `<provider>/<model>` id too — there `context_window` is a **compaction budget** (`keep_alive`/`device` are local-only Ollama options). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
 | `POST /platform/v1/llm/model-settings/suggest-context` | Compute **and persist** a recommended per-model context window for a freshly pulled model (#386), so it opens sized to itself instead of the global default. Body `{model}`. Reuses the `system/info` heuristic (VRAM-or-RAM + the named model's on-disk size + KV-cache type, capped at its trained length) but for *that* model rather than the active one. **Non-destructive** — an existing per-model context override is left untouched. Returns `{model, context_window, applied}` (`applied` is `false` when one was already set, or none could be computed — e.g. a hosted model with no local size). The web calls it when **any** pull finishes (catalog, variant, or manual tag). |
 | `GET /platform/v1/system/info` | Host spec + the context-window suggestion behind the Models page. Returns `{gpu, cpu, ram_total_mb, model:{name, size_mb, context_length, quantization}, suggested_context:{min, suggested, max}, kv_cache_type}`. The suggestion estimates how big a context the box can hold from VRAM (or RAM, no GPU), the active model's on-disk size, and the **KV-cache type** (a quantized cache `q8_0`/`q4_0` costs fewer bytes/token, so the same memory buys more context). Its ceiling is the model's **trained** `context_length` when known — no longer a flat 32k — so a long-context model on a roomy GPU is no longer clipped; 32768 remains only the fallback when the trained length is unknown. Best-effort: every probe degrades to `null`. |
@@ -593,23 +603,32 @@ embeddings dispatch silently drops it (#466).
 > still holds either way (modules never see the key, and never call a provider directly).
 
 The Models page's **Embedding model** select lists local models and the tenant's saved hosted
-ids in separate groups. The saved-models store holds *any* hosted id and cannot tell a chat
-model from an embedding one, so the help text says plainly that a chat model chosen there will
-fail at embed time. A hosted embedding id opens the **hosted** settings sheet — no `keep_alive`,
-no device — exactly as a hosted chat model does.
+ids in separate groups. The saved-models store holds *any* hosted id, chat or embedding — which
+is deliberate, since #865 made one list serve both roles — but each row now carries its resolved
+**role**, so a saved id the catalogue knows to be a chat model is not offered here at all, and a
+stored one that predates the rule is named in place rather than silently failing at embed time
+(#944). A hosted embedding id opens the **hosted** settings sheet — no `keep_alive`, no device —
+exactly as a hosted chat model does.
 
 Switching between models of different vector sizes is the *dimension-change contract* below.
 
-#### Capability resolution (#633, #618, #711)
+#### Capability resolution (#633, #618, #711, #944, #947 — ADR-0140)
 
-Two questions get asked about every model: **can it see images** (`supports_vision`, which gates
-an image attachment) and **how much context does it have** (a badge, and the ceiling on the
-context-window suggestion). They resolve in this order:
+Four questions get asked about every model:
+
+| Question | Method | What it gates |
+| --- | --- | --- |
+| What is it **for**? | `model_role` → `chat` \| `embedding` \| `unknown` | Which surfaces offer it, and whether a turn runs at all |
+| Can it call **tools**? | `supports_tools` | Whether the agent offers the tool list |
+| Can it see **images**? | `supports_vision` | Whether an image attachment is accepted (#633) |
+| How much **context**? | `ModelDetails.context_length` | A badge, and the ceiling on the context-window suggestion |
+
+They resolve in this order, and `gateway.show()` is the single place that does it:
 
 1. **The operator's per-saved-model override**, when one is set (#711).
-2. **The local runtime's `/api/show`** for a local model — an explicit `vision` capability says
-   yes, anything else (including an unreported list on an older Ollama) says no.
-3. **LiteLLM's static model-cost map** for a hosted model.
+2. **What the gateway learned from the provider** — `tools` only, and only ever a "no" (below).
+3. **The catalogue**: the local runtime's `/api/show` for a local model, LiteLLM's static
+   model-cost map for a hosted one.
 
 Step 1 exists because step 3 is a *curated static list* while model ids are the operator's choice
 (ADR-0010) — the two are guaranteed to drift. The map omits ids entirely (`grok/grok-latest`
@@ -618,36 +637,113 @@ resolves to an unmapped `xai/grok-latest`) and mislabels others, and the failure
 would have handled them. Renaming the saved model to a mapped id was the only workaround, which
 is not the operator's job.
 
-The override is `{vision: "auto"|"on"|"off", context_length: int|null}`, stored in two nullable
-columns on the model's `saved_models` row and edited in the Models page's hosted-model sheet.
-`auto` with no context length is the pre-override behaviour exactly, so an absent or cleared
-override changes nothing. It applies **even when the map lookup raises** — an unmapped id is
-precisely the case it exists for, so that path must not be the one that skips it.
+The record is `{vision, tools, role, context_length, tools_learned}` — `vision` and `tools` take
+`auto|on|off`, `role` takes `auto|chat|embedding` — stored in five nullable columns on the
+model's `saved_models` row and edited in the Models page's hosted-model sheet (*Image input*,
+*Tool calling*, *Model role*, *Context length*). All-`auto` with no context length is the
+pre-override behaviour exactly, so an absent or cleared record changes nothing. It applies **even
+when the map lookup raises** — an unmapped id is precisely the case it exists for, so that path
+must not be the one that skips it.
 
-Two boundaries worth keeping straight:
+**The defaults for an unlisted hosted id are asymmetric, on purpose.** Vision answers *no*:
+sending an image to a model that cannot see it is either silently ignored or a provider 400,
+which is what the gate exists to prevent. Tools answer *yes*: the map is thin, most hosted models
+do call tools, and a wrong yes self-heals (below), whereas a wrong no would quietly strip every
+module from the assistant. Role answers *unknown*, and `unknown` is refused nothing. A model the
+map *does* describe is taken at its word in all three cases — including a catalogued "no tools",
+which shows in the shell as a missing badge and a composer notice, one click from an override.
+
+**Tool support is learned, not guessed.** Whether a hosted model accepts a tool list is a
+property of the model *as served*: the same id behind a vLLM server started without
+`--enable-auto-tool-choice` rejects every request carrying one, while the same id elsewhere calls
+tools happily (#947). No shipped table can answer that, so on a **400** whose text matches a
+small phrase list (`tool choice requires`, `tool_choice`, `tools is not supported`, `does not
+support tools`, `tool use is not supported`, `function calling is not supported`, …) the gateway:
+
+1. logs at WARNING naming the model, the provider alias, the upstream the aggregator named, and
+   the phrase that matched — never the raw body, which carries an account identifier;
+2. writes `tools_learned = "off"` on that model's saved row **for the calling tenant** (the key
+   is per tenant, so the deployment behind it is too — constraint #1). It is its own column, not
+   `tools_override`, so "Auto, and we learned it can't" stays distinguishable from the operator's
+   explicit "Not supported", and **any** operator save clears it — returning the control to Auto
+   genuinely starts over;
+3. **retries the same call once with `tools` omitted**, so the turn answers instead of dying.
+   Once only: the retry carries no tools, so a second rejection is a real failure.
+
+The matcher is restricted to a 400. A 500 that mentions tools is a provider falling over, not a
+model declaring a limitation, and learning "no tool support" from an outage would disable every
+module until someone noticed. #944's sibling rejection — *"is an embedding model and cannot be
+used with the chat/completions endpoint"* — matches nothing here and propagates.
+
+**The refusal itself lives in one function**, `LlmGateway._ensure_can_serve`, reached by `chat`,
+`stream`, `stream_chat` **and** `embed`. It carries the pause rule (ADR-0005) and the role rule,
+and it is where a future system-level Local AI / Hosted AI switch (#945) adds its clause rather
+than a fifth copy. A model whose role is known and wrong raises `ModelCapabilityError`
+(`llm/errors.py`) before any provider call, carrying an operator-readable message and the one
+action that fixes it. The chat paths ask for the role clause only, because they express the pause
+as a *fallback filter* — a paused local default still falls through to a hosted fallback.
+
+Role resolution for a local model asks the runtime (`/api/show`: `embedding` → embedding,
+`completion` → chat), and the answer is memoised per process because the gate runs on every call,
+including each embed batch of a bulk re-index. A model's role is a property of its weights; a
+pull or a delete clears the memo, and an `unknown` is never cached.
+
+A **write-time** guard mirrors it: `PUT /llm/prefs/default` refuses an embedding model with 400
+and `PUT /llm/prefs/embed-default` refuses a chat model. Both are needed — the write guard stops
+the state being created, the read guard repairs a deployment that already has it.
+
+Three boundaries worth keeping straight:
 
 - **The override's `context_length` is not `ModelSettings.context_window`.** The first is *what
   the model has* (metadata, a badge); the second is *how much of it we choose to send* (a
   compaction budget, #570). Same word, different layer — both appear in the same sheet.
+- **`role` is not LiteLLM's `mode`.** `mode` is the catalogue's field, which the resolution
+  reads; `role` is the answer after the override and the catalogue have both had their say.
 - **Gating and display only.** Routing, provider keys, and usage metering never consult the
-  override; every model concern still lives in the core (constraint #8).
+  record; every model concern still lives in the core (constraint #8).
 
 A miss against the map logs **once per model id per process**, then at debug: a saved alias
-outside a curated list is expected, not anomalous, but the first sighting still explains a model
-that shows no badges.
+outside a curated list is expected, not anomalous. Since #879 the miss is also *reported* rather
+than only logged — `ModelDetails.in_catalogue` is `false`, which the Models page draws as an
+**unlisted** badge where the context chip would be, so a row with no badges explains itself.
 
-#### First-boot model bootstrap (#773, ADR-0118)
+Kubernetes parity: none of this is runtime-specific — database columns, gateway logic and web
+rendering behave identically on Compose and on Kubernetes (ADR-0134).
+
+Kubernetes parity: none of this is runtime-specific — database columns, gateway logic and web
+rendering behave identically on Compose and on Kubernetes (ADR-0134).
+
+#### First-boot model bootstrap (#773, ADR-0118, amended #923)
 
 A fresh install boots an **empty Ollama volume** (models are never baked into the image), so
 the first chat or embedding call would 404 until someone found the Models page — and
 background work (the knowledge indexer, memory recall) failed noisily meanwhile. On startup
-the core now ensures the deployment's default local models exist: a fire-and-forget lifespan
+the core ensures the deployment's default local models exist: a fire-and-forget lifespan
 task (`llm/bootstrap.py`) waits for the runtime, resolves the **effective** chat + embedding
 defaults (stored prefs, else `LLM_DEFAULT_MODEL` / `MEMORY_EMBED_MODEL`), and pulls the
 missing ones through the same `gateway.pull()` path the Models page uses — then applies the
 same post-pull context suggestion (#386), so a bootstrapped model opens correctly sized too.
 
-Behaviour is bounded and defensive, in keeping with what startup may cost:
+**`auto` seeds an empty runtime only (#923).** The moment `/api/tags` reports *any* installed
+model, `auto` no-ops outright — it does not resolve the effective defaults at all, let alone
+diff against them. Before #923, "first-boot" was a docstring, not a guard: the bootstrap
+diffed the effective defaults against the runtime on *every* start, so a model the operator
+deliberately deleted on the Models page was silently pulled back on the next restart —
+routine on both runtimes (a Compose `up`, an update reconcile, a Kubernetes rollout-restart,
+ADR-0134). The runtime's own tag list is the only state consulted (constraint #2: no marker
+on local disk, no extra table) — a from-scratch install still gets its defaults exactly as
+ADR-0118 intends, and the no-op is logged at INFO with the installed count so the decision is
+visible, not silent.
+
+An **explicit list** (`LLM_BOOTSTRAP_MODELS=llama3.2,nomic-embed-text`) is a different
+contract: a named pin the operator stated, ensured on every start regardless of what else is
+installed — it may re-pull a listed model that went missing, by design. The two-value split
+(`auto` = seed-once-effectively, a list = ensure-always) was chosen over adding a third
+`auto-once` value: the runtime's tag list already carries the only state the seed-once
+behaviour needs, so a third value would add a distinction without adding capability — a
+deployment that wants "ensure always" already has the list form for it.
+
+Behaviour is otherwise bounded and defensive, in keeping with what startup may cost:
 
 - **Never blocks** startup, readiness (ADR-0027), or a live turn — the pull happens in the
   background while the rest of the core serves.
@@ -656,11 +752,11 @@ Behaviour is bounded and defensive, in keeping with what startup may cost:
 - **Hosted ids are skipped** (`claude/…` cannot be pulled into the local runtime), and an
   unreachable runtime (a hosted-only deployment running no Ollama) costs one warning after a
   bounded wait, never a crash loop.
-- An already-provisioned deployment no-ops after one `/api/tags` round trip.
 
-`LLM_BOOTSTRAP_MODELS` tunes it: `auto` (default) resolves the effective defaults; blank
-disables the bootstrap (air-gapped builds — and the CI smoke gate, which must not download
-multi-GB weights); an explicit comma-separated list pulls exactly those.
+`LLM_BOOTSTRAP_MODELS` tunes it: `auto` (default) seeds an empty runtime with the effective
+defaults, then no-ops forever after; blank disables the bootstrap (air-gapped builds — and
+the CI smoke gate, which must not download multi-GB weights); an explicit comma-separated
+list ensures exactly those models exist, every start.
 
 #### Model catalog (#269)
 
@@ -781,7 +877,11 @@ every fact is preserved regardless of how large the corpus has grown (#450, ADR-
 same reconcile also runs **lazily and automatically**: `UserFactStore._ensure` compares a
 collection's actual vector size against the current embedder's on first use each process
 lifetime, and self-heals a mismatch on the spot — so recall/save survive a model swap even
-before anyone clicks "Re-embed everything".
+before anyone clicks "Re-embed everything". The collection is cached as reconciled **only when
+a width was actually confirmed**, and the rebuild is shielded from the caller's recall budget,
+so a reconcile that is skipped, fails, or overruns retries or finishes rather than pretending
+it happened (#944, ADR-0141 — see *Healed or named, never silent* below). What it could not
+heal is readable at `GET /platform/v1/agent/memory/dimension` and rendered on the Models page.
 
 ##### The dimension-change contract (#865)
 
@@ -808,6 +908,63 @@ and would otherwise sail past a switch that has already broken search. The mass 
 (#848) is untouched by all of this: it is weighed first, so a stale mount is still refused
 before anything is embedded, and a recreate is not a de-index the fuse weighs (it clears the
 ledger itself, and a cleared ledger has nothing to protect).
+
+##### Healed or named, never silent (#944, ADR-0141)
+
+A self-heal that quietly does nothing is worse than no self-heal, because the operator stops
+looking. Three rules hold across every store above:
+
+* **A width is cached only when it was *confirmed*.** A collection whose vector configuration
+  cannot be read as one width is left uncached, so the next call checks again. The original
+  fact-store reconcile marked a collection "ensured" even on the path where it had resolved no
+  width and reconciled nothing — so one unreadable response poisoned the cache for the whole
+  process lifetime and every later recall repeated the same fast Qdrant 400 forever. A
+  single-entry named mapping *is* one unambiguous width and is read as such; only a genuinely
+  multi-named configuration counts as unreadable, and that one is never healed on a guess.
+* **The heal outlives the caller's time-box.** Recall is bounded by `MEMORY_RECALL_TIMEOUT_S`,
+  and re-embedding a real fact corpus through a hosted model can take longer than that budget.
+  The fact-store reconcile therefore runs shielded from the caller's cancellation: recall still
+  gives up on its budget, and the rebuild still finishes — instead of every turn restarting a
+  heal that is cancelled again, and instead of a cancellation landing between the collection's
+  drop and its refill.
+* **What cannot be healed is named, in the operator's words.** Recall logs
+  `recall skipped: embedding dimension changed` with both widths and the cure, rather than a
+  generic backend error carrying Qdrant's raw rejection; `knowledge` search answers "the
+  embedding model changed — this index holds 768-d vectors and the current model produces
+  4096-d … run “Re-embed everything” on the Models page" instead of forwarding the raw
+  `Vector dimension error` (#879); and `GET /platform/v1/agent/memory/dimension` reports the
+  state the Models page renders beside the **Re-embed everything** button. The state is scoped
+  to the caller's tenant, like every other `/memory` route — a width observed while serving one
+  tenant says nothing about another's collection (constraint #1).
+
+**The two cures are not the same button, and each surface names its own.** "Re-embed
+everything" fans out to the *modules*' `/reindex` and never touches the fact collection, so a
+module's message names it while recall's names **Settings → Maintenance**, whose
+`facts-reembed` job (*Memory facts re-embed*) is what rebuilds recall. Folding both into one
+action is a follow-up (#944); until then the fact collection is deliberately outside
+"Re-embed everything", and saying otherwise would be the exact failure this section exists to
+remove.
+
+A **module** search never rebuilds — that stays the indexer's job, and a rebuild triggered by a
+read would drop the vectors the operator is still searching; it only names what it found. Core
+recall is the deliberate exception: its `_ensure` heals in place on the way to the query,
+because a fact is hand-distilled and has no source to re-derive it from (ADR-0074). What recall
+never does is rebuild from the *error* path — that only names the mismatch.
+
+The `/memory/dimension` state is *observation-based and process-local*: it reports what a real
+save or recall saw, so reading it costs no embed call, and it resets when `reembed_all` runs.
+`status` is `ok` (nothing observed), `healed` (found and rebuilt — reported, not warned about),
+`changed` (found, rebuild not yet successful), or `unreadable`.
+
+The **Models page** renders `changed` and `unreadable` as a warning on the embedding card, with
+the cure; `healed` and `ok` render nothing. That card also distinguishes the three outcomes of a
+re-embed fan-out — `started`, `refused` (with the module's reason and the note that its vectors
+are untouched), and `error` — rather than reading every non-`started` result as "failed to
+start" (#848, #860).
+
+**Kubernetes parity.** Every check here is lazy — triggered by request handling, never by
+container start-up — so both `CONTAINER_RUNTIME` arms (ADR-0134) behave identically. Nothing in
+this contract is Docker-specific.
 
 #### Per-model settings (ADR-0044)
 
@@ -945,10 +1102,54 @@ component is `None` — verified against the pinned litellm 1.89.3 by calling `r
 
 If a stream still dies part-way, the agent loop **degrades gracefully** instead of dumping the raw
 litellm/aiohttp exception into chat: it keeps whatever answer + activity streamed so far, appends a
-short friendly note ("the model stopped responding before the answer was finished…"), **persists**
-that partial turn, and ends the stream with `done` — so a reopen still shows it. Only a failure
-that produced *nothing* yet ends with `error` (a friendly banner; a non-connection error like
-`paused` passes its own text through, which the web keys on for its paused state).
+short note saying why, **persists** that partial turn (with `stopped="error"`), emits a terminal
+`error` event, and ends the stream with `done` — so a reopen still shows both the answer and the
+fact that it was cut short. A failure that produced *nothing* yet ends with `error` alone, and
+persists no turn.
+
+#### The failed-turn contract (#944, #947 — ADR-0142)
+
+Two rules, and `agent/failures.py` is the only place either is decided.
+
+**A failed turn always fires a terminal `error`.** Before #944 the retained-partial branch emitted
+the note and `done` and nothing else, so the shell's danger card — which fires on `error` — was
+unreachable for exactly the failure mode users hit most: a lead-in sentence, then silence. The
+`error` event now precedes `done` on that branch. A client reads `error` as *the reason*, not as
+*the end*: it keeps reading for the terminal frame, and `done` still carries the persisted turn
+(which is what makes the shell reconcile with history rather than keep its live copy). A client
+that stops at `error` — the pre-#944 shape — still behaves correctly.
+
+**A provider payload never reaches the browser.** `classify_stream_failure(exc, model=…)` writes
+the banner; `str(exc)` is never it. The classes, in order:
+
+| Class | Banner |
+| --- | --- |
+| `GatewayPausedError` | passes its own text through — the **one** allowance, because the web tests `/paused/i` on the detail to show the asleep card. Explicit by exception type, not "whatever didn't match". |
+| `ModelCapabilityError` (ADR-0140) | its `message` + `hint`, both already written for a person. |
+| the connection/stall class (#453) | the "model stopped responding" note, unchanged. |
+| a provider rejection — `BadRequestError`, `AuthenticationError`, `RateLimitError`, `ServiceUnavailableError`, `HTTPStatusError`, … matched on the exception's **type name**, so nothing here imports litellm's hierarchy | one sentence naming the model and the provider, plus the provider's own message *when it survives redaction*. |
+| anything else | `"<model> failed with an unexpected error (<ExceptionClass>)."` — the class, and nothing else. |
+
+Redaction is `readable_provider_message`. Aggregators wrap each other: #947's real payload is
+OpenRouter reporting "Provider returned error" with the upstream's actual refusal escaped three
+levels down inside `metadata.raw`, and vLLM's own quotes left unescaped so it is not valid JSON at
+any depth. The helper unwinds one escape level at a time, collects every `"message"` value at each
+level, and keeps the **deepest** one that passes a plain-sentence test: no braces, brackets or JSON
+punctuation; no `user_id` / `api_key` / `authorization` / … substring; no long letters-and-digits
+run (a uuid, a hash, a key); 8–240 characters; mostly letters. Nothing that fails the test is
+quoted at all, so an unreadable payload produces no quotation rather than a leak. The provider
+named in the sentence is the upstream the aggregator routed to (`"provider_name":"NextBit"`) when
+the payload says so, else litellm's routing label, else the model id's prefix — never an account
+id, a URL or a key.
+
+The raw exception is logged once, at **ERROR**, with `error_type`, `reason` and `model` — a turn
+that could not answer is an operator's problem, not a warning — and nowhere else.
+
+**Metric.** `epicurus_core_llm_stream_failures_total{tenant, reason}` counts failed streaming
+turns. `reason` is the closed set `paused` · `capability` · `stalled` · `rejected` · `auth` ·
+`rate_limited` · `unavailable` · `unknown` — never a provider string, so cardinality stays bounded
+per tenant. Kubernetes parity: this is all in-process streaming logic, so both ADR-0134 runtime
+arms behave identically and no container, image or deployment surface is touched.
 
 **`embed()` carries the same bound, but enforced differently (#466).** LiteLLM's `ollama`
 embeddings dispatch never threads a `timeout=` kwarg through to its HTTP call (unlike the chat
@@ -1266,6 +1467,18 @@ card with its report for a day and the operator's only way to clear it was to st
 job. Both kinds, because the job list is not split by kind and a Remove that appeared on some
 rows only would read as a broken button.
 
+**Removal and apply are mutually exclusive per job** (#918). Both `remove` and `start_apply` do
+a read-then-act — check the job's status, then either delete its row and staging directory, or
+flip it to `running` and hand the directory to the background applier. Without a lock, a
+`DELETE` racing a `POST .../apply` for the *same* job could read `staged` in `remove` a moment
+before the apply flips it to `running`, and then delete the row (and the directory the applier
+is about to open) out from under a job that had just been told to start — same tenant, two
+presses in close succession, one lost job. `PortabilityService` now holds one `asyncio.Lock`
+per job id and both methods take it around their read-then-act section, so the two requests
+serialize instead of interleave: whichever gets there first decides the outcome the other sees
+(`JobNotFound` for the apply if the delete won, `JobRunning`/409 for the delete if the apply
+did).
+
 **A `NULL` costs one row, never a set** (#903). `import_set` applies a whole set in one
 transaction — the right trade for ten thousand `agent_messages`, and a trap for anything that
 raises mid-stream. A record can carry `null` for a column the model declares `NOT NULL`,
@@ -1277,13 +1490,27 @@ revisions 0003/0004), but the normalisation stays: an archive written before the
 exported from a module still on the reconcile, carries the `NULL` all the same. Portability read it verbatim, and an explicit `None` in an `insert()` bypasses
 the ORM default — so on a fresh target, where `create_all` made the column `NOT NULL` for
 real, one `module_prefs` row took the operator's entire `prefs` set with it.
-`TableSpec.encode` now normalises on the way out and `TableSpec.normalize` on the way in, from
-the column's own metadata rather than a hand-kept list, so a column added tomorrow inherits the
-rule; the comparison that decides `skipped` vs `updated` runs against the *normalised* record,
-so re-applying an archive written before this is still a no-op. A null with no default to fill
-it (`maintenance_schedule_prefs.cadence`, `agent_messages.content`) is refused before the
-statement is built: `skipped`, with a warning naming the column, and the rest of the set lands.
-The same rule binds every module's own import (ADR-0133).
+`epicurus_core.portability_columns.PortableTable.encode` normalises on the way out and
+`.normalize` on the way in,
+from the column's own metadata rather than a hand-kept list, so a column added tomorrow
+inherits the rule; the comparison that decides `skipped` vs `updated` runs against the
+*normalised* record, so re-applying an archive written before this is still a no-op. A null
+with no default to fill it (`maintenance_schedule_prefs.cadence`, `agent_messages.content`) is
+refused before the statement is built: `skipped`, with a warning naming the column, and the
+rest of the set lands. The same rule binds every module's own table-backed import (ADR-0133) —
+`core_data.py`'s `CORE_SETS` and `calendar`'s own travelling tables both build on
+`PortableTable` rather than each keeping its own copy of this machinery (#918); a module that
+instead goes through a domain store with explicit per-field defaults (`tasks`, `notes`,
+`knowledge`, `storage`, `mail`) never had this defect and has nothing to adopt.
+
+**A module's own crash reaches the report line too** (#918). `_apply_module` already preferred
+a module's own JSON `detail` over httpx's generic text for a deliberate refusal (#869); an
+*unhandled* exception in a module's `import_` used to escape `add_portability_routes` as
+Starlette's bodyless default 500 (`text/plain`, no JSON) — nothing for `_detail()` to read, so
+the report fell back to `"Server error '500 …'"` and the operator was back to
+`docker compose logs`. The route now catches any exception the store does not turn into its own
+`HTTPException` and answers `500` with `detail: "<exception type>: <message>"`, so the report
+line reads the module's own words either way.
 
 ### Chat bridges (ADR-0062)
 
@@ -1705,8 +1932,11 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
 - **Postgres `agent_messages`** — conversation history (append-only in normal use; the last
   turn can be edited/truncated for regenerate/edit, #302): `id`, `tenant`,
   `session_id`, `role`, `content`, `created_at`, plus JSON `entity_refs` / `attachments`
-  (ADR-0019) and `activity` — the assistant turn's persisted process, rendered as the folded
-  activity timeline on reopen (ADR-0041). `activity.timeline` is the **chronological**
+  (ADR-0019), `activity` — the assistant turn's persisted process, rendered as the folded
+  activity timeline on reopen (ADR-0041) — and `stopped`, why the turn ended when it did not end
+  by answering (#944, ADR-0142): `NULL` for a completed turn, a user message and every pre-#944
+  row, `"error"` for a mid-stream failure, which is what the transcript renders its inline "this
+  reply was interrupted" affordance from. `activity.timeline` is the **chronological**
   interleaving of thinking blocks and tool steps (think → call → think, #300); the flat
   `thinking`/`steps` are derived and kept for backward compatibility (older rows have only
   those). Tenant-scoped; its schema, like every table below, comes from this service's
@@ -1770,10 +2000,15 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   settings**). A missing row means the model inherits the global pref / env defaults.
 - **Postgres `saved_models`** — per-`(tenant, model)` saved **hosted**-model ids (#496):
   `tenant`, `model`, `added_at` (epoch-ms, `BigInteger`, drives most-recent-first ordering), plus
-  the capability override (#711) in `vision_override` (`"on"`/`"off"`/NULL = auto) and
-  `context_length_override` (NULL = take LiteLLM's map) — both nullable and post-release (the
-  baseline revision carries them, #834), so NULL on both is the pre-override behaviour and forgetting a model forgets its
-  override with it. Only hosted ids land here — a known `<provider>/` prefix; the route rejects
+  the capability record (#711, extended by ADR-0140) in `vision_override` / `tools_override`
+  (`"on"`/`"off"`/NULL = auto), `role_override` (`"chat"`/`"embedding"`/NULL = auto),
+  `context_length_override` (NULL = take LiteLLM's map) and `tools_learned` (`"off"` when a
+  provider refused a tool list, NULL otherwise) — all nullable and post-release (the baseline
+  revision carries them; the three ADR-0140 columns are added by revision 0005), so NULL
+  throughout is the pre-override behaviour and forgetting a model forgets its record with it.
+  `tools_learned` is the gateway's own answer rather than the operator's, which is why it has a
+  column of its own: "Auto, and we learned it can't" and an explicit "Not supported" are
+  different facts, and the sheet has to be able to tell them apart. Only hosted ids land here — a known `<provider>/` prefix; the route rejects
   locals so an `hf.co/…` model can't masquerade as hosted. A durable, cross-device home for the
   strings entered in the chat picker or the Models page's own add form (#922) — the browser's
   `recentModels` is only a warm cache.
@@ -1827,13 +2062,17 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   ladder (module data first, then web search, then — since #739 — *reading* a link the message
   carries instead of guessing at what is behind it, keeping the source URL and retrieval date
   on anything filed into the knowledge base, and saying plainly what the link did not yield;
-  never an unsourced guess, #703); resolved per turn
-  and injected first in `Agent._assemble`. **Porting note (#742):** these are prompt *text*,
-  not code — a tenant that has already replaced the default via `PUT /agent/instructions` does
-  not pick up new rules automatically. An operator running a heavily customized prompt should
-  port the verify-before-mutate/recover-on-not-found paragraph (or the gist of it) into their
-  own instructions if they want the same behavior; there is no mechanism that layers the shipped
-  default's rules onto a custom one.
+  never an unsourced guess, #703) — extended (#920, #936) so a search tool reporting **degraded
+  or unavailable** search (not a clean empty result) is narrated as such ("search is down right
+  now"), rather than quietly folded into the empty-result wording and answered from stale
+  training data with a caveat; resolved per turn
+  and injected first in `Agent._assemble`. **Porting note (#742, extended by #920):** these are
+  prompt *text*, not code — a tenant that has already replaced the default via
+  `PUT /agent/instructions` does not pick up new rules automatically. An operator running a
+  heavily customized prompt should port the verify-before-mutate/recover-on-not-found paragraph
+  and the degraded-search sentence (or the gist of them) into their own instructions if they
+  want the same behavior; there is no mechanism that layers the shipped default's rules onto a
+  custom one.
 - **Postgres `agent_instructions_versions`** — snapshots of the base prompt (ADR-0046 via
   ADR-0093 §3): `id`, `vid`, `tenant`, `content`, `created_at`. Each `set_instructions` records the
   prompt it **replaced** (the first edit therefore captures the shipped default), deduplicated,
@@ -1923,7 +2162,12 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   size, preserving each fact's id and metadata — rather than silently 400ing on every
   recall/save the way it did before #436. The reconcile pages through the collection (via
   Qdrant's scroll offset) until every point has been visited, so it never drops facts beyond
-  a bounded scan window regardless of corpus size (#450, ADR-0076).
+  a bounded scan window regardless of corpus size (#450, ADR-0076). Since #944 (ADR-0141) the
+  collection is marked reconciled **only when its width was confirmed** — an unreadable vector
+  configuration is raised, not cached — and the rebuild is shielded from the recall time-box,
+  so a corpus that takes longer to re-embed than `MEMORY_RECALL_TIMEOUT_S` still heals instead
+  of being restarted and re-cancelled every turn. The last observation is readable at
+  `GET /platform/v1/agent/memory/dimension`.
 - **Postgres `memory_extraction_queue`** — finished exchanges awaiting background fact
   extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`, and a
   nullable `session_id` (#771) stamping each exchange with the conversation it came from — the

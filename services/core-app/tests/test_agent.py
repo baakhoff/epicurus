@@ -39,8 +39,10 @@ from epicurus_core_app.agent.instructions import (
     AgentInstructionsStore,
 )
 from epicurus_core_app.agent.mcp_host import ToolCallError
+from epicurus_core_app.llm.gateway import NO_TOOLS_SYSTEM_NOTE
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.memory.facts import EmbeddingDimensionChanged
 from epicurus_core_app.memory.profile import StandingProfile
 
 
@@ -420,6 +422,39 @@ async def test_agent_skips_tools_when_the_model_cannot_use_them() -> None:
     assert gw.tools_seen == [None]  # tools never offered, despite specs existing
 
 
+async def test_a_tool_less_turn_is_told_it_has_no_tools() -> None:
+    """Without this the base prompt's "act through the tools you are given" stands, and a
+    tool-less model narrates tool use it never made (#947)."""
+    gw = _FakeGateway([ChatResult(model="m", content="just chatting")], supports_tools=False)
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
+    assert any(m.role == "system" and m.content == NO_TOOLS_SYSTEM_NOTE for m in gw.calls[0])
+
+
+async def test_a_turn_with_tools_carries_no_such_note() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="hi")], supports_tools=True)
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
+    assert all(m.content != NO_TOOLS_SYSTEM_NOTE for m in gw.calls[0])
+
+
+async def test_a_deployment_with_no_modules_is_not_told_about_tools() -> None:
+    """The note is about the *model*, not about an empty tool registry — a bare core would
+    otherwise carry it on every single turn."""
+    gw = _FakeGateway([ChatResult(model="m", content="hi")], supports_tools=True)
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
+    assert all(m.content != NO_TOOLS_SYSTEM_NOTE for m in gw.calls[0])
+
+
 async def test_agent_offers_tools_when_the_model_supports_them() -> None:
     gw = _FakeGateway([ChatResult(model="m", content="hi")], supports_tools=True)
     mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
@@ -599,6 +634,7 @@ class _FakeMemory:
         self.remembered_refs: list[dict[str, Any]] = []  # refs of the last remember()
         self.remembered_attachments: list[dict[str, Any]] = []  # attachments of the last remember()
         self.remembered_activity: dict[str, Any] | None = None  # activity of the last remember()
+        self.remembered_stopped: str | None = None  # stop reason of the last remember() (#944)
 
     async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
         if self._fail:
@@ -620,6 +656,7 @@ class _FakeMemory:
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         activity: dict[str, Any] | None = None,
+        stopped: str | None = None,
     ) -> None:
         if self._fail:
             raise RuntimeError("db down")
@@ -627,6 +664,7 @@ class _FakeMemory:
         self.remembered_refs = entity_refs or []
         self.remembered_attachments = attachments or []
         self.remembered_activity = activity
+        self.remembered_stopped = stopped
 
 
 async def test_agent_uses_memory_when_session_given() -> None:
@@ -1413,6 +1451,35 @@ async def test_agent_recall_backend_error_is_logged_distinctly() -> None:
     assert turn.content == "answer"  # still degrades to no recall, never blocks
     error_logs = [e for e in logs if e["event"] == "recall skipped: backend error"]
     assert error_logs and error_logs[0]["error_type"] == "RuntimeError"
+
+
+class _DimensionChangedMemory(_FakeMemory):
+    """Recall fails because the embedding model's output width changed (#944)."""
+
+    async def recall(self, *, tenant: str, query: str, limit: int = 4) -> list[str]:
+        raise EmbeddingDimensionChanged(
+            "embedding dimension changed 768→4096; recall memory needs a rebuild — "
+            "run “Re-embed everything” on the Models page"
+        )
+
+
+async def test_agent_recall_names_a_dimension_change_rather_than_a_backend_error() -> None:
+    # The one recall failure no retry fixes and the operator *can* act on. Logging it as a
+    # generic backend error carrying Qdrant's raw 400 is what made #944 invisible for days.
+    gw = _FakeGateway([ChatResult(model="m", content="answer")])
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+        memory=_DimensionChangedMemory(),  # type: ignore[arg-type]
+        recall_timeout_s=5,
+    )
+    with capture_logs() as logs:
+        turn = await agent.run([ChatMessage(role="user", content="hi")], session_id="s1")
+    assert turn.content == "answer"  # still degrades to no recall, never blocks the turn
+    assert not [e for e in logs if e["event"] == "recall skipped: backend error"]
+    named = [e for e in logs if e["event"] == "recall skipped: embedding dimension changed"]
+    assert named and "768→4096" in named[0]["reason"]
+    assert "Re-embed everything" in named[0]["reason"]
 
 
 async def test_agent_blank_step_is_nudged_into_an_answer() -> None:

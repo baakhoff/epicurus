@@ -83,10 +83,16 @@ export const HOSTED_PROVIDER_ALIASES: ReadonlySet<string> = new Set(
  * Only the **first** slash separates the alias from the model part, so an aggregator id whose
  * model part has a slash of its own (`openrouter/openai/text-embedding-3-small`) classifies on
  * `openrouter` and stays intact.
+ *
+ * A **provider-only** id names no model, so it is not a hosted model id: `claude/` is false,
+ * matching the core's `is_hosted`, which has required a non-empty model part since #537. The
+ * two disagreeing is #879's second nit — this side said yes, the core said no, and a half-typed
+ * id in the picker was treated as savable right up to the server's 400.
  */
 export function isHostedModelId(model: string): boolean {
   const slash = model.indexOf("/");
   if (slash <= 0) return false;
+  if (model.slice(slash + 1).trim() === "") return false;
   return HOSTED_PROVIDER_ALIASES.has(model.slice(0, slash));
 }
 

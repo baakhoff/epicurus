@@ -49,6 +49,7 @@ import {
   isHostedModelId,
   relativeTime,
 } from "@/lib/format";
+import { DEFAULT_MODEL_OVERRIDE } from "@/lib/contracts";
 import type {
   ProviderInfo,
   SavedHostedModel,
@@ -1178,6 +1179,8 @@ function HostedModelSettingsForm({
   // The capability override arrives as a prop (it rides the saved-models list), so it needs no
   // fetch and can seed directly.
   const [vision, setVision] = useState<SavedModelOverride["vision"]>(override.vision);
+  const [tools, setTools] = useState<SavedModelOverride["tools"]>(override.tools);
+  const [role, setRole] = useState<SavedModelOverride["role"]>(override.role);
   const [declared, setDeclared] = useState(
     override.context_length != null ? String(override.context_length) : "",
   );
@@ -1195,7 +1198,12 @@ function HostedModelSettingsForm({
       // Only written when it actually changed: an unchanged override needs no request, and the
       // endpoint 404s for a model that isn't saved — which the budget field alone tolerates.
       if (overrideChanged) {
-        await api.setSavedModelOverride(model, { vision, context_length: declaredNum });
+        await api.setSavedModelOverride(model, {
+          vision,
+          tools,
+          role,
+          context_length: declaredNum,
+        });
       }
     },
     onSuccess: () => {
@@ -1211,8 +1219,14 @@ function HostedModelSettingsForm({
 
   const ctxNum = ctx.trim() === "" ? null : Number(ctx);
   const declaredNum = declared.trim() === "" ? null : Number(declared);
+  // A save also clears whatever the gateway learned (ADR-0140), so a row carrying only a
+  // learned answer counts as changed — that is how "reset to Auto" is expressed here.
   const overrideChanged =
-    vision !== override.vision || declaredNum !== (override.context_length ?? null);
+    vision !== override.vision ||
+    tools !== override.tools ||
+    role !== override.role ||
+    declaredNum !== (override.context_length ?? null) ||
+    override.tools_learned != null;
   const hasBudget = settings.data?.context_window != null;
 
   return (
@@ -1274,6 +1288,82 @@ function HostedModelSettingsForm({
             <>Images are blocked for this model, whatever the catalogue says.</>
           )}
         </p>
+
+        {/* Tool calling (#947). Whether a hosted model can take a tool list is a property of
+            the model *as served* — the same id behind a differently-configured provider is
+            fully capable — so the catalogue can only ever be a starting point, and what the
+            gateway learned from a refusal is shown right here rather than left mysterious. */}
+        <label className="mt-3 block">
+          <span className="mb-1 block text-xs text-ink-dim">Tool calling</span>
+          <Select
+            className="w-56"
+            value={tools}
+            aria-label="Tool calling support"
+            onChange={(e) => setTools(e.target.value as SavedModelOverride["tools"])}
+          >
+            <option value="auto">
+              {override.tools_learned === "off"
+                ? "Auto — learned: no tool support"
+                : "Auto — use the catalogue"}
+            </option>
+            <option value="on">Supported — offer tools</option>
+            <option value="off">Not supported — chat only</option>
+          </Select>
+        </label>
+        <p className="mt-1.5 text-xs text-ink-dim">
+          {tools === "off" ? (
+            <>
+              This model is offered no tools: calendar, tasks, notes, mail, files, knowledge
+              search and web search are unavailable to it. It can still chat, and memory keeps
+              working (that&apos;s embeddings, not a tool call).
+            </>
+          ) : tools === "on" ? (
+            <>Tools are offered to this model, whatever the catalogue says.</>
+          ) : override.tools_learned === "off" ? (
+            <>
+              Its provider refused a tool list, so we stopped sending one. Save this back to
+              Auto to forget that and try again, or set it explicitly.
+            </>
+          ) : (
+            <>
+              Taken from the catalogue. If a provider refuses a tool list, we notice, stop
+              sending one, and answer without tools instead.
+            </>
+          )}
+        </p>
+
+        {/* Model role (#944). A chat turn sent to an embedding model dies on an opaque
+            provider 400; the core now refuses it first, and this is the escape hatch for a
+            model the catalogue has never heard of. */}
+        <label className="mt-3 block">
+          <span className="mb-1 block text-xs text-ink-dim">Model role</span>
+          <Select
+            className="w-56"
+            value={role}
+            aria-label="Model role"
+            onChange={(e) => setRole(e.target.value as SavedModelOverride["role"])}
+          >
+            <option value="auto">Auto — use the catalogue</option>
+            <option value="chat">Chat — answers conversations</option>
+            <option value="embedding">Embedding — indexes text</option>
+          </Select>
+        </label>
+        <p className="mt-1.5 text-xs text-ink-dim">
+          {role === "embedding" ? (
+            <>
+              Treated as an embedding model: it can be the embedding default, and chats will
+              refuse it rather than fail at the provider.
+            </>
+          ) : role === "chat" ? (
+            <>Treated as a chat model: it can be the chat default, and embedding will refuse it.</>
+          ) : (
+            <>
+              Taken from the catalogue. Set it when the catalogue doesn&apos;t list this id —
+              that&apos;s what lets us stop an embedding model being used for chat.
+            </>
+          )}
+        </p>
+
         <label className="mt-3 block">
           <span className="mb-1 block text-xs text-ink-dim">Context length</span>
           <TextInput
@@ -1336,7 +1426,7 @@ export function HostedModelSettingsSheet({
       <p className="-mt-1 mb-4 font-mono text-sm break-all text-ink">{model}</p>
       <HostedModelSettingsForm
         model={model}
-        override={override ?? { vision: "auto", context_length: null }}
+        override={override ?? DEFAULT_MODEL_OVERRIDE}
         onSaved={onClose}
       />
     </Sheet>
@@ -1463,13 +1553,20 @@ export function EmbedDefault() {
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   // Saved hosted models (#865): the gateway embeds through a hosted provider the same way it
   // chats through one, so they belong in this select too. The store holds *any* hosted id and
-  // cannot tell a chat model from an embedding one — hence the warning in the help text.
+  // cannot tell a chat model from an embedding one — hence the warning in the help text. Since
+  // ADR-0140 each row carries its resolved `role`, so the ones known to be chat models are
+  // filtered out here instead of being a sentence the operator has to remember (#944).
   const savedHosted = useQuery({ queryKey: ["savedModels"], queryFn: () => api.savedModels() });
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const current = llmPrefs.data?.global_embed_default ?? "";
   const available = (models.data ?? []).filter((m) => !m.hidden);
-  const hosted = savedHosted.data ?? [];
+  const saved = savedHosted.data ?? [];
+  // Only a *known* chat model is withheld (#944): "unknown" is the catalogue being thin, not a
+  // reason to make a working embedding model unselectable — and the core lets it through too.
+  // The current choice always stays offered, whatever its role, so the select can't misreport
+  // what the core is actually using.
+  const hosted = saved.filter((m) => m.role !== "chat" || m.model === current);
   // A stored choice that neither list offers — a local model since deleted, or a hosted one since
   // unsaved — is still the live default, so it gets its own option rather than letting the select
   // fall back to "System default" and misreport what the core is actually using.
@@ -1485,14 +1582,25 @@ export function EmbedDefault() {
   // embedding model. Changing the model above doesn't re-embed existing data on its own.
   const reembed = useMutation({ mutationFn: () => api.reembed() });
 
+  // What the core's recall store last observed about its own vector width (#944, ADR-0141).
+  // Reported, not probed — it costs no embed call — and refetched after a re-embed, which is
+  // the action that clears a state the lazy heal could not.
+  const recallDim = useQuery({
+    queryKey: ["recallDimension"],
+    queryFn: () => api.recallDimension(),
+  });
+  const dim = recallDim.data;
+  const dimStuck = dim?.status === "changed" || dim?.status === "unreadable";
+
   return (
     <Card>
       <h3 className="mb-1 font-serif text-base text-ink">Embedding model</h3>
       <p className="mb-3 text-xs leading-relaxed text-ink-dim">
         Global default used when a module has no per-module embedding override. Per-module
-        selections in the Modules page take precedence. Hosted models come from your saved
-        list — pick an <em>embedding</em> model there; a chat model will fail at embed time.
-        A hosted choice sends the whole notes, knowledge, and memory corpus to that provider.
+        selections in the Modules page take precedence. Hosted models come from your saved list;
+        ones the catalogue knows to be chat models aren&apos;t offered here, and the core refuses
+        one if it slips through. A hosted choice sends the whole notes, knowledge, and memory
+        corpus to that provider.
       </p>
       {llmPrefs.isLoading ? (
         <Spinner />
@@ -1541,6 +1649,15 @@ export function EmbedDefault() {
       {setEmbedDefault.isError && (
         <p className="mt-2 text-sm text-danger">{(setEmbedDefault.error as Error).message}</p>
       )}
+      {/* A stored choice the core now knows is a chat model — set before the role gate, or
+          through another surface. It stays selected (the core is really using it) and says so
+          rather than silently embedding nothing (#944). */}
+      {saved.find((m) => m.model === current)?.role === "chat" && (
+        <p className="mt-2 text-sm text-danger">
+          This is a chat model — embedding with it will fail. Pick an embedding model, or set
+          its role under Hosted models if the catalogue is wrong about it.
+        </p>
+      )}
 
       {/* re-embed everything (#332) */}
       <div className="mt-4 border-t border-edge pt-3">
@@ -1549,7 +1666,32 @@ export function EmbedDefault() {
           with the old model won't match new queries. Re-embed to rebuild every module's index
           with the current model. It runs in the background and can take a while.
         </p>
-        <Button variant="outline" busy={reembed.isPending} onClick={() => reembed.mutate()}>
+        {/* A stuck recall store (#944): the embedding model changed under vectors built at the
+            old width, and the lazy heal either hasn't run or couldn't. Named here because this
+            is the screen the operator is on when they change the model — a WARN line in the log
+            is not a surface. The cure is in `detail`, and it is *not* the button below:
+            "Re-embed everything" fans out to the modules' indexes, while recall is rebuilt by
+            the Maintenance card's "Memory facts re-embed" job. One action covering both is a
+            follow-up (#944). Identical on Docker and Kubernetes: the check is lazy, driven by
+            request handling, not container start. */}
+        {dimStuck && dim && (
+          <p
+            className="mb-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-warn"
+            data-testid="recall-dimension-warning"
+          >
+            <TriangleAlert size={13} className="mt-px shrink-0" />
+            <span>Cross-chat memory: {dim.detail}</span>
+          </p>
+        )}
+        <Button
+          variant="outline"
+          busy={reembed.isPending}
+          onClick={() =>
+            reembed.mutate(undefined, {
+              onSuccess: () => void recallDim.refetch(),
+            })
+          }
+        >
           <RefreshCw size={14} />
           Re-embed everything
         </Button>
@@ -1563,10 +1705,36 @@ export function EmbedDefault() {
               Re-embedding started — rebuilding in the background:
               <ul className="mt-1 flex flex-col gap-0.5">
                 {reembed.data.modules.map((m) => (
-                  <li key={m.module} className="flex items-center gap-1.5">
-                    <Dot tone={m.status === "started" ? "accent" : "danger"} />
-                    <span className="font-mono">{m.module}</span>
-                    <span>· {m.status === "started" ? "started" : "failed to start"}</span>
+                  <li key={m.module} className="flex flex-col gap-0.5">
+                    <span className="flex items-center gap-1.5">
+                      <Dot
+                        tone={
+                          m.status === "started"
+                            ? "accent"
+                            : m.status === "refused"
+                              ? "dim"
+                              : "danger"
+                        }
+                      />
+                      <span className="font-mono">{m.module}</span>
+                      {/* Three states, not two (#848, #860): a module that *refuses* a rebuild
+                          is telling you your data is intact and its source is not — the
+                          opposite of a failure, and it used to render as one. */}
+                      <span>
+                        ·{" "}
+                        {m.status === "started"
+                          ? "started"
+                          : m.status === "refused"
+                            ? "refused — nothing was rebuilt"
+                            : "failed to start"}
+                      </span>
+                    </span>
+                    {m.status === "refused" && (
+                      <span className="pl-3.5 text-ink-faint">
+                        {m.reason ? `${m.reason}. ` : ""}Your vectors are untouched. Re-run it
+                        with force from the module’s own page if the source really is empty.
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -1901,50 +2069,82 @@ export function SavedHostedModels() {
                 {models.map((m) => {
                   const id = m.model;
                   const isDefault = globalDefault === id;
+                  const isEmbedding = m.role === "embedding";
                   return (
-                    <div
-                      key={id}
-                      className="flex items-center gap-2 rounded-(--radius-field) border border-edge px-3 py-2"
-                    >
-                      <span className="min-w-0 flex-1 truncate font-mono text-sm text-ink">
-                        {id}
-                      </span>
-                      {isDefault && <Badge tone="accent">default</Badge>}
-                      {/* Capability badges follow the *resolved* answer, so an override shows
-                          here the moment it's saved (#711). */}
-                      <CapabilityIcons capabilities={m.capabilities} />
-                      {m.context_length != null && (
-                        <Tooltip label={`${m.context_length.toLocaleString()} token context`}>
-                          <Badge tone="dim">{formatContextLength(m.context_length)}</Badge>
-                        </Tooltip>
-                      )}
-                      <Tooltip label="Context budget and capabilities">
-                        <Button
-                          variant="ghost"
-                          aria-label={`Settings for ${id}`}
-                          onClick={() => setSettingsFor(m)}
-                        >
-                          <SlidersHorizontal size={14} />
-                        </Button>
-                      </Tooltip>
-                      <Tooltip label={isDefault ? "Default model" : "Set as default"}>
-                        <Button
-                          variant="ghost"
-                          aria-label={isDefault ? `${id} is the default` : `Set ${id} as default`}
-                          onClick={() => setDefault.mutate(isDefault ? null : id)}
-                          disabled={setDefault.isPending}
-                        >
-                          <Star size={14} fill={isDefault ? "currentColor" : "none"} />
-                        </Button>
-                      </Tooltip>
-                      <Button
-                        variant="ghost"
-                        aria-label={`Remove ${id}`}
-                        onClick={() => remove.mutate(id)}
-                        disabled={remove.isPending}
+                    <div key={id} className="flex flex-col gap-1">
+                      <div
+                        className={cn(
+                          "flex items-center gap-2 rounded-(--radius-field) border px-3 py-2",
+                          isDefault && isEmbedding ? "border-danger/50" : "border-edge",
+                        )}
                       >
-                        <Trash2 size={14} />
-                      </Button>
+                        <span className="min-w-0 flex-1 truncate font-mono text-sm text-ink">
+                          {id}
+                        </span>
+                        {isDefault && <Badge tone="accent">default</Badge>}
+                        {isEmbedding && <Badge tone="dim">embedding</Badge>}
+                        {/* Capability badges follow the *resolved* answer, so an override — or
+                            a tool capability learned from the provider — shows here the moment
+                            it lands (#711, ADR-0140). */}
+                        <CapabilityIcons capabilities={m.capabilities} />
+                        {m.context_length != null ? (
+                          <Tooltip label={`${m.context_length.toLocaleString()} token context`}>
+                            <Badge tone="dim">{formatContextLength(m.context_length)}</Badge>
+                          </Tooltip>
+                        ) : (
+                          m.in_catalogue === false && (
+                            // #879: the core has always *known* this and only ever logged it.
+                            <Tooltip label="Not in the model catalogue we ship — context length and capabilities are unknown. Set them in this model's settings.">
+                              <Badge tone="dim">unlisted</Badge>
+                            </Tooltip>
+                          )
+                        )}
+                        <Tooltip label="Context budget and capabilities">
+                          <Button
+                            variant="ghost"
+                            aria-label={`Settings for ${id}`}
+                            onClick={() => setSettingsFor(m)}
+                          >
+                            <SlidersHorizontal size={14} />
+                          </Button>
+                        </Tooltip>
+                        <Tooltip
+                          label={
+                            isEmbedding
+                              ? "An embedding model can't answer chats"
+                              : isDefault
+                                ? "Default model"
+                                : "Set as default"
+                          }
+                        >
+                          <Button
+                            variant="ghost"
+                            aria-label={isDefault ? `${id} is the default` : `Set ${id} as default`}
+                            onClick={() => setDefault.mutate(isDefault ? null : id)}
+                            disabled={setDefault.isPending || (isEmbedding && !isDefault)}
+                          >
+                            <Star size={14} fill={isDefault ? "currentColor" : "none"} />
+                          </Button>
+                        </Tooltip>
+                        <Button
+                          variant="ghost"
+                          aria-label={`Remove ${id}`}
+                          onClick={() => remove.mutate(id)}
+                          disabled={remove.isPending}
+                        >
+                          <Trash2 size={14} />
+                        </Button>
+                      </div>
+                      {/* A stored default that is an embedding model (#944). The core refuses
+                          it at turn time, but a refusal the operator can't act on is half a
+                          fix — so the state is named here, where the star that fixes it is. */}
+                      {isDefault && isEmbedding && (
+                        <p className="px-1 text-xs text-danger">
+                          This is an embedding model — chats using it will fail. Star a chat
+                          model instead, or set its role under settings if the catalogue is
+                          wrong about it.
+                        </p>
+                      )}
                     </div>
                   );
                 })}

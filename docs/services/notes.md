@@ -391,8 +391,8 @@ service shares one database and keeps its own head revision.
   Alembic run per test is needless cost; CI's `migrations` gate is what proves the two agree.
 - **No `server_default="'…'"` literal exists in this service's models** — every server default
   here is `func.now()`, which Alembic's autogenerate renders correctly on its own. Unlike
-  storage, calendar, knowledge and mail, notes needed no `text("'…'")` fix and ships no
-  `0002` normalisation revision.
+  storage, knowledge and core-app, notes needed no `text("'…'")` fix and ships no `0002`
+  normalisation revision.
 - **Backfill audit (#903 rule):** seven `NOT NULL` columns carry a Python-side `default=` with
   no `server_default=` — `notes_suggestions.{proposed_content,origin,note}` and
   `notes_suggestion_decisions.{origin,note,proposed_content,applied_content}`. None needs a

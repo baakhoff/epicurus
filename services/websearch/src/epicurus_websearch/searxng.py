@@ -54,6 +54,10 @@ class SearXNGClient:
         # querying SearXNG again — see the module's ``/status`` handler for why this beats
         # a periodic canary query.
         self._last_unresponsive_engines: list[tuple[str, str]] = []
+        # Whether any search has completed in this process. An empty
+        # ``_last_unresponsive_engines`` means "every engine answered" *or* "nobody has
+        # searched yet", and ``/status`` must not report the second as the first.
+        self._has_searched = False
 
     async def search(self, query: str, num_results: int = 5) -> SearchOutcome:
         """Return up to *num_results* web results for *query*, plus engine health.
@@ -97,6 +101,7 @@ class SearXNGClient:
         number_of_results = int(data.get("number_of_results") or 0)
 
         self._last_unresponsive_engines = unresponsive
+        self._has_searched = True
         return SearchOutcome(
             results=out,
             unresponsive_engines=unresponsive,
@@ -112,6 +117,15 @@ class SearXNGClient:
         handler for why this is preferred over a periodic canary query.
         """
         return list(self._last_unresponsive_engines)
+
+    @property
+    def has_searched(self) -> bool:
+        """Whether a search has completed in this process — ``/status``'s evidence flag.
+
+        Without it an unsearched instance and a perfectly healthy one are the same shape,
+        and the panel would assert "not degraded" on no evidence at all.
+        """
+        return self._has_searched
 
     async def health_check(self) -> bool:
         """Return True if SearXNG responds to ``/healthz``."""

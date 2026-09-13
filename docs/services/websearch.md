@@ -177,7 +177,7 @@ what the page might have said.
 | `GET` | `/health` | Liveness probe (standard epicurus health response). |
 | `GET` | `/metrics` | Prometheus metrics. |
 | `GET` | `/manifest` | Module manifest (tools, UI, config schema). |
-| `GET` | `/status` | SearXNG reachability **and** last-search health (#936): `{"searxng_healthy": true, "searxng_url": "...", "degraded": false, "unresponsive_engines": []}`. `searxng_healthy` is `/healthz` liveness — true as long as the SearXNG process is up, even if every engine it asks is blocked. `degraded`/`unresponsive_engines` report the **most recent `web_search` call's** engine health (`SearXNGClient.last_unresponsive_engines`), not a separate probe — see the note below. |
+| `GET` | `/status` | SearXNG reachability **and** last-search health (#936): `{"searxng_healthy": true, "searxng_url": "...", "search_evidence": "no search has run since this instance started", "degraded": false, "unresponsive_engines": null}`. Every value is a flat scalar — the core proxies the object verbatim and the Modules panel stringifies each field, so `unresponsive_engines` is the rendered `"google (timeout), bing (blocked)"` (or `null`), never a nested list. `searxng_healthy` is `/healthz` liveness — true as long as the SearXNG process is up, even if every engine it asks is blocked. `degraded`/`unresponsive_engines` report the **most recent `web_search` call's** engine health (`SearXNGClient.last_unresponsive_engines`), not a separate probe, and `search_evidence` says whether there has been a search to report on at all — see the note below. |
 | `GET` | `/resolve/result/{ref_id}` | Hover-card resolver for a search result (ADR-0019) — see below. |
 | `GET` | `/resolve/source/{ref_id}` | Hover-card resolver for an ingested link (#739) — see below. |
 | `*` | `/mcp/*` | Streamable-HTTP MCP transport (agent connects here). |
@@ -192,7 +192,10 @@ operator's actual use of `web_search` is a free, always-fresh signal, and the mo
 other request to SearXNG regardless — so `/status` reads `SearXNGClient.last_unresponsive_engines`,
 set by the most recent `search()` call, at zero extra cost. The tradeoff: an instance nobody
 has searched with since it broke still reads `degraded: false` until the next search. Accepted
-— `/status` exists to explain the *next* result, not to poll for outages independent of use.
+— `/status` exists to explain the *next* result, not to poll for outages independent of use —
+but stated on the panel rather than left for the reader to infer: `search_evidence` says
+whether any search has run in this process, so `degraded: false` with nothing behind it reads
+as the absence of evidence it is, and not as a clean bill of health.
 
 #### `HoverCard` shape (from resolver)
 

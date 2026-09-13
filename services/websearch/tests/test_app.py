@@ -126,7 +126,10 @@ class TestStatus:
         body = client.get("/status").json()
         assert body["searxng_healthy"] is True
         assert body["degraded"] is False
-        assert body["unresponsive_engines"] == []
+        assert body["unresponsive_engines"] is None
+        # "not degraded" here is the absence of evidence, and the panel says so rather than
+        # letting a restarted-but-broken instance read as a clean bill of health.
+        assert body["search_evidence"] == "no search has run since this instance started"
 
     def test_reports_degraded_after_a_search_with_unresponsive_engines(
         self, monkeypatch: pytest.MonkeyPatch
@@ -143,10 +146,12 @@ class TestStatus:
         body = client.get("/status").json()
         assert body["searxng_healthy"] is True
         assert body["degraded"] is True
-        assert body["unresponsive_engines"] == [
-            {"engine": "google", "error": "timeout"},
-            {"engine": "bing", "error": "blocked"},
-        ]
+        # A flat string, not a nested list: the shell renders each status value with
+        # `String(v)`, which turns a list of objects into "[object Object]".
+        assert body["unresponsive_engines"] == "google (timeout), bing (blocked)"
+        assert all(
+            isinstance(value, (str, bool, int, float, type(None))) for value in body.values()
+        )
 
 
 async def _true() -> bool:

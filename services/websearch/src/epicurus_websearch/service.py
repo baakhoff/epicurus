@@ -37,8 +37,13 @@ MODULE_NAME = "websearch"
 logger = get_logger(__name__)
 
 
-def _describe_unresponsive(unresponsive: list[tuple[str, str]]) -> str:
-    """Render SearXNG's ``[engine, error_type]`` pairs as ``"bing (timeout), google (blocked)"``."""
+def describe_unresponsive(unresponsive: list[tuple[str, str]]) -> str:
+    """Render SearXNG's ``[engine, error_type]`` pairs as ``"bing (timeout), google (blocked)"``.
+
+    Public because ``GET /status`` renders the same pairs the same way: a module's status
+    fields are flat scalars (the shell stringifies each one), so the panel and the tool
+    message say the identical thing rather than one of them showing ``[object Object]``.
+    """
     return ", ".join(f"{engine} ({error})" for engine, error in unresponsive)
 
 
@@ -158,7 +163,7 @@ def build_module(
                 return tool_envelope(
                     "Search is degraded, not confirmed empty: no results came back, and "
                     f"{len(outcome.unresponsive_engines)} search engine(s) did not respond"
-                    f" ({_describe_unresponsive(outcome.unresponsive_engines)}). Do not report"
+                    f" ({describe_unresponsive(outcome.unresponsive_engines)}). Do not report"
                     " this as a clean 'no results' — say plainly that search is currently"
                     " unreliable or unavailable, and consider retrying before falling back to"
                     " anything else.",
@@ -185,7 +190,7 @@ def build_module(
         if outcome.unresponsive_engines:
             text += (
                 f"\n\n(Note: {len(outcome.unresponsive_engines)} search engine(s) did not"
-                f" respond — {_describe_unresponsive(outcome.unresponsive_engines)} — these"
+                f" respond — {describe_unresponsive(outcome.unresponsive_engines)} — these"
                 " results may be incomplete.)"
             )
         return tool_envelope(text, refs)

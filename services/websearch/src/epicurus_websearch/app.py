@@ -26,7 +26,7 @@ from epicurus_websearch.ingest import LinkIngestor
 from epicurus_websearch.refs import decode_ref, decode_source_ref
 from epicurus_websearch.safety import FetchLimits, GuardedFetcher, UrlGuard
 from epicurus_websearch.searxng import SearXNGClient
-from epicurus_websearch.service import MODULE_NAME, build_module
+from epicurus_websearch.service import MODULE_NAME, build_module, describe_unresponsive
 from epicurus_websearch.settings import WebSearchSettings
 from epicurus_websearch.vision import VisionCaptioner
 
@@ -114,17 +114,25 @@ def create_app() -> FastAPI:
         this module makes no other request to SearXNG anyway. The tradeoff: a degraded
         instance nobody has searched with since it broke still reads healthy here until the
         next search — acceptable for a health panel that exists to explain the *next*
-        result, not to poll for outages independent of use.
+        result, not to poll for outages independent of use. ``search_evidence`` is what
+        keeps that honest: ``degraded: false`` on a freshly started instance is the absence
+        of evidence, not evidence of health, and the panel says which it is looking at.
         """
         healthy = await client.health_check()
         unresponsive = client.last_unresponsive_engines
+        # Flat scalars only: the core proxies this object verbatim and the Modules panel
+        # renders each value with `String(v)`, so a nested list of objects would read as
+        # "[object Object]" (`docs/reference/modules.md` — a status field is a flat value).
         return {
             "searxng_healthy": healthy,
             "searxng_url": settings.searxng_url,
+            "search_evidence": (
+                "a search has run since this instance started"
+                if client.has_searched
+                else "no search has run since this instance started"
+            ),
             "degraded": bool(unresponsive),
-            "unresponsive_engines": [
-                {"engine": engine, "error": error} for engine, error in unresponsive
-            ],
+            "unresponsive_engines": describe_unresponsive(unresponsive) or None,
         }
 
     @app.get("/resolve/result/{ref_id}", response_model=HoverCard)

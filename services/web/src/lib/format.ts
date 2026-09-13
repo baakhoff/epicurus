@@ -89,3 +89,16 @@ export function isHostedModelId(model: string): boolean {
   if (slash <= 0) return false;
   return HOSTED_PROVIDER_ALIASES.has(model.slice(0, slash));
 }
+
+/**
+ * The model-part-only placeholder for a hosted provider's add-a-model input (#922) — the alias
+ * prefix is supplied by the provider select, so the hint must not repeat it. Only the **first**
+ * slash is stripped, so OpenRouter's two-slash hint (`openrouter/anthropic/claude-sonnet-4.6`)
+ * still shows its vendor segment (`anthropic/claude-sonnet-4.6`).
+ */
+export function hostedModelIdHint(alias: string): string {
+  const hint = PROVIDER_MODEL_HINTS[alias];
+  if (!hint) return "model-id";
+  const slash = hint.indexOf("/");
+  return slash === -1 ? hint : hint.slice(slash + 1);
+}

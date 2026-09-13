@@ -23,6 +23,37 @@ images to GHCR.
   database. A further backfill-audit pass adds a matching database-level default to eight more
   columns that carried a Python-side one only, closing the gap on principle even though none of
   them was ever at risk of a `NULL` row. `knowledge` 0.30.0→0.31.0 (MINOR).
+- **`notes` adopts the migration foundation** (#834, #930) — the note bodies, folders, version
+  history and the suggestion queue + its audit trail are now Alembic-managed, one baseline
+  revision applied at startup in place of the four `create_all` calls the lifespan used to make.
+  Unlike several other services, notes carried no plain-string `server_default` bug, so no
+  normalisation revision was needed; a backfill audit of its seven `default=`-without-
+  `server_default=` `NOT NULL` columns found none at risk — every one was introduced alongside
+  its table, never added to a populated one. `notes` 0.14.0→0.15.0 (MINOR).
+- **`tasks`'s schema is migration-managed** (#834, #929) — the module adopts the Alembic
+  foundation (#926): a startup `run_migrations` call replaces `TaskStore`/`LeadTimePrefsStore`/
+  `FiredMarkerStore`'s `create_all` + additive-reconcile, under a Postgres advisory lock, across
+  the four tables its three `DeclarativeBase` objects own (`tasks_local`, `task_repeats`,
+  `tasks_lead_time_prefs`, `tasks_fired_markers`). The baseline revision absorbs the reconcile
+  that used to repair a pre-#218 `tasks_local` missing `status`/`priority`/`tags`/`repeat` on an
+  existing deployment. The backfill audit (#903's rule) found one `NOT NULL`
+  `default=`-without-`server_default=` column, `tasks_local.completed` — no revision needed, since
+  it has been part of the table since v1 and both its writers always set it explicitly, so no
+  deployment can have carried a `NULL` there. `tasks` 0.24.0→0.25.0 (MINOR).
+- **`calendar`'s schema is migration-managed now** (#834, #928) — the second service to adopt
+  the Alembic foundation (#926), after `storage`. A baseline revision covers all four
+  `DeclarativeBase`s (six tables: the local event store, the lead-time preference, the
+  lead-time scheduler's fire-once markers, and the reconcile layer's sync cursor /
+  observed-event cache / self-write ledger); the startup reconcile calls
+  (`epicurus_core.db.ensure_columns`, `_ADDED_COLUMNS`) are gone from every store, replaced by
+  one `run_migrations` call in the lifespan. The backfill audit found **seven** `NOT NULL`
+  columns with a Python-side default and no server default — `calendar_events.{all_day,
+  excluded}` (which the old reconcile could only add *nullable* to a populated table, so an
+  upgraded deployment could genuinely hold `NULL` there, #903's shape of bug) and
+  `calendar_sync_state.collection` / `calendar_synced_event.{collection,title,all_day,
+  change_hash}` (always `NOT NULL` in practice, since those tables have no reconcile history) —
+  a revision backfills any real `NULL` and adds the server default to all seven. `calendar`
+  0.21.1→0.22.0 (MINOR).
 - **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
   the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
   was un-shippable, a `NOT NULL` column added without a server default reached existing rows as
@@ -48,6 +79,13 @@ images to GHCR.
   the first change here the reconcile could never have made. The remaining services carry the same
   pattern and each lane fixes its own. `epicurus-core` 0.38.0→0.39.0 (MINOR), `storage`
   0.11.0→0.12.0 (MINOR).
+- **Add a hosted model straight from the Models page** (#922) — the Hosted models card's
+  "None yet" copy used to send the operator to a chat's model picker just to save an id; now an
+  **Add a hosted model** row sits on the card itself, with a provider select drawn from what the
+  core actually reports (never the client's static alias list, so an unregistered provider can't
+  be picked), a model-id field that prepends the alias for you (OpenRouter's two-slash ids stay
+  intact), and an inline hint when the chosen provider's key is `missing`/`unavailable` — the
+  first place the core's `key_state` (#728) is rendered. `web` 0.145.0→0.146.0 (MINOR).
 - **MinIO images now pull from Quay** — Docker Hub no longer serves the `minio/minio` and
   `minio/mc` repositories (a `404` on the repository itself, not just the tag), so every
   fresh `compose up`, the `runtime-smoke` and `k8s-smoke` gates, and a chart install failed

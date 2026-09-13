@@ -18,7 +18,6 @@ from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from epicurus_core import PortabilityRecord
-from epicurus_core_app.module_prefs import ModulePrefsStore
 from epicurus_core_app.portability.core_data import (
     CORE_SETS,
     export_set,
@@ -359,16 +358,28 @@ def _spec(kind: str) -> Any:
 
 
 async def _reconciled_module_prefs(tmp_path: Path) -> AsyncEngine:
-    """A source the way a long-lived install actually is: ``suggestions_enabled`` **nullable**.
+    """A long-lived install's real state: ``suggestions_enabled`` **nullable**, holding NULL.
 
-    Not hand-carved DDL pretending to be old — the real path. ``module_prefs`` is rebuilt
-    with only the columns of its *first* release and a row in it, then
-    :meth:`ModulePrefsStore.init` runs, which is where the shared additive reconcile (#249,
-    ADR-0067) adds the rest. It has nothing to backfill a populated table with, so a column
-    with no ``server_default`` is added **nullable**, and the pre-existing row reads ``NULL``
-    in a column the model declares ``NOT NULL``. That is the state that produced the
-    ``NotNullViolationError`` in #903. Every other travelling table is created normally, so
-    the whole ``prefs`` set can still be exported around it.
+    The state that produced the ``NotNullViolationError`` in #903. ``suggestions_enabled``
+    postdates ``module_prefs``, the model declares it ``NOT NULL``, and the additive reconcile
+    (#249, ADR-0067) had nothing to backfill a populated table with — so it added the column
+    **nullable** and every pre-existing row read ``NULL`` in a column the model says cannot be.
+
+    **Hand-carved DDL on purpose, now.** This used to build the state through the real path
+    (legacy table → ``ModulePrefsStore.init()`` → reconcile), and that no longer reproduces it:
+    #927 gave the model a ``server_default``, so the reconcile adds the column
+    ``NOT NULL DEFAULT true`` and backfills, and revision 0003 repairs any database that already
+    carried the ``NULL``. The state survives only where a migration cannot reach it — an archive
+    exported before 0003, a database restored from an older backup — which is precisely what this
+    seam has to keep tolerating. The normalisation under test is the library-level rule (#914,
+    generalised by #918), not a fact about today's models.
+
+    ``removed`` is NULL here for the same reason in the weaker form: its column shipped with the
+    table, so no real deployment has a NULL in it, but it is the second ``default=``-only boolean
+    in the set and the export must normalise it identically.
+
+    Every other travelling table is created normally, so the whole ``prefs`` set still exports
+    around it.
     """
     engine = await _engine(tmp_path)
     async with engine.begin() as conn:
@@ -378,12 +389,16 @@ async def _reconciled_module_prefs(tmp_path: Path) -> AsyncEngine:
             " tenant VARCHAR(63) NOT NULL,"
             " module VARCHAR(128) NOT NULL,"
             " enabled BOOLEAN NOT NULL,"
+            " removed BOOLEAN,"
+            " models TEXT DEFAULT '{}' NOT NULL,"
+            " disabled_tools TEXT DEFAULT '[]' NOT NULL,"
+            " collections TEXT DEFAULT '{}' NOT NULL,"
+            " suggestions_enabled BOOLEAN,"
             " PRIMARY KEY (tenant, module))"
         )
         await conn.exec_driver_sql(
             "INSERT INTO module_prefs (tenant, module, enabled) VALUES ('local', 'calendar', 1)"
         )
-    await ModulePrefsStore(engine).init()
     return engine
 
 

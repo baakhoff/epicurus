@@ -20,18 +20,15 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 from sqlalchemy import CursorResult, DateTime, String, Text, delete, func, select
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
-from epicurus_core.db import ensure_columns
 from epicurus_core_app.memory.store import Base
 
-# Columns added to memory_extraction_queue after the table's first release, reconciled in place
-# at init (the store has no migration framework — ADR-0067). ``session_id`` (#771) stamps each
-# exchange with the conversation it came from, so deleting a chat can purge its still-queued
-# exchanges; legacy rows stay NULL and drain exactly as before.
-_ADDED_COLUMNS = ("session_id",)
+# ``session_id`` (#771) postdates ``memory_extraction_queue``: it stamps each exchange with the
+# conversation it came from, so deleting a chat can purge its still-queued exchanges. The
+# additive reconcile used to add it from ``init()`` (ADR-0067); the baseline revision absorbed
+# that (#834). Nullable in the model, so legacy rows stay NULL and drain exactly as before.
 
 
 class ExtractionTask(Base):
@@ -73,16 +70,14 @@ class ExtractionQueue:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the queue table if it does not exist (idempotent; shares the store's Base),
-        then reconcile columns added after first release (``session_id``, #771)."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Add post-release columns to an already-provisioned table (ADR-0067)."""
-        ensure_columns(sync_conn, ExtractionTask.__table__, _ADDED_COLUMNS)
 
     async def enqueue(
         self, *, tenant: str, user_text: str, assistant_text: str, session_id: str | None = None

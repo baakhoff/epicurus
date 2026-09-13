@@ -8,6 +8,8 @@ import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
+from epicurus_core.db.migrations import run_migrations
+from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 from epicurus_core_app.push.prefs import (
     ChannelPrefs,
     PushPrefs,
@@ -83,8 +85,8 @@ async def test_automation_override_set_and_clear() -> None:
     assert "auto-1" not in prefs.automation_overrides
 
 
-async def test_init_heals_a_legacy_table_missing_columns() -> None:
-    """A pre-existing table missing every added column self-heals (mirrors timezone_prefs)."""
+async def test_the_migration_heals_a_legacy_table_missing_columns() -> None:
+    """A pre-existing table missing every added column is reconciled by the baseline (#834)."""
     engine = create_async_engine(
         "sqlite+aiosqlite://",
         poolclass=StaticPool,
@@ -93,8 +95,14 @@ async def test_init_heals_a_legacy_table_missing_columns() -> None:
     async with engine.begin() as conn:
         await conn.exec_driver_sql("CREATE TABLE push_prefs (tenant VARCHAR(63) PRIMARY KEY)")
         await conn.exec_driver_sql("INSERT INTO push_prefs (tenant) VALUES ('t1')")
+    # Must ADD COLUMN rather than fail.
+    assert (
+        await run_migrations(
+            engine, service=SERVICE, script_location=SCRIPT_LOCATION, metadatas=METADATAS
+        )
+        == "adopted"
+    )
     store = PushPrefsStore(engine)
-    await store.init()  # must ADD COLUMN rather than fail
     prefs = await store.get(TENANT)
     assert prefs.quiet_hours_enabled is False
     await store.set_quiet_hours(TENANT, enabled=True, start="22:00", end="07:00")

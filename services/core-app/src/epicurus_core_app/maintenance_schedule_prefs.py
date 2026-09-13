@@ -22,11 +22,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import Boolean, Integer, String
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from epicurus_core.db import ensure_columns
 
 CADENCES = ("hourly", "daily", "weekly")
 
@@ -137,16 +134,14 @@ class MaintenanceScheduleStore:
         return self._default
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        ensure_columns(
-            sync_conn, _MaintenanceScheduleRow.__table__, ("enabled", "cadence", "hour", "weekday")
-        )
 
     async def get(self, tenant: str) -> MaintenanceSchedule:
         """The tenant's schedule, or the env-configured default if it has never set one."""

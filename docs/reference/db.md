@@ -204,12 +204,10 @@ table but never alters an *existing* one — so a column added to a model after 
 release silently never reached an already-provisioned database, and every query referencing it
 failed on Postgres with `column … does not exist` (#214, #218). This adds those columns in place.
 
-It has two callers now:
-
-- a store that has **not** yet adopted Alembic, from its `init()` — the original use;
-- `epicurus_core.db.ops.create_table`, when a baseline meets a table that already exists.
-
-For a store still on the pre-Alembic path:
+It has one caller in the tree today — `epicurus_core.db.ops.create_table`, when a baseline meets
+a table that already exists. Every store-owning service is migrated, so no service's `init()`
+calls it any more. It stays public for a **new** service that has not adopted migrations yet;
+that store's `init()` looks like this:
 
 ```python
 from epicurus_core.db import ensure_columns
@@ -227,8 +225,8 @@ class TaskStore:
 
 - `table` is a mapped class's `__table__` (typed `FromClause` by SQLAlchemy, always a `Table` at
   runtime — passing anything else raises `TypeError`).
-- `columns` names the columns to reconcile. For a pre-Alembic store that is the post-release list,
-  which the store owns; `ops.create_table` passes the baseline's full column list.
+- `columns` names the columns to reconcile. `ops.create_table` passes the baseline's full column
+  list; a pre-Alembic store passes its post-release list, which the store owns.
 - **Idempotent** — a column already present is skipped, so it is safe to run on every startup.
 - The column type is compiled for the live dialect, so the same call is portable across Postgres
   (production) and SQLite (the unit tests).
@@ -252,6 +250,6 @@ table — there is nothing to backfill the existing rows with — so it is added
 row-reader coerces the resulting `NULL` to the model's Python-side default (e.g. calendar's
 `all_day` → `False`). That `NULL` is #903's cause, and a migration is what finally fixes it: see
 the [backfill rule](../developer/migrations.md#the-backfill-rule). Drops, renames, type changes and
-true NOT-NULL backfills are ordinary revisions now — for a **migrated** service. For one still on
-this path, the interim rule in [Versioning](../developer/versioning.md#schema-changes-before-10)
-still holds.
+true NOT-NULL backfills are ordinary revisions now, and with every store-owning service migrated
+the interim rule in [Versioning](../developer/versioning.md#schema-changes-before-10) is retired
+repo-wide — it binds only a **new** service that has not adopted migrations yet.

@@ -1,10 +1,14 @@
 [project]
 name = "epicurus-core-app"
-version = "0.123.0"
+version = "0.124.0"
 description = "The epicurus core runtime: hosts the agent loop, LLM gateway, memory, power states, and the module-facing platform API."
 requires-python = ">=3.11"
 dependencies = [
-    "epicurus-core",
+    # The `db` extra, not bare `epicurus-core`: this service's schema is Alembic-managed
+    # (ADR-XXXX), and the migration runner lives behind that extra. SQLAlchemy was always
+    # declared directly below, so the extra is what actually puts Alembic in the runtime
+    # image — the Dockerfile installs `--package epicurus-core-app` with no extras of its own.
+    "epicurus-core[db]",
     "fastapi>=0.141.1",
     # FastAPI needs python-multipart for UploadFile (the chat attachment upload, ADR-0019).
     "python-multipart>=0.0.9",

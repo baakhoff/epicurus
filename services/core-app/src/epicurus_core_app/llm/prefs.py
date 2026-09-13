@@ -2,8 +2,8 @@
 
 Stored in the core's Postgres database so preferences survive restarts and are
 consistent across devices (unlike the web client's localStorage model pref, which
-is per-device and per-chat).  The table is auto-created on first use via
-``LlmPrefsStore.init()`` (same pattern as ``ConversationStore``).
+is per-device and per-chat).  The table is created by this service's migrations
+(:mod:`epicurus_core_app.migrations`), applied at startup (#834).
 """
 
 from __future__ import annotations
@@ -11,12 +11,9 @@ from __future__ import annotations
 import json
 from typing import cast
 
-from sqlalchemy import Integer, String, Text
-from sqlalchemy.engine import Connection
+from sqlalchemy import Integer, String, Text, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from epicurus_core.db import ensure_columns
 
 
 class _PrefBase(DeclarativeBase):
@@ -29,8 +26,10 @@ class _LlmPrefRow(_PrefBase):
     __tablename__ = "llm_prefs"
 
     tenant: Mapped[str] = mapped_column(String(63), primary_key=True)
-    # JSON-encoded list of model names the operator has hidden from pickers.
-    hidden_models: Mapped[str] = mapped_column(Text, default="[]", server_default="'[]'")
+    # JSON-encoded list of model names the operator has hidden from pickers. ``text("'[]'")``,
+    # not the bare string ``"'[]'"``: a plain string is a *literal* SQLAlchemy quotes for you,
+    # so that spelling emitted ``DEFAULT '''[]'''`` from ``create_all`` (#834, revision 0002).
+    hidden_models: Mapped[str] = mapped_column(Text, default="[]", server_default=text("'[]'"))
     # Operator-chosen global default for chat; NULL means fall back to the env default.
     global_default: Mapped[str | None] = mapped_column(String(256), nullable=True)
     # Operator-chosen global default for embedding; NULL means fall back to the env default.
@@ -54,31 +53,14 @@ class LlmPrefsStore:
         )
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_PrefBase.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``global_default`` / ``embed_default`` (#214), ``context_window``, ``kv_cache_type``,
-        and ``agent_max_steps`` all postdate the table's first release; without this an
-        existing ``llm_prefs`` table 500s on every prefs/embedding read. See
-        :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(
-            sync_conn,
-            _LlmPrefRow.__table__,
-            (
-                "global_default",
-                "embed_default",
-                "context_window",
-                "kv_cache_type",
-                "agent_max_steps",
-            ),
-        )
 
     async def _get_or_create(self, session: AsyncSession, tenant: str) -> _LlmPrefRow:
         row = await session.get(_LlmPrefRow, tenant)

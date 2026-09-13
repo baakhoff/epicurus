@@ -376,7 +376,7 @@ async def test_targets_round_trip_through_the_store(tmp_path: Any) -> None:
     await env.engine.dispose()
 
 
-async def test_init_is_idempotent_with_ensure_columns(tmp_path: Any) -> None:
+async def test_init_is_idempotent(tmp_path: Any) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'idem.db'}")
     store = AutomationStore(engine)
     await store.init()

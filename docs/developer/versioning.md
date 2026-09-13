@@ -97,20 +97,19 @@ early bump collides with their own version-line edits.
 Schema is **Alembic-managed, one migration environment per service** (#834, ADR-XXXX).
 A change to a model ships with a revision in the same PR; `task migrate:check --
 <service>` and CI's `migrations` gate fail the change if it does not. The mechanics
-are in **[Schema migrations](migrations.md)**; what belongs here is the *policy*,
-which now differs by service:
+are in **[Schema migrations](migrations.md)**; what belongs here is the *policy*.
 
-- **A migrated service has no special rule.** A drop, a rename, a retype, a
-  NOT-NULL backfill — all ordinary revisions, reviewable and reversible, and all
-  allowed before `1.0.0`. The interim prohibition below is **retired** for these
-  services. `task migrate:list` names them; `storage` was the first.
-- **A service not yet migrated** still builds its schema with
-  `Base.metadata.create_all` plus the additive reconcile
-  (`epicurus_core.db.ensure_columns` — see the [reference](../reference/db.md),
-  ADR-0067), which adds columns the model declares and the live table lacks and
-  **never** drops, renames, retypes, or backfills. For those the interim policy
-  stands: **no destructive schema change before `1.0.0`.** Model the need
-  additively — a new column, a new table — defer it, or migrate that service first.
+**Every store-owning service is migrated** — `storage`, `calendar`, `tasks`, `notes`,
+`knowledge`, `mail`, `core-app` (`task migrate:list` names them). With that, the
+interim **no-destructive-schema-change-before-`1.0.0`** rule is **retired repo-wide**:
+a drop, a rename, a retype, a NOT-NULL backfill are ordinary revisions now —
+reviewable, reversible, and allowed before `1.0.0`.
+
+The additive reconcile (`epicurus_core.db.ensure_columns` — see the
+[reference](../reference/db.md), ADR-0067) is no longer on any service's startup path.
+It stays in the library as the repair arm inside an idempotent baseline, and for a
+**new** service that has not adopted migrations yet: until one does, its schema is
+additive-only and the interim rule applies to that service alone.
 
 Either way the bump follows the table above: a schema change the user can see is a
 MINOR, one they cannot is a PATCH.

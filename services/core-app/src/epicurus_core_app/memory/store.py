@@ -19,19 +19,17 @@ from sqlalchemy import (
     select,
     update,
 )
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_core import Attachment, EntityRef
-from epicurus_core.db import ensure_columns
 from epicurus_core_app.agent.activity import MessageActivity
 
-# JSON columns added to agent_messages after the table's first release (v0.2). On an
-# existing deployment these are added in place at init (the store has no migration
-# framework — see ``ConversationStore._ensure_columns``). ``activity`` joined them in v0.19
-# (ADR-0041: the assistant turn's persisted thinking + tool steps).
-_ADDED_JSON_COLUMNS = ("entity_refs", "attachments", "activity")
+# ``entity_refs`` / ``attachments`` (v0.2) and ``activity`` (v0.19, ADR-0041 — the assistant
+# turn's persisted thinking + tool steps) all postdate ``agent_messages``. The additive
+# reconcile used to add them from ``init()`` (ADR-0067); the baseline revision absorbed that
+# (#834). All three are nullable in the model, so a reconciled table and a freshly created one
+# agree and no backfill revision is owed.
 
 
 class SessionSummary(BaseModel):
@@ -144,7 +142,7 @@ class EphemeralSessionRow(Base):
     ``memory_search``'s past-conversation half — and (b) findable by the **orphan sweep**, so
     a crash never strands an invisible chat on disk. ``session_id`` is the primary key, like
     ``session_models``: session ids are client-minted uuids, so a cross-tenant collision is
-    unrepresentable by design. A new table, created by ``create_all`` — no migration.
+    unrepresentable by design.
     """
 
     __tablename__ = "ephemeral_sessions"
@@ -172,20 +170,14 @@ class ConversationStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``entity_refs`` / ``attachments`` (ADR-0019) and ``activity`` (ADR-0041) are nullable
-        JSON columns added after v0.2; they are added in place on an older table. See
-        :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(sync_conn, StoredMessage.__table__, _ADDED_JSON_COLUMNS)
 
     async def append(
         self,
@@ -519,9 +511,9 @@ class ConversationStore:
 class AttachmentStore:
     """Core-side storage for uploaded attachment bytes, tenant-scoped (ADR-0019).
 
-    Shares ``Base`` with :class:`ConversationStore`, so its table is created by
-    ``ConversationStore.init`` (``create_all``). The agent reads these to expand a
-    ``file`` attachment into the turn's context.
+    Shares ``Base`` with :class:`ConversationStore`, so the two tables travel together — through
+    this service's migrations in the deployed core, and through ``ConversationStore.init()`` in
+    the tests. The agent reads these to expand a ``file`` attachment into the turn's context.
     """
 
     def __init__(self, engine: AsyncEngine) -> None:
@@ -578,7 +570,12 @@ class EphemeralSessionStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the flag table if it does not exist (idempotent; shares the store's Base)."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 

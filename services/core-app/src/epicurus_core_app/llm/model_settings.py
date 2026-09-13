@@ -6,20 +6,17 @@ model and a 1B model want very different context budgets. Resolution is layered:
 value wins, else the global pref, else the env default (see ``LlmGateway._settings_for``).
 
 Stored in the core's Postgres database so choices survive restarts and are consistent across
-devices. Auto-created on first use via ``init`` (same pattern as ``ModulePrefsStore`` /
-``LlmPrefsStore``). Both columns are nullable — ``None`` means "inherit" — and a row with
-nothing set is deleted rather than kept empty.
+devices. The table is created by this service's migrations
+(:mod:`epicurus_core_app.migrations`), applied at startup (#834). Both columns are nullable —
+``None`` means "inherit" — and a row with nothing set is deleted rather than kept empty.
 """
 
 from __future__ import annotations
 
 from pydantic import BaseModel
 from sqlalchemy import Integer, String, select
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from epicurus_core.db import ensure_columns
 
 
 class ModelSettings(BaseModel):
@@ -66,22 +63,14 @@ class ModelSettingsStore:
         )
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_ModelSettingsBase.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``context_window`` / ``keep_alive`` / ``device`` (the last for the GPU/CPU choice)
-        are added in place on a table provisioned before they existed. See
-        :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(
-            sync_conn, _ModelSettingsRow.__table__, ("context_window", "keep_alive", "device")
-        )
 
     async def get(self, tenant: str, model: str) -> ModelSettings:
         """The stored settings for one model (all-``None`` when the operator set nothing)."""

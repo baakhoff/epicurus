@@ -2,19 +2,16 @@
 
 The operator's IANA timezone, stored in the core's Postgres so the agent's ``now`` tool
 (and any future time-aware behaviour) resolves a consistent *local* time across restarts
-and devices. Auto-created on first use via ``TimezonePrefsStore.init()`` — the same pattern
-as :class:`~epicurus_core_app.llm.prefs.LlmPrefsStore`; an unset value falls back to the
-configured default (``DEFAULT_TIMEZONE``).
+and devices. The table is created by this service's migrations
+(:mod:`epicurus_core_app.migrations`), applied at startup (#834); an unset value falls back to
+the configured default (``DEFAULT_TIMEZONE``).
 """
 
 from __future__ import annotations
 
 from sqlalchemy import String
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-
-from epicurus_core.db import ensure_columns
 
 
 class _TzBase(DeclarativeBase):
@@ -47,19 +44,14 @@ class TimezonePrefsStore:
         return self._default
 
     async def init(self) -> None:
-        """Create the schema, then add any columns introduced after first release."""
+        """Build this store's tables from the models — the **unit-test** schema path.
+
+        The deployed service does not call this: its schema comes from the revisions in
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        module's docstring for why ``create_all`` survives here, and what keeps it honest.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_TzBase.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``timezone`` self-heals on a table provisioned before it existed rather than 500ing.
-        See :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(sync_conn, _TimezonePrefRow.__table__, ("timezone",))
 
     async def get_timezone(self, tenant: str) -> str:
         """Return the stored IANA timezone, or the configured default if unset."""

@@ -12,6 +12,13 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`notes` adopts the migration foundation** (#834, #930) — the note bodies, folders, version
+  history and the suggestion queue + its audit trail are now Alembic-managed, one baseline
+  revision applied at startup in place of the four `create_all` calls the lifespan used to make.
+  Unlike several other services, notes carried no plain-string `server_default` bug, so no
+  normalisation revision was needed; a backfill audit of its seven `default=`-without-
+  `server_default=` `NOT NULL` columns found none at risk — every one was introduced alongside
+  its table, never added to a populated one. `notes` 0.14.0→0.15.0 (MINOR).
 - **`tasks`'s schema is migration-managed** (#834, #929) — the module adopts the Alembic
   foundation (#926): a startup `run_migrations` call replaces `TaskStore`/`LeadTimePrefsStore`/
   `FiredMarkerStore`'s `create_all` + additive-reconcile, under a Postgres advisory lock, across

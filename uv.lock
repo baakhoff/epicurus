@@ -1197,11 +1197,11 @@ requires-dist = [
 
 [[package]]
 name = "epicurus-notes"
-version = "0.14.0"
+version = "0.15.0"
 source = { editable = "services/notes" }
 dependencies = [
     { name = "asyncpg" },
-    { name = "epicurus-core" },
+    { name = "epicurus-core", extra = ["db"] },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "qdrant-client" },
@@ -1212,7 +1212,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
-    { name = "epicurus-core", editable = "libs/epicurus-core" },
+    { name = "epicurus-core", extras = ["db"], editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "qdrant-client", specifier = ">=1.18.0,<1.19" },

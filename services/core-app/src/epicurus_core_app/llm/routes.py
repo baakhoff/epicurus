@@ -418,12 +418,18 @@ def create_llm_router(
     async def set_agent_max_steps(request: SetAgentMaxStepsRequest) -> dict[str, int | str | None]:
         """Set or clear the agent loop bound (tool rounds per turn) for this tenant.
 
-        Clamped to 1-12: at least one round to be useful, and a ceiling so a misconfigured
-        value can't let a turn run away. ``null`` clears the override (back to the env default).
+        Floored at 1 — a bound of zero could never answer — but **no ceiling** (#925, ADR-0143).
+        The old 1-12 clamp silently rewrote a 40 to 12, so a genuinely long task (search → read →
+        read → summarize → write) ran out of rounds with no way to give it more. What keeps a
+        confused model from looping forever is the loop's behaviour guards — the repeated-call
+        stop, the consecutive-tool-error stop, and the optional per-turn wall-clock deadline —
+        not a number the operator is forbidden to raise. ``null`` clears the override (back to
+        the ``AGENT_MAX_STEPS`` env default). A SaaS tier that needs a ceiling imposes it from
+        the overlay, where tier policy belongs (constraint #5).
         """
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
-        value = None if request.value is None else max(1, min(12, request.value))
+        value = None if request.value is None else max(1, request.value)
         await prefs.set_agent_max_steps(default_tenant, value)
         return {"status": "ok", "value": value}
 

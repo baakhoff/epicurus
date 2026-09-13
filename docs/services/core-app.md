@@ -169,25 +169,47 @@ call over and over, and a **streak of tool errors** (retrying a broken call to e
 applied identically to `run` and `run_stream`:
 
 - **Repeated identical call** — each step's calls are canonicalized to an order-free
-  `(name, sorted-args)` signature; matching the immediately previous step, the **first** repeat gets
-  a one-shot nudge (like the empty-answer nudge) and is **not re-executed** (a repeated *write* would
-  double-apply — the earlier result already stands), and a **further** repeat ends the turn with
+  `(name, sorted-args)` signature; matching the immediately previous step, a repeat is **not
+  re-executed** (a repeated *write* would double-apply — the earlier result already stands) and
+  earns a nudge (like the empty-answer nudge). **Three identical calls in a row** end the turn with
   `stopped="repeat_call"`. Comparing *arguments* leaves a legitimate distinct-args repeat (paging,
-  per-item work) untouched.
+  per-item work) untouched. The run is counted **per run of repeats** (#925): every fresh run of
+  identical calls gets the same three-in-a-row allowance, rather than the whole turn sharing one
+  nudge — which used to mean any *later* repeated call stopped the turn on its second occurrence.
 - **Error streak** — three consecutive tool errors end the turn with `stopped="tool_errors"`; **any**
   success resets the streak, so a turn that errors once and recovers is unaffected.
+- **Wall-clock deadline (#925)** — `AGENT_TURN_DEADLINE_S` seconds of turn time end the turn with
+  `stopped="deadline"`. **`0` (the default) disables it**: a deadline can kill exactly the long turn
+  the lifted round bound exists to allow, so it is the operator's opt-in. It is checked *between*
+  rounds and never mid-call — a single hung tool is already bounded by the MCP client's own read
+  timeout, and cancelling a call in flight could tear a write in half — so what it catches is the
+  *loop*: many rounds that each return, adding up past the budget. A deadline is a stop reason on a
+  **completed** turn, not an error: the final round is told, in the conversation, that time ran out,
+  so the answer itself carries the caveat on every surface (web, bridges, automation logs) rather
+  than depending on each one to render a stop reason.
 
-Either early stop then takes the **same single tool-less final round** `max_steps` already uses, so
+Every early stop then takes the **same single tool-less final round** `max_steps` already uses, so
 the turn ends with a real answer — "here's what I found / what failed" — never a silent stall. So
 `AgentTurn.stopped` is now one of `completed` · `max_steps` · `repeat_call` · `tool_errors` ·
-`unsupported_media` (an image attachment blocked before any provider call, #633; plus `error` on a
-mid-stream failure, streaming only); the streamed `done` event carries it for the web to key
-stop-reason copy off. It is also **persisted**, on `agent_messages.stopped` (#944, ADR-0142) —
-`NULL` for a turn that completed, for a user message and for every row written before the column
-existed, so "is this reply incomplete?" is exactly "is this column set?". That is what lets the
-transcript mark a cut-short reply after a reload, when no live stream is left to say so. The
-repeated / errored tool steps stay in the activity timeline (errors render red), so the process
-that led to the cut is visible.
+`deadline` (#925) · `unsupported_media` (an image attachment blocked before any provider call,
+#633; plus `error` on a mid-stream failure, streaming only); the streamed `done` event carries it
+for the web to key stop-reason copy off. It is also **persisted**, on `agent_messages.stopped`
+(#944, ADR-0142) — `NULL` for a turn that completed, for a user message and for every row written
+before the column existed, so "is this reply incomplete?" is exactly "is this column set?". That is
+what lets the transcript mark a cut-short reply after a reload, when no live stream is left to say
+so. The repeated / errored tool steps stay in the activity timeline (errors render red), so the
+process that led to the cut is visible.
+
+**The bound is the operator's (#925, ADR-0143).** The round bound used to be clamped to 1–12 on the
+prefs route, and a larger value was silently rewritten — a long task (search → read → read →
+summarize → write) ran out of rounds with nothing saying why. The clamp is gone: the pref is
+floored at 1 and otherwise stored as given, `AGENT_MAX_STEPS` likewise. The guards above are what
+bound a turn, which is why they are phrased as behaviour ("K identical calls in a row") rather than
+as one-shot flags. Because a turn may now legitimately run for minutes, the loop reports where it
+is: every `tool` stream event carries `round` and `max_rounds`, and the finished turn carries
+`rounds`/`max_rounds`, so the shell's activity indicator reads "Working… · round 7 of 40" instead of
+spinning with nothing to show. A SaaS tier that needs a ceiling imposes it from the overlay, where
+tier policy belongs (constraint #5) — never in core.
 
 Passing a `session_id` opts a turn into cross-chat memory (below).
 
@@ -518,7 +540,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). **400** for a model known to be a `chat` model — the mirror rule (#944). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/context-window` | Set or clear the **global** Ollama context window (`{value: int|null}`); the default for models without their own setting. |
 | `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "q8_0"\|"q4_0"\|null}`, `null` = the f16 default). Server-wide; persisted, then **applied**: the core writes Ollama's start-up env file (enabling flash attention for the quantized types) and restarts the container (#307, amends ADR-0046). Returns `{value, applied, staged}` (#709) — **two** flags because there are two degraded modes. `applied` = the running server has the new value. `staged` = the env file holds it and only a container restart is missing (the usual case without Docker access: the entrypoint re-sources the file on every start, so `docker compose restart ollama` applies it and **no environment editing is needed**). `applied` implies `staged`. Only `staged: false` — the file could not be written at all — calls for setting `OLLAMA_KV_CACHE_TYPE`/`OLLAMA_FLASH_ATTENTION` by hand, which is what the UI used to say in every degraded case. Clearing back to the default stages identically (a successful unlink is the choice on disk). |
-| `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
+| `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`; `null` = the `AGENT_MAX_STEPS` env default). **Floored at 1, no ceiling** since #925 (ADR-0143) — the old 1-12 clamp silently rewrote a 40 to 12, so a long task ran out of rounds with no way to give it more; `0` and negatives still floor to 1. What bounds a turn is the loop's behaviour guards (below), not this number. Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
 | `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` · `PUT …/capabilities` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities, role, in_catalogue, override}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). It deliberately accepts an **embedding** model: since #865 this one list serves both roles, and the role is enforced where it matters — setting a default, and running a turn. `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (add / remove / set-as-default / edit capabilities — #922 added the add form, which reads `GET …/llm/providers` for the hosted alias list and renders its `key_state`), and module model slots; persisted in `saved_models`. `PUT …/capabilities {model, vision, tools, role, context_length}` sets the **capability override** (#711, extended by ADR-0140) — see *Capability resolution* below. Any write also clears `override.tools_learned`, the gateway's own learned answer, so returning a control to Auto genuinely starts over. **404** for an id the tenant hasn't saved. Mutations **503** without the store. |
 | `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Works for a **hosted** `<provider>/<model>` id too — there `context_window` is a **compaction budget** (`keep_alive`/`device` are local-only Ollama options). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
@@ -1870,7 +1892,8 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `LLM_NUM_CTX` | — | Ollama context window (`num_ctx`); local models only. |
 | `MODULE_URLS` | `http://echo:8080,…` | Module base URLs the host discovers tools from. |
 | `EPICURUS_VERSION` | — | Not a knob the core acts on: the image tag this deployment pulled, reported verbatim as `release_track` on `GET /platform/v1/info` and shown on Settings → Platform (#893). Compose interpolates it into `image:` already; passing it into the container's *environment* is what lets the running core say which build it is. Unset reports `null`, never a guessed `latest`. |
-| `AGENT_MAX_STEPS` | `4` | Max tool-calling rounds per turn. |
+| `AGENT_MAX_STEPS` | `4` | **Default** max tool-calling rounds per turn; the operator's stored pref overrides it per tenant, with no ceiling (#925). |
+| `AGENT_TURN_DEADLINE_S` | `0` | Per-turn wall-clock budget in seconds; `0` disables it. The last backstop behind the behaviour guards (#925, ADR-0143) — checked *between* tool rounds, never mid-call, and the turn still delivers an answer (`stopped="deadline"`). Off by default because a deadline can kill exactly the long turn the lifted bound exists to allow. |
 | `MESSAGING_INBOUND_ENABLED` | `true` | Run the inbound-messaging consumer (chat bridges, ADR-0058). |
 | `MESSAGING_MODEL` | — | Optional dedicated model for bridge turns; blank = the default chat model. |
 | `ASK_USER_TTL_HOURS` | `24` | How long a turn paused by `ask_user` waits for an answer before its suspended run is reaped (ADR-0053). |
@@ -1967,7 +1990,8 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   separate durable artifact and is kept).
 - **Postgres `llm_prefs`** — per-tenant operator preferences: `global_default` (chat model),
   `global_embed_default` (embedding model, #214), `context_window` (global `num_ctx`),
-  `kv_cache_type` (Ollama KV-cache, ADR-0046), `agent_max_steps` (agent loop bound, #297),
+  `kv_cache_type` (Ollama KV-cache, ADR-0046), `agent_max_steps` (agent loop bound, #297;
+  uncapped since #925),
   `hidden_models` (JSON list). A missing row means all defaults are `null` (fall back to env
   settings).
 - **Postgres `model_settings`** — per-`(tenant, model)` tuning (ADR-0044/0045):

@@ -606,6 +606,7 @@ def create_app() -> FastAPI:
         mcp=mcp_host,
         memory=memory,
         max_steps=settings.agent_max_steps,
+        turn_deadline_s=settings.agent_turn_deadline_s,
         default_tenant=settings.default_tenant_id,
         attachments=AttachmentExpander(store=attachment_store, memory=memory, registry=registry),
         extractor=extractor,

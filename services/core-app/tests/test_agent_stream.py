@@ -14,8 +14,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from epicurus_core import Attachment, EntityRef, WritesDocument, draft_review
 from epicurus_core_app.agent.agent import (
     _ANSWER_NUDGE,
+    _DEADLINE_FINAL_NOTE,
     _EMPTY_ANSWER_FALLBACK,
     _REPEAT_NUDGE,
+    _STOPPED_DEADLINE,
     _STOPPED_REPEAT_CALL,
     _STOPPED_TOOL_ERRORS,
     _STOPPED_UNSUPPORTED_MEDIA,
@@ -1183,6 +1185,115 @@ async def test_stream_distinct_args_repeats_pass_untouched() -> None:
     assert done.turn is not None and done.turn.stopped == "completed"
     assert done.turn.content == "all read"
     assert len(mcp.calls_made) == 2  # both distinct calls ran
+
+
+# ── the bound is the operator's; runaway is caught by behaviour (#925) ──────────────
+
+
+class _SlowCountingMcp(_CountingMcp):
+    """A counting MCP whose calls take real time, so a wall-clock budget can expire."""
+
+    def __init__(self, *, delay_s: float = 0.05) -> None:
+        super().__init__()
+        self._delay_s = delay_s
+
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
+        await asyncio.sleep(self._delay_s)
+        return await super().call(name, arguments, url, tenant=tenant, session_id=session_id)
+
+
+@pytest.mark.timeout(10)
+async def test_stream_tool_events_carry_the_round_and_the_bound() -> None:
+    """The shell reads these back as "round N of M" (#925).
+
+    With no ceiling on the bound a turn can legitimately run for minutes, so the live activity
+    indicator has to be able to show progress rather than an unexplained spinner. Both the
+    ``running`` frame and its terminal frame carry the pair, so a client that re-attached and
+    missed the first one still learns where the turn is.
+    """
+    gw = _FakeStreamGateway(
+        [
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"n": 1}')])),
+            ([], ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"n": 2}')])),
+            (["done"], ChatResult(model="m", content="done")),
+        ]
+    )
+    agent = Agent(gateway=gw, mcp=_CountingMcp(), max_steps=40)  # type: ignore[arg-type]
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    tools = [e for e in events if e.type == "tool"]
+    assert [(e.status, e.round, e.max_rounds) for e in tools] == [
+        ("running", 1, 40),
+        ("ok", 1, 40),
+        ("running", 2, 40),
+        ("ok", 2, 40),
+    ]
+    done = events[-1]
+    assert done.turn is not None
+    assert (done.turn.rounds, done.turn.max_rounds) == (3, 40)  # the answering round counts
+
+
+class _NeverFinishesStreamGateway(_FakeStreamGateway):
+    """A model that would keep calling tools forever — only the final tool-less round answers.
+
+    Scripted by *shape* rather than by count, deliberately: how many rounds fit inside a wall-clock
+    budget depends on the machine, so a fixed script would either under-run (the loop asking for a
+    round that isn't there) or pin the test to this host's speed.
+    """
+
+    def __init__(self) -> None:
+        super().__init__([])
+        self._n = 0
+
+    async def stream_chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        model: str | None = None,
+        tools: Any = None,
+        tenant_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        self.calls.append(list(messages))
+        if tools is None:  # the forced final round — no tools offered
+            for delta in ("partial ", "answer"):
+                yield StreamEvent(delta=delta)
+            yield StreamEvent(result=ChatResult(model="m", content="partial answer"))
+            return
+        self._n += 1
+        yield StreamEvent(
+            result=ChatResult(
+                model="m", content="", tool_calls=[_tool_call("echo", f'{{"n": {self._n}}}')]
+            )
+        )
+
+
+@pytest.mark.timeout(10)
+async def test_stream_deadline_stops_the_turn_and_still_streams_an_answer() -> None:
+    """The streamed loop applies the same wall-clock backstop, with the same partial answer."""
+    gw = _NeverFinishesStreamGateway()
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_SlowCountingMcp(delay_s=0.05),  # type: ignore[arg-type]
+        max_steps=100,
+        turn_deadline_s=0.08,
+    )
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="go")])]
+    done = events[-1]
+    assert done.type == "done" and done.turn is not None
+    assert done.turn.stopped == _STOPPED_DEADLINE
+    assert 0 < done.turn.rounds < 100  # the deadline ended it, not the bound
+    # The partial answer still streams to the user as deltas, and the final round was told to
+    # say the clock ran out — a deadline is a stop reason on a finished turn, never an error.
+    assert [e.text for e in events if e.type == "delta"] == ["partial ", "answer"]
+    assert not any(e.type == "error" for e in events)
+    assert any(m.role == "user" and m.content == _DEADLINE_FINAL_NOTE for m in gw.calls[-1])
 
 
 # ── image attachments, gated on model vision support (#633) ─────────────────────────

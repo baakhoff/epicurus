@@ -12,6 +12,26 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The bound on a turn is the operator's; runaway is caught by behaviour** (#925) — the
+  **Agent cycles** setting stopped at 12, and the route enforced it *silently*: type 40 and 12 was
+  stored. A genuinely long task — search → read → read → summarize → write — ran out of rounds and
+  handed back a truncated answer with nothing saying why, and there was no way to give it more.
+  The ceiling is gone: the pref and `AGENT_MAX_STEPS` are floored at 1 and otherwise taken as
+  written, and the Settings copy names the real trade-off (time and tokens) instead of a range.
+  What actually keeps a confused model from looping forever is the loop's behaviour, so the
+  existing guards became rules you can state: **three identical tool calls in a row** end the turn,
+  counted per run of repeats — every fresh repetition now gets the same allowance, rather than the
+  whole turn sharing one nudge — the three-consecutive-tool-errors stop is unchanged, and a new
+  **per-turn wall-clock budget** (`AGENT_TURN_DEADLINE_S`) is the last backstop, **off by
+  default**, because a deadline can kill exactly the long turn this change exists to allow. When
+  it does fire the turn still answers, and the answer *says* it stopped early: the final round is
+  told the time ran out, so the caveat reaches the web, the chat bridges and the automation log
+  alike rather than depending on each surface to render a stop reason. Because a turn may now
+  honestly run for minutes, it reports where it is — every `tool` stream frame carries
+  `round`/`max_rounds`, and the finished turn carries `rounds`/`max_rounds` — so the activity
+  indicator reads "Working… · round 7 of 40" instead of spinning with nothing to show. A SaaS tier
+  that wants a ceiling imposes it from the overlay, where tier policy belongs. `core-app`
+  0.127.0→0.128.0 (MINOR), `web` 0.149.0→0.150.0 (MINOR).
 - **A failed reply always says so, and never in the provider's words** (#944, #947) — a streaming
   turn that died *after* it had started answering left the transcript with a sentence that simply
   stopped: no banner, no note, just Copy and Regenerate under half a reply. The terminal error

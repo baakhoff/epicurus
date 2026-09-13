@@ -152,6 +152,11 @@ interface ChatState {
   streaming: boolean;
   /** Warming progress emitted before the first token (ADR-0027); null once answered. */
   readiness: Readiness | null;
+  /** Which tool round the live turn is on, and the bound in force for it (#925) — read off the
+   *  `tool` frames. The operator's round bound has no ceiling any more, so a turn can honestly
+   *  run for minutes; this is what lets the activity indicator say "round 7 of 40" rather than
+   *  spinning with nothing to show. Null before the first tool call, and once the turn is over. */
+  progress: { round: number; maxRounds: number } | null;
   error: string | null;
   /** Whether `error` can be retried in place via {@link reconnect} rather than needing a
    *  reload (#477) — true only for a reattach loop that exhausted its budget in recovery
@@ -421,6 +426,10 @@ export const useChat = create<ChatState>()(
             else if (event.type === "thinking" && event.text) appendThinking(event.text);
             else if (event.type === "tool" && event.tool && event.status) {
               setTool({ tool: event.tool, status: event.status, detail: event.detail ?? undefined });
+              // Round progress (#925). Both the `running` and terminal frames carry it, so a
+              // client that re-attached mid-turn learns where it is from the first frame it sees.
+              if (event.round && event.max_rounds)
+                set({ progress: { round: event.round, maxRounds: event.max_rounds } });
               if (event.document) setLiveDocument(event.tool, event.status, event.document);
             } else if (event.type === "doc_preview" && event.tool && event.preview) {
               // Ephemeral by contract: nothing about a preview is persisted, and it leaves no
@@ -487,6 +496,7 @@ export const useChat = create<ChatState>()(
             pendingAttachments: [],
             segments: [],
             readiness: null,
+            progress: null,
             lastSeq: 0,
             reconnectable: false,
           });
@@ -502,6 +512,7 @@ export const useChat = create<ChatState>()(
             pendingUser: null,
             pendingAttachments: [],
             readiness: null,
+            progress: null,
             reconnectable: false,
           });
         } else {
@@ -562,6 +573,7 @@ export const useChat = create<ChatState>()(
                   pendingAttachments: [],
                   segments: [],
                   readiness: null,
+                  progress: null,
                   lastSeq: 0,
                   reconnectable: false,
                 });
@@ -618,6 +630,7 @@ export const useChat = create<ChatState>()(
           awaitingApproval: null,
           streaming: true,
           readiness: null,
+          progress: null,
           error: null,
           reconnectable: false,
           paused: false,
@@ -660,6 +673,7 @@ export const useChat = create<ChatState>()(
         segments: [],
         streaming: false,
         readiness: null,
+        progress: null,
         error: null,
         reconnectable: false,
         paused: false,
@@ -709,6 +723,7 @@ export const useChat = create<ChatState>()(
             segments: [],
             streaming: false,
             readiness: null,
+            progress: null,
             error: null,
             reconnectable: false,
             paused: false,
@@ -739,6 +754,7 @@ export const useChat = create<ChatState>()(
             segments: [],
             streaming: false,
             readiness: null,
+            progress: null,
             error: null,
             reconnectable: false,
             paused: false,
@@ -781,6 +797,7 @@ export const useChat = create<ChatState>()(
               segments: [],
               streaming: false,
               readiness: null,
+              progress: null,
               error: null,
               reconnectable: false,
               paused: false,

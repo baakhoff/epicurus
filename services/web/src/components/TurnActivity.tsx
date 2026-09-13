@@ -149,11 +149,16 @@ function ThinkingBlock({ text }: { text: string }) {
 export function ProcessTimeline({
   items,
   collapsed = false,
+  progress,
 }: {
   /** The turn's *process* — thinking blocks and tool steps in chronological order (#300). */
   items: ActivityItem[];
   /** Fold to the summary header once the answer is flowing; the reader can still toggle. */
   collapsed?: boolean;
+  /** Which tool round a *live* turn is on, and the bound in force (#925). Since the operator's
+   *  bound has no ceiling, a long turn needs to read as progress rather than as a hang — so the
+   *  summary label becomes "Working… · round 7 of 40". Absent on a reopened past turn. */
+  progress?: { round: number; maxRounds: number } | null;
 }) {
   const [open, setOpen] = useState(true);
   const userToggled = useRef(false);
@@ -170,7 +175,12 @@ export function ProcessTimeline({
   // Icon-only summary (#334): the wordy label ("Working…", "N steps", "Thought process")
   // moves into a hover tooltip so the chat stays uncluttered. The compact toggle sits on its
   // own (tooltips can't escape an `overflow-hidden` box) with the step list in a panel below.
-  const label = running ? "Working…" : stepLabel;
+  const label =
+    running && progress
+      ? `Working… · round ${progress.round} of ${progress.maxRounds}`
+      : running
+        ? "Working…"
+        : stepLabel;
   const toggle = () => {
     userToggled.current = true;
     setOpen((v) => !v);

@@ -136,12 +136,15 @@ function AssistantBlock({
   timeline = [],
   streaming,
   entityRefs = [],
+  progress,
 }: {
   text: string;
   /** The turn's process (thinking + tool steps) in chronological order (#300). */
   timeline?: ActivityItem[];
   streaming: boolean;
   entityRefs?: EntityRef[];
+  /** Round progress for a *live* turn, shown in the timeline's summary label (#925). */
+  progress?: { round: number; maxRounds: number } | null;
 }) {
   const refsMap = useMemo(() => refsById(entityRefs), [entityRefs]);
   // Refs not already linked inline get a chip row beneath the message, so every
@@ -154,7 +157,9 @@ function AssistantBlock({
   return (
     <AssistantRow>
       {/* The activity timeline folds to its summary header once the answer starts. */}
-      {timeline.length > 0 && <ProcessTimeline items={timeline} collapsed={text.length > 0} />}
+      {timeline.length > 0 && (
+        <ProcessTimeline items={timeline} collapsed={text.length > 0} progress={progress} />
+      )}
       <EntityRefsContext.Provider value={refsMap}>
         {text && <Markdown>{text}</Markdown>}
       </EntityRefsContext.Provider>
@@ -172,6 +177,8 @@ function LiveTurn() {
   const segments = useChat((s) => s.segments);
   const streaming = useChat((s) => s.streaming);
   const readiness = useChat((s) => s.readiness);
+  // Which round the turn is on (#925) — only meaningful while it is still running.
+  const progress = useChat((s) => s.progress);
   if (segments.length === 0 && !streaming) return null;
 
   // Before any thinking, token, or tool: warming progress (#122), then a thinking cue (#121).
@@ -201,7 +208,12 @@ function LiveTurn() {
   );
   return (
     <div className="ep-settle">
-      <AssistantBlock text={text} timeline={timeline} streaming={streaming} />
+      <AssistantBlock
+        text={text}
+        timeline={timeline}
+        streaming={streaming}
+        progress={streaming ? progress : null}
+      />
     </div>
   );
 }

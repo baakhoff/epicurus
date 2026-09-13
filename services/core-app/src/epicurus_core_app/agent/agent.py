@@ -314,9 +314,16 @@ class AgentTurn(BaseModel):
     content: str
     tools_used: list[str] = Field(default_factory=list)
     # Why the turn ended: "completed" (the model answered) · "max_steps" (the loop bound) ·
-    # "repeat_call" / "tool_errors" (loop-hygiene early stops, #524) · "error" (a mid-stream
-    # failure, streaming only). The web can key stop-reason copy off it.
+    # "repeat_call" / "tool_errors" (loop-hygiene early stops, #524) · "deadline" (the per-turn
+    # wall-clock budget, #925 — off by default) · "error" (a mid-stream failure, streaming only).
+    # The web can key stop-reason copy off it. Every one of these still carries a real answer.
     stopped: str
+    # How many tool rounds the turn actually used, and the bound in force for it (#925). The
+    # bound has no ceiling now, so "7 of 40" is what tells a reader a long turn was progressing
+    # rather than hanging — and what tells an operator whether their bound is the binding
+    # constraint. ``rounds`` counts rounds entered, so a turn that answered immediately is 1.
+    rounds: int = 0
+    max_rounds: int | None = None
     # Module entities the turn referenced, lifted from tool outputs (ADR-0019).
     entity_refs: list[EntityRef] = Field(default_factory=list)
     # The turn's process — thinking + tool steps — persisted so the activity timeline
@@ -586,6 +593,13 @@ class AgentEvent(BaseModel):
     # preview reads an *unfinished* call, so it never reaches the timeline and the authoritative
     # ``tool`` frame overwrites whatever it drew.
     preview: dict[str, Any] | None = None
+    # ``tool`` events only (#925): which tool round this call belongs to, and the round bound in
+    # force for the turn. The operator's bound has no ceiling any more, so a turn can legitimately
+    # run for minutes — the shell's activity indicator reads these back as "round 7 of 40" so a
+    # long turn shows as progress rather than a hang. Additive, so a cached PWA that ignores them
+    # renders exactly today's indicator (ADR-0055).
+    round: int | None = None
+    max_rounds: int | None = None
 
 
 def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -605,11 +619,17 @@ def _parse_tool_call(call: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
     return name, arguments, call.get("id") or ""
 
 
-# Loop hygiene (#524). The thin loop (ADR-0001) continues on the blunt rule "the model made a
-# tool call", up to max_steps. Two shapes burn the whole budget and end in a silent stop: the
-# model re-issuing the *same* call, and a run of consecutive tool errors (retrying a broken call
-# to exhaustion). The guard below wraps the loop with outcome-aware *stopping* — not planning — so
-# ADR-0001's thinness holds. Both nudges are one-shot per turn, like _ANSWER_NUDGE.
+# Loop hygiene (#524, strengthened by #925/ADR-0143). The thin loop (ADR-0001) continues on the
+# blunt rule "the model made a tool call", up to max_steps. Two shapes burn the whole budget and
+# end in a silent stop: the model re-issuing the *same* call, and a run of consecutive tool errors
+# (retrying a broken call to exhaustion). The guard below wraps the loop with outcome-aware
+# *stopping* — not planning — so ADR-0001's thinness holds.
+#
+# Since #925 the operator's round bound has no ceiling, so these guards — not a small max_steps —
+# are what actually keeps a confused model from looping forever. They are therefore stated as
+# behaviour rather than as one-shot flags: K identical calls **in a row** end the turn, counted
+# per run of repeats, so a model that alternates between two repeated calls is caught just as a
+# model stuck on one is. The wall-clock deadline is the last backstop (off by default).
 _REPEAT_NUDGE = (
     "You just made that exact tool call with the same arguments — its result is already above. "
     "Use that result to answer, or try something different; do not repeat the same call."
@@ -620,10 +640,29 @@ _REPEAT_TOOL_NOTICE = (
 )
 # Stop the turn after this many consecutive tool errors rather than exhausting max_steps.
 _MAX_CONSECUTIVE_TOOL_ERRORS = 3
+# Stop the turn once the model has issued the *same* call (name + arguments) this many times in a
+# row. The repeats in between earn the one-shot-per-run nudge; the K-th ends the turn. A constant
+# rather than a setting (#925): three identical calls back to back is never useful work, so there
+# is nothing for an operator to tune — unlike the round bound, which is a real trade-off.
+_REPEAT_STOP_RUN = 3
 
 # ``stopped`` reasons beyond "completed" | "max_steps", surfaced on AgentTurn.stopped (#524).
 _STOPPED_REPEAT_CALL = "repeat_call"
 _STOPPED_TOOL_ERRORS = "tool_errors"
+# The per-turn wall-clock budget ran out (#925). Off by default (AGENT_TURN_DEADLINE_S = 0),
+# because a deadline can kill exactly the long turn the lifted bound exists to allow. It is a
+# *stop reason on a completed turn*, not an error: the partial answer still ships.
+_STOPPED_DEADLINE = "deadline"
+# …and it says so. A turn cut by the clock looks, to the reader, exactly like a turn that simply
+# finished — the same final tool-less round, the same answer bubble — which is the "did the wrong
+# thing and didn't say so" shape this issue exists to remove. So the final round is told, in the
+# conversation, that time ran out; the answer itself then carries the caveat, on every surface
+# (web, bridges, automation logs) without any of them needing to render a stop reason.
+_DEADLINE_FINAL_NOTE = (
+    "You have run out of time for this turn — no more tool calls are possible. Answer now with "
+    "what you already have, and say plainly at the end that you stopped early because the time "
+    "limit for this turn was reached, naming anything you had not finished."
+)
 
 
 def _canonical_calls(tool_calls: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
@@ -648,37 +687,60 @@ def _canonical_calls(tool_calls: list[dict[str, Any]]) -> tuple[tuple[str, str],
 class _LoopGuard:
     """Outcome-aware stop detection wrapped around the thin loop (ADR-0001 stays thin, #524).
 
-    Detects two turn-fatal shapes without entangling the loop, so both ``run`` (``_loop``) and
+    Detects three turn-fatal shapes without entangling the loop, so both ``run`` (``_loop``) and
     ``run_stream`` apply the same rule by asking the same object:
 
-    * **identical repeat** — the model re-issues the exact same call(s). The first repeat earns a
-      one-shot nudge (``"nudge"``); a further repeat stops the turn (``"stop"``), mirroring the
-      one-shot ``_ANSWER_NUDGE`` for a blank answer.
+    * **identical repeat** — the model re-issues the exact same call(s) :data:`_REPEAT_STOP_RUN`
+      times in a row. The repeats before the last earn a nudge (``"nudge"``), mirroring the
+      one-shot ``_ANSWER_NUDGE`` for a blank answer; the K-th stops the turn (``"stop"``).
     * **error streak** — :data:`_MAX_CONSECUTIVE_TOOL_ERRORS` consecutive tool errors (the model
       retrying a broken call to exhaustion) stops the turn early, so the user gets "here's what
       failed" instead of a silent stall.
+    * **wall clock** — ``deadline_s`` seconds of turn time spent (``0`` = no budget, the default)
+      stops the loop between rounds, so a lifted round bound can't mean an open-ended turn (#925).
+
+    The repeat run is counted **per run of repeats**, not once per turn (#925): before, a turn
+    that had already spent its single nudge stopped on the *second* occurrence of any later
+    repeated call. Now each fresh run of identical calls gets the same K-in-a-row allowance, which
+    is what makes "the guards, not a ceiling, bound the turn" a rule you can state.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, deadline_s: float = 0.0) -> None:
         self._prev_signature: tuple[tuple[str, str], ...] | None = None
-        self.repeat_nudged = False
+        # Length of the current run of identical signatures (1 = this step's calls are new).
+        self.repeat_run = 0
         self.error_streak = 0
+        self._deadline_s = deadline_s
+        self._started = time.monotonic()
 
     def repeat_verdict(self, tool_calls: list[dict[str, Any]]) -> str:
         """Classify this step's calls vs. the previous step: ``"new"`` | ``"nudge"`` | ``"stop"``.
 
         Updates the remembered signature every call, so a distinct step in between resets the
-        comparison — only an *immediately* repeated call is caught.
+        comparison — only an *immediately* repeated call is caught. ``"stop"`` once the run of
+        identical calls reaches :data:`_REPEAT_STOP_RUN`.
         """
         signature = _canonical_calls(tool_calls)
         is_repeat = self._prev_signature is not None and signature == self._prev_signature
         self._prev_signature = signature
+        self.repeat_run = self.repeat_run + 1 if is_repeat else 1
         if not is_repeat:
             return "new"
-        if not self.repeat_nudged:
-            self.repeat_nudged = True
-            return "nudge"
-        return "stop"
+        if self.repeat_run >= _REPEAT_STOP_RUN:
+            return "stop"
+        return "nudge"
+
+    def past_deadline(self) -> bool:
+        """``True`` once this turn's wall-clock budget is spent (``0`` = unbounded, the default).
+
+        Asked *between* rounds, never mid-call: a single hung tool is already bounded by the MCP
+        client's own read timeout (``mcp_host._CALL_TIMEOUT_S``), and cancelling a call in flight
+        could tear a write in half. What this catches is the *loop* — many rounds that each
+        return, adding up past the budget the operator set.
+        """
+        if self._deadline_s <= 0:
+            return False
+        return (time.monotonic() - self._started) >= self._deadline_s
 
     def note_results(self, errored: list[bool]) -> bool:
         """Fold this step's tool outcomes into the running streak; ``True`` once it hits the bound.
@@ -701,6 +763,7 @@ class Agent:
         mcp: McpHost,
         memory: Memory | None = None,
         max_steps: int = 4,
+        turn_deadline_s: float = 0.0,
         default_tenant: str = "local",
         attachments: AttachmentExpander | None = None,
         extractor: FactExtractor | None = None,
@@ -726,6 +789,11 @@ class Agent:
         self._documents = documents
         self._memory = memory
         self._max_steps = max_steps
+        # Per-turn wall-clock budget in seconds, the last backstop behind the behaviour guards
+        # (#925, ADR-0143). ``0`` — the default — means no budget: the round bound plus the repeat
+        # and error-streak stops are the bound, and a deadline would otherwise kill exactly the
+        # long turn the lifted ceiling exists to allow. Checked between rounds only.
+        self._turn_deadline_s = turn_deadline_s
         self._default_tenant = default_tenant
         self._attachments = attachments
         # Fact extraction (ADR-0045/0051): after a turn, distil durable user facts. By default
@@ -765,7 +833,8 @@ class Agent:
         """The active agent loop bound: the stored pref if set, else the env default.
 
         Resolved per turn so the operator's UI choice takes effect without a restart
-        (the agent is constructed once). The route clamps the stored value's range.
+        (the agent is constructed once). The route floors the stored value at 1; there is no
+        ceiling (#925) — the behaviour guards, not a number, are what bound a turn.
         """
         if self._prefs is not None:
             stored = await self._prefs.get_agent_max_steps(tenant_id or self._default_tenant)
@@ -876,7 +945,9 @@ class Agent:
         stopped = "completed"
         reasoned = False  # the model emitted <think> reasoning at least once this turn
         nudged = False  # we already nudged a blank step to commit to an answer (do it once)
-        guard = _LoopGuard()  # outcome-aware stop detection (#524), same rule as run()'s _loop
+        # Outcome-aware stop detection (#524, #925), same rule and budget as run()'s _loop.
+        guard = _LoopGuard(deadline_s=self._turn_deadline_s)
+        rounds = 0  # tool rounds entered, reported on the turn and on each tool event (#925)
         need_final = False  # an early/exhausted stop wants one final tool-less answer streamed
         try:
             specs, route = await self._mcp.discover()
@@ -898,6 +969,13 @@ class Agent:
             if specs and not tool_capable:
                 convo = with_no_tools_note(convo)
             for _ in range(max_steps):
+                if rounds and guard.past_deadline():
+                    # The turn's wall-clock budget is spent (#925). Never on the first round —
+                    # a budget must always buy at least one round — and never mid-call.
+                    stopped = _STOPPED_DEADLINE
+                    need_final = True
+                    break
+                rounds += 1
                 result: ChatResult | None = None
                 answer_before = len(parts)
                 # One tracker per gateway call: fragment slots are only unique within a stream,
@@ -1023,7 +1101,13 @@ class Agent:
                     detail = _tool_detail(arguments)
                     document = await self._document_written_by(name, arguments)
                     yield AgentEvent(
-                        type="tool", tool=name, status="running", detail=detail, document=document
+                        type="tool",
+                        tool=name,
+                        status="running",
+                        detail=detail,
+                        document=document,
+                        round=rounds,
+                        max_rounds=max_steps,
                     )
                     output, is_error = await self._invoke(
                         name, arguments, route, tenant=tenant, session_id=session_id
@@ -1057,7 +1141,13 @@ class Agent:
                     status = "error" if is_error else "ok"
                     errored.append(is_error)
                     yield AgentEvent(
-                        type="tool", tool=name, status=status, detail=detail, document=document
+                        type="tool",
+                        tool=name,
+                        status=status,
+                        detail=detail,
+                        document=document,
+                        round=rounds,
+                        max_rounds=max_steps,
                     )
                     # `document` is deliberately absent here: the timeline is persisted per
                     # message (ADR-0041) and a document body has no place in those caps.
@@ -1123,9 +1213,12 @@ class Agent:
                 stopped = "max_steps"
                 need_final = True
             if need_final:
-                # A non-answer exit (max_steps, or a hygiene early stop) streams one final tool-less
-                # answer, so the turn ends with a real reply — "here's what I found / what failed" —
-                # never a silent stop. One call, not the unbounded retrying the guard just cut off.
+                # A non-answer exit (max_steps, the deadline, or a hygiene early stop) streams one
+                # final tool-less answer, so the turn ends with a real reply — "here's what I found
+                # / what failed" — never a silent stop. One call, not the unbounded retrying the
+                # guard just cut off.
+                if stopped == _STOPPED_DEADLINE:
+                    convo.append(ChatMessage(role="user", content=_DEADLINE_FINAL_NOTE))
                 async for event in self._gateway.stream_chat(
                     convo, model=model, tenant_id=tenant_id
                 ):
@@ -1169,6 +1262,8 @@ class Agent:
                 stopped="error",
                 entity_refs=refs.refs,
                 activity=activity_from_timeline(timeline, thinking_cap=_THINKING_CAP),
+                rounds=rounds,
+                max_rounds=max_steps,
             )
             # Shield the write like the normal path (#376): a shutdown cancellation now must still
             # flush the partial we chose to keep. Extraction is skipped — an interrupted turn is
@@ -1196,6 +1291,8 @@ class Agent:
             stopped=stopped,
             entity_refs=refs.refs,
             activity=activity_from_timeline(timeline, thinking_cap=_THINKING_CAP),
+            rounds=rounds,
+            max_rounds=max_steps,
         )
         # Shield only the answer write: the model already produced the reply, so a cancellation
         # arriving now (server shutdown — the turn runs in a detached task, see live_runs.py)
@@ -1696,12 +1793,20 @@ class Agent:
         def activity() -> MessageActivity:
             return activity_from_timeline(timeline, thinking_cap=_THINKING_CAP)
 
-        guard = _LoopGuard()  # outcome-aware stop detection (#524), wrapping the thin loop
+        # Outcome-aware stop detection (#524, #925), wrapping the thin loop.
+        guard = _LoopGuard(deadline_s=self._turn_deadline_s)
+        rounds = 0  # tool rounds entered, reported on the turn (#925)
         reasoned = False  # the model emitted <think> reasoning at least once this turn
         nudged = False  # we already nudged a blank step to commit to an answer (do it once)
         content = ""
         stopped = "completed"
         for _ in range(max_steps):
+            if rounds and guard.past_deadline():
+                # The turn's wall-clock budget is spent (#925) — same rule as run_stream: never
+                # on the first round, never mid-call, and the partial answer still ships below.
+                stopped = _STOPPED_DEADLINE
+                break
+            rounds += 1
             result = await self._gateway.chat(
                 convo,
                 model=model,
@@ -1814,9 +1919,11 @@ class Agent:
         else:
             stopped = "max_steps"
         if stopped != "completed":
-            # Any non-answer exit (max_steps, or a hygiene stop) gets one final tool-less answer,
-            # so the turn ends with a real reply — "here's what I found / what failed" — never a
-            # silent stop. One call, not the unbounded retrying the guard just cut off.
+            # Any non-answer exit (max_steps, the deadline, or a hygiene stop) gets one final
+            # tool-less answer, so the turn ends with a real reply — "here's what I found / what
+            # failed" — never a silent stop. One call, not the unbounded retrying the guard cut off.
+            if stopped == _STOPPED_DEADLINE:
+                convo.append(ChatMessage(role="user", content=_DEADLINE_FINAL_NOTE))
             final = await self._gateway.chat(convo, model=model, tenant_id=tenant_id)
             if final.reasoning:
                 reasoned = True
@@ -1840,6 +1947,8 @@ class Agent:
             usage=usage,
             quiet=quiet_reason is not None,
             quiet_reason=quiet_reason,
+            rounds=rounds,
+            max_rounds=max_steps,
         )
 
     async def _document_written_by(

@@ -188,10 +188,13 @@ the revision runs:
   connected dialect**, so a baseline generated on SQLite would freeze SQLite's
   `(CURRENT_TIMESTAMP)` into a migration that then runs on Postgres.
 
-The generator renders a literal as `sa.text("<the string, verbatim>")` and `func.now()` as
-itself, and **refuses to render anything else** rather than guessing. If you add a new kind of
-server default, teach `scripts/migrate.py:_render_server_default` about it — a wrong default is
-invisible until production.
+The generator renders a literal as `sa.text("<the string, verbatim>")`, and `func.now()`,
+`false()` and `true()` as themselves — the last two because they compile differently per dialect
+(`false` on Postgres, `0` on SQLite), so freezing either into `sa.text(...)` against the SQLite
+the baseline is generated on would carry SQLite's spelling into Postgres. It **refuses to render
+anything else** rather than guessing. If you add a new kind of server default, teach
+`scripts/migrate.py:_render_server_default` about it — a wrong default is invisible until
+production.
 
 Read the rendered file before committing it. Types that would differ between SQLite and Postgres
 are the thing to look for; the repo currently uses `String(n)`, `Text`, `Integer`,

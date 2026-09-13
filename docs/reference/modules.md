@@ -63,8 +63,18 @@ so the 37 tests that pin "the model reads a tool's own failure text" needed no c
 
 The wrapper still tells anticipated failures from real crashes **in the server log**, even
 though both reach the model as a `ToolError`: `KeyError`, `LookupError`, `ValueError`,
-`PermissionError`, and `FileNotFoundError` log at WARNING (expected traffic); anything else logs
-at ERROR with a traceback, so an operator watching the log still sees a genuine bug stand out.
+`PermissionError`, `FileNotFoundError`, `httpx.HTTPStatusError`, and `httpx.TransportError`
+log at WARNING (expected traffic); anything else logs at ERROR with a traceback, so an
+operator watching the log still sees a genuine bug stand out.
+
+The two `httpx` exceptions joined the set later (#920, amending ADR-0136): a tool that talks to
+a provider over HTTP — websearch's SearXNG client, mail's Gmail client — routinely sees a
+4xx/5xx, a timeout, or a refused connection as a normal cost of doing business (an expired
+token, a rate limit, a provider blip), not a bug in the tool. `HTTPStatusError` covers the
+status-code family and `TransportError` the connection/timeout family; `TooManyRedirects` and
+a decoding error stay outside both and still log at ERROR as genuine bugs. A tool is always
+free to catch a specific `httpx` exception itself and translate it into a more model-actionable
+message before it reaches this wrapper.
 
 ### `add_manifest_route`
 

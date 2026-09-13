@@ -36,12 +36,13 @@ async def test_search_returns_results() -> None:
         {"title": "B", "url": "https://b.com", "content": "Snippet B", "engine": "bing"},
     ]
     client = _make_client({"/search": _search_response(raw)})
-    results = await client.search("hello")
-    assert len(results) == 2
-    assert results[0]["title"] == "A"
-    assert results[0]["url"] == "https://a.com"
-    assert results[0]["snippet"] == "Snippet A"
-    assert results[0]["engine"] == "google"
+    outcome = await client.search("hello")
+    assert len(outcome.results) == 2
+    assert outcome.results[0]["title"] == "A"
+    assert outcome.results[0]["url"] == "https://a.com"
+    assert outcome.results[0]["snippet"] == "Snippet A"
+    assert outcome.results[0]["engine"] == "google"
+    assert outcome.unresponsive_engines == []
 
 
 async def test_search_respects_num_results() -> None:
@@ -50,8 +51,8 @@ async def test_search_respects_num_results() -> None:
         for i in range(10)
     ]
     client = _make_client({"/search": _search_response(raw)})
-    results = await client.search("q", num_results=3)
-    assert len(results) == 3
+    outcome = await client.search("q", num_results=3)
+    assert len(outcome.results) == 3
 
 
 async def test_search_skips_results_without_url() -> None:
@@ -60,24 +61,109 @@ async def test_search_skips_results_without_url() -> None:
         {"title": "Has URL", "url": "https://ok.com", "content": "text", "engine": "g"},
     ]
     client = _make_client({"/search": _search_response(raw)})
-    results = await client.search("q")
-    assert len(results) == 1
-    assert results[0]["url"] == "https://ok.com"
+    outcome = await client.search("q")
+    assert len(outcome.results) == 1
+    assert outcome.results[0]["url"] == "https://ok.com"
 
 
 async def test_search_returns_empty_on_empty_results() -> None:
     client = _make_client({"/search": _search_response([])})
-    results = await client.search("q")
-    assert results == []
+    outcome = await client.search("q")
+    assert outcome.results == []
+    assert outcome.unresponsive_engines == []
 
 
 async def test_search_handles_missing_fields() -> None:
     raw: list[dict[str, object]] = [{"url": "https://x.com"}]
     client = _make_client({"/search": _search_response(raw)})
-    results = await client.search("q")
-    assert results[0]["title"] == ""
-    assert results[0]["snippet"] == ""
-    assert results[0]["engine"] == ""
+    outcome = await client.search("q")
+    assert outcome.results[0]["title"] == ""
+    assert outcome.results[0]["snippet"] == ""
+    assert outcome.results[0]["engine"] == ""
+
+
+# ── unresponsive_engines / degraded-vs-empty (#936) ───────────────────────────────────
+
+
+async def test_search_parses_unresponsive_engines() -> None:
+    """A 200 with results:[] and unresponsive_engines non-empty is a degraded search, not a
+    genuine empty one — the whole point of #936."""
+    body = {
+        "results": [],
+        "unresponsive_engines": [["google", "timeout"], ["bing", "blocked"]],
+        "number_of_results": 0,
+    }
+    client = _make_client({"/search": httpx.Response(200, json=body)})
+    outcome = await client.search("q")
+    assert outcome.results == []
+    assert outcome.unresponsive_engines == [("google", "timeout"), ("bing", "blocked")]
+
+
+async def test_search_reports_unresponsive_engines_alongside_partial_results() -> None:
+    """Some engines answered, some didn't — the results still travel, but so does the caveat."""
+    body = {
+        "results": [{"title": "A", "url": "https://a.com", "content": "S", "engine": "duckduckgo"}],
+        "unresponsive_engines": [["google", "too many requests"]],
+    }
+    client = _make_client({"/search": httpx.Response(200, json=body)})
+    outcome = await client.search("q")
+    assert len(outcome.results) == 1
+    assert outcome.unresponsive_engines == [("google", "too many requests")]
+
+
+async def test_search_no_unresponsive_engines_field_is_a_genuine_empty() -> None:
+    """SearXNG omitting the field entirely (older instance?) must not be treated as degraded."""
+    client = _make_client({"/search": _search_response([])})
+    outcome = await client.search("q")
+    assert outcome.unresponsive_engines == []
+
+
+async def test_search_number_of_results_is_parsed() -> None:
+    body = {"results": [], "unresponsive_engines": [], "number_of_results": 42}
+    client = _make_client({"/search": httpx.Response(200, json=body)})
+    outcome = await client.search("q")
+    assert outcome.number_of_results == 42
+
+
+async def test_last_unresponsive_engines_starts_empty() -> None:
+    client = _make_client({"/search": _search_response([])})
+    assert client.last_unresponsive_engines == []
+
+
+async def test_last_unresponsive_engines_reflects_the_most_recent_search() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"results": [], "unresponsive_engines": [["google", "timeout"]]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = SearXNGClient("http://searxng:8080")
+    client._client = httpx.AsyncClient(transport=transport, base_url="http://searxng:8080")
+
+    await client.search("q")
+    assert client.last_unresponsive_engines == [("google", "timeout")]
+
+
+async def test_last_unresponsive_engines_clears_after_a_healthy_search() -> None:
+    responses = iter(
+        [
+            httpx.Response(200, json={"results": [], "unresponsive_engines": [["google", "x"]]}),
+            httpx.Response(200, json={"results": [], "unresponsive_engines": []}),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    transport = httpx.MockTransport(handler)
+    client = SearXNGClient("http://searxng:8080")
+    client._client = httpx.AsyncClient(transport=transport, base_url="http://searxng:8080")
+
+    await client.search("q")
+    assert client.last_unresponsive_engines == [("google", "x")]
+    await client.search("q")
+    assert client.last_unresponsive_engines == []
 
 
 async def test_health_check_true_on_200() -> None:

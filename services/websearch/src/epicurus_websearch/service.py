@@ -19,13 +19,32 @@ Registers two tools the agent can call:
 
 from __future__ import annotations
 
-from epicurus_core import EntityRef, EpicurusModule, UiSection, capped_listing, tool_envelope
+from epicurus_core import (
+    EntityRef,
+    EpicurusModule,
+    UiSection,
+    capped_listing,
+    get_logger,
+    tool_envelope,
+)
 from epicurus_websearch.ingest import LinkIngestor, render
 from epicurus_websearch.refs import RESULT_KIND, SOURCE_KIND, canonical_url, encode_ref
 from epicurus_websearch.refs import encode_source_ref as encode_source
 from epicurus_websearch.searxng import SearchResult, SearXNGClient
 
 MODULE_NAME = "websearch"
+
+logger = get_logger(__name__)
+
+
+def describe_unresponsive(unresponsive: list[tuple[str, str]]) -> str:
+    """Render SearXNG's ``[engine, error_type]`` pairs as ``"bing (timeout), google (blocked)"``.
+
+    Public because ``GET /status`` renders the same pairs the same way: a module's status
+    fields are flat scalars (the shell stringifies each one), so the panel and the tool
+    message say the identical thing rather than one of them showing ``[object Object]``.
+    """
+    return ", ".join(f"{engine} ({error})" for engine, error in unresponsive)
 
 
 def _dedupe_by_url(results: list[SearchResult]) -> list[SearchResult]:
@@ -63,7 +82,7 @@ def build_module(
     """
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.3.1",
+        version="0.4.0",
         description=(
             "Self-hosted web search via SearXNG, plus guarded reading of any link —"
             " no API key required."
@@ -121,18 +140,35 @@ def build_module(
             num_results: Maximum number of results to return (default configured
                 by operator; capped at 20).
 
-        Returns an entity-ref-carrying envelope ranked by SearXNG's relevance.
-        Reports no results found when SearXNG finds nothing or is unreachable,
-        rather than failing the turn.
+        Returns an entity-ref-carrying envelope ranked by SearXNG's relevance. Three
+        distinguishable outcomes reach you: results; a genuine "no results found" when the
+        query truly had no matches; and a degraded-search note when SearXNG answered but
+        one or more of its engines did not — treat that one as "search may be unreliable
+        right now", not as a confirmed empty result. If SearXNG itself is unreachable or
+        erroring, this tool raises rather than reporting a silent empty search.
         """
         capped = min(num_results, 20)
-        try:
-            results = await client.search(query, capped)
-        except Exception:
-            results = []
+        outcome = await client.search(query, capped)
 
-        deduped = _dedupe_by_url(results)
+        if outcome.unresponsive_engines:
+            logger.warning(
+                "search engines did not respond",
+                unresponsive_engines=outcome.unresponsive_engines,
+                query_had_results=bool(outcome.results),
+            )
+
+        deduped = _dedupe_by_url(outcome.results)
         if not deduped:
+            if outcome.unresponsive_engines:
+                return tool_envelope(
+                    "Search is degraded, not confirmed empty: no results came back, and "
+                    f"{len(outcome.unresponsive_engines)} search engine(s) did not respond"
+                    f" ({describe_unresponsive(outcome.unresponsive_engines)}). Do not report"
+                    " this as a clean 'no results' — say plainly that search is currently"
+                    " unreliable or unavailable, and consider retrying before falling back to"
+                    " anything else.",
+                    [],
+                )
             return tool_envelope("No web results found.", [])
 
         refs = [
@@ -151,6 +187,12 @@ def build_module(
             f"- {r['title']} — {r['url']} (via {r['engine']})\n  {r['snippet']}" for r in deduped
         ]
         text = capped_listing(lines, noun="result")
+        if outcome.unresponsive_engines:
+            text += (
+                f"\n\n(Note: {len(outcome.unresponsive_engines)} search engine(s) did not"
+                f" respond — {describe_unresponsive(outcome.unresponsive_engines)} — these"
+                " results may be incomplete.)"
+            )
         return tool_envelope(text, refs)
 
     @module.tool()

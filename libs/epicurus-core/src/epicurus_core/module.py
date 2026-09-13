@@ -18,6 +18,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 from fastapi import FastAPI
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -54,12 +55,26 @@ logger = get_logger(__name__)
 # keeps reading a message instead of the generic "Error executing tool <name>" that
 # mcp >=2.1 substitutes for an unmasked crash, but the log line tells the operator this
 # one was not anticipated.
+#
+# ``httpx.HTTPStatusError`` and ``httpx.TransportError`` are here too (#920, amending
+# ADR-0136): a tool that talks to a provider over HTTP — websearch's SearXNG client, mail's
+# Gmail client — routinely sees a 4xx/5xx, a timeout, or a refused connection as a normal
+# cost of doing business (an expired token, a rate limit, a provider blip). That is
+# "expected traffic" in exactly the sense the rest of this tuple already covers, so it gets
+# the same WARNING-without-traceback treatment; a tool is still free to catch a *specific*
+# httpx exception itself and translate it into a more model-actionable message before it
+# ever reaches this wrapper. ``HTTPStatusError`` and ``TransportError`` together cover both
+# httpx exception families (status-code failures and connection/timeout failures) without
+# reaching for the broader ``httpx.HTTPError``/``RequestError`` bases, which would also
+# swallow things like ``TooManyRedirects`` or a decoding error — genuine bugs worth an ERROR.
 _ANTICIPATED_TOOL_EXCEPTIONS: tuple[type[BaseException], ...] = (
     KeyError,
     LookupError,
     ValueError,
     PermissionError,
     FileNotFoundError,
+    httpx.HTTPStatusError,
+    httpx.TransportError,
 )
 
 

@@ -119,7 +119,8 @@ async def _build_pre_alembic(engine: AsyncEngine) -> None:
 
     That is what the **baseline** revision describes, so that is what builds it — not
     ``create_all``, which builds the models as they stand *today*. The two were the same thing
-    until a revision after the baseline added a column (#944's ``agent_messages.stopped``); from
+    until a revision after the baseline added a column (#947's ``saved_models`` capability
+    columns, then #944's ``agent_messages.stopped``); from
     then on a ``create_all``-built database is at head, and an "adoption" test over it would be
     asserting that ``op.add_column`` is idempotent rather than that adoption works — the exact
     thing ADR-0138 says a post-baseline revision need not be.

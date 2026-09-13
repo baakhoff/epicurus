@@ -4,18 +4,25 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import httpx
+import pytest
 from mcp.types import ContentBlock, TextContent
 
 from epicurus_core.contracts import ToolEnvelope
+from epicurus_core.module import ToolError
 from epicurus_websearch.ingest import IngestResult, LinkIngestor
 from epicurus_websearch.refs import decode_source_ref
-from epicurus_websearch.searxng import SearchResult, SearXNGClient
+from epicurus_websearch.searxng import SearchOutcome, SearchResult, SearXNGClient
 from epicurus_websearch.service import build_module
 
 
-def _make_client(results: list[SearchResult]) -> SearXNGClient:
+def _make_client(
+    results: list[SearchResult], unresponsive_engines: list[tuple[str, str]] | None = None
+) -> SearXNGClient:
     client = AsyncMock(spec=SearXNGClient)
-    client.search = AsyncMock(return_value=results)
+    client.search = AsyncMock(
+        return_value=SearchOutcome(results=results, unresponsive_engines=unresponsive_engines or [])
+    )
     return client
 
 
@@ -66,23 +73,54 @@ async def test_web_search_tool_caps_at_20() -> None:
     client.search.assert_called_once_with("q", 20)  # type: ignore[attr-defined]
 
 
-async def test_web_search_returns_no_refs_on_exception() -> None:
+async def test_web_search_reports_searxng_unreachable_as_a_tool_error() -> None:
+    """#936: a SearXNG failure must reach the model as an actionable failure — via ADR-0136's
+    tool-error seam — not a silently swallowed empty result."""
+    request = httpx.Request("GET", "http://searxng:8080/search")
+    response = httpx.Response(500, request=request)
     client = AsyncMock(spec=SearXNGClient)
-    client.search = AsyncMock(side_effect=Exception("network error"))
+    client.search = AsyncMock(
+        side_effect=httpx.HTTPStatusError("boom", request=request, response=response)
+    )
     module = build_module(client)
-    content, _ = await module.call_tool("web_search", {"query": "q"})
-    envelope = _parse_envelope(content)
-    assert envelope.entity_refs == []
-    assert "No web results" in envelope.text
+    with pytest.raises(ToolError, match="boom"):
+        await module.call_tool("web_search", {"query": "q"})
 
 
 async def test_web_search_empty_results_returns_no_refs() -> None:
+    """Genuine empty: no results, no unresponsive engines — the plain "no results" message."""
     client = _make_client([])
     module = build_module(client)
     content, _ = await module.call_tool("web_search", {"query": "q"})
     envelope = _parse_envelope(content)
     assert envelope.entity_refs == []
-    assert "No web results" in envelope.text
+    assert envelope.text == "No web results found."
+
+
+async def test_web_search_degraded_empty_is_distinguishable_from_genuine_empty() -> None:
+    """#936/#920: SearXNG answering 200 with no results but unresponsive engines is a degraded
+    search, not a confirmed empty one — the model must get a different, actionable message."""
+    client = _make_client([], unresponsive_engines=[("google", "timeout"), ("bing", "blocked")])
+    module = build_module(client)
+    content, _ = await module.call_tool("web_search", {"query": "q"})
+    envelope = _parse_envelope(content)
+    assert envelope.entity_refs == []
+    assert envelope.text != "No web results found."
+    assert "degraded" in envelope.text.lower()
+    assert "not confirmed empty" in envelope.text.lower()
+    assert "google (timeout)" in envelope.text
+    assert "bing (blocked)" in envelope.text
+
+
+async def test_web_search_partial_results_note_unresponsive_engines() -> None:
+    """Some engines answered, some didn't — the results still travel, with a caveat appended."""
+    client = _make_client(SAMPLE_RESULTS, unresponsive_engines=[("google", "timeout")])
+    module = build_module(client)
+    content, _ = await module.call_tool("web_search", {"query": "q"})
+    envelope = _parse_envelope(content)
+    assert len(envelope.entity_refs) == 2  # results still come through
+    assert "google (timeout)" in envelope.text
+    assert "may be incomplete" in envelope.text.lower()
 
 
 async def test_web_search_dedupes_same_url_within_one_call() -> None:

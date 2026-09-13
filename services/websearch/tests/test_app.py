@@ -6,10 +6,12 @@ import base64
 import json
 import os
 
+import pytest
 from fastapi.testclient import TestClient
 
 from epicurus_core import route_paths
 from epicurus_websearch.refs import encode_ref, encode_source_ref
+from epicurus_websearch.searxng import SearXNGClient
 
 os.environ.setdefault("SEARXNG_URL", "http://localhost:8080")
 os.environ.setdefault("PLATFORM_URL", "http://localhost:8080")
@@ -109,6 +111,51 @@ class TestResolveSource:
         bad = base64.urlsafe_b64encode(payload.encode()).decode("ascii").rstrip("=")
         resp = client.get(f"/resolve/source/{bad}")
         assert resp.status_code == 400
+
+
+class TestStatus:
+    """#936/#920: /status distinguishes "SearXNG process is up" from "search is degraded"."""
+
+    def test_reports_not_degraded_when_no_search_has_happened(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from epicurus_websearch.app import create_app
+
+        monkeypatch.setattr(SearXNGClient, "health_check", lambda self: _true())
+        client = TestClient(create_app())
+        body = client.get("/status").json()
+        assert body["searxng_healthy"] is True
+        assert body["degraded"] is False
+        assert body["unresponsive_engines"] is None
+        # "not degraded" here is the absence of evidence, and the panel says so rather than
+        # letting a restarted-but-broken instance read as a clean bill of health.
+        assert body["search_evidence"] == "no search has run since this instance started"
+
+    def test_reports_degraded_after_a_search_with_unresponsive_engines(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from epicurus_websearch.app import create_app
+
+        monkeypatch.setattr(SearXNGClient, "health_check", lambda self: _true())
+        monkeypatch.setattr(
+            SearXNGClient,
+            "last_unresponsive_engines",
+            property(lambda self: [("google", "timeout"), ("bing", "blocked")]),
+        )
+        client = TestClient(create_app())
+        body = client.get("/status").json()
+        assert body["searxng_healthy"] is True
+        assert body["degraded"] is True
+        # A flat string, not a nested list: the shell renders each status value with
+        # `String(v)`, which turns a list of objects into "[object Object]".
+        assert body["unresponsive_engines"] == "google (timeout), bing (blocked)"
+        assert all(
+            isinstance(value, (str, bool, int, float, type(None))) for value in body.values()
+        )
+
+
+async def _true() -> bool:
+    return True
 
 
 def test_settings_searxng_url_from_env() -> None:

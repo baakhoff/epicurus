@@ -705,6 +705,13 @@ Applies a staged import in the background. **202**. **409** if the job is not `s
 (including a second apply of the same job — upload it again), or if the preview said
 `compatible: false`; **410** if staging has been swept.
 
+Serialized against `DELETE .../imports/{id}` for the same job (#918): both read the row and
+then act on it, and without a lock a `DELETE` landing between this route's read and its write
+could remove the row — and the staging directory the background apply is about to open — out
+from under a job that had just been told to start. Whichever request the service's per-job
+lock lets through first wins; the loser sees the state the winner left (`JobNotFound`/`None` if
+the delete went first, `JobRunning`/409 if the apply did).
+
 The **202 already carries the whole job**: `status: "running"` and a complete `progress` list,
 seeded from the preview, every entry `pending`. That is deliberate (#893) — the shell used to
 keep serving its stale `staged` copy until the next poll and so kept offering Apply, and a

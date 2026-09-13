@@ -155,7 +155,7 @@ The **core** plus the file-owning module **knowledge** share **one** file tree �
 are the in-container paths under it. Since the file-space migration Phase 2 (ADR-0063) the
 **core** mounts the volume and owns the file index + the unified Files browser; **storage no
 longer mounts `/data`** (it reads the file space through the core file API — see
-[file space](files.md)), so its in-container root and scan/watch knobs are gone. Since Phase 4
+[file space](files.md)), so its in-container root and scan/watch knobs are gone. Since file-space Phase 4
 (#357/ADR-0065) **notes no longer mounts `/data`** either — it writes its `.md` mirror through
 the core file API, so only the core and knowledge still bind the volume.
 

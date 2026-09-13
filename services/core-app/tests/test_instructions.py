@@ -114,6 +114,17 @@ async def test_default_encodes_recover_on_not_found() -> None:
     assert "propose what to do next" in text
 
 
+async def test_default_encodes_degraded_search_is_not_a_clean_empty_result() -> None:
+    """#920/#936: a tool reporting search as degraded/unavailable must be narrated as such,
+    never quietly folded into the "found nothing, answering from training data" phrasing that
+    is only correct for a genuine empty result. Pins the policy, not the prose."""
+    text = DEFAULT_AGENT_INSTRUCTIONS.lower()
+    assert "degraded or unavailable" in text
+    assert "search is down right now" in text
+    # Sits alongside the rest of the source-grounding ladder, after the never-guess rule.
+    assert text.index("guess") < text.index("degraded or unavailable")
+
+
 async def test_the_migration_heals_a_legacy_table_without_the_instructions_column() -> None:
     """A pre-existing table missing ``instructions`` is reconciled by the baseline (#834)."""
     engine = create_async_engine(

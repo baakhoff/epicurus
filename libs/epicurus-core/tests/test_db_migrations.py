@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import sqlalchemy as sa
@@ -399,3 +399,73 @@ async def test_the_runner_is_the_only_supported_entry_point(
     )
     with pytest.raises(RuntimeError, match="online only"):
         command.upgrade(config, "head")
+
+
+# ── The advisory lock's own housekeeping ──────────────────────────────────────
+#
+# The lock itself is Postgres-only, so the gate exercises it for real. What is testable
+# without a database is what the runner does with the *connection* it opens for the lock —
+# the two paths where a failure could leak it or hide the real error.
+
+
+class _FakeConnection:
+    """The minimum ``AsyncConnection`` surface ``_acquire`` / ``_release`` touch."""
+
+    def __init__(self, *, fail_on: str | None = None) -> None:
+        self._fail_on = fail_on
+        self.statements: list[str] = []
+        self.closed = False
+
+    async def execute(self, statement: Any, parameters: Any = None) -> None:
+        text = str(statement)
+        self.statements.append(text)
+        if self._fail_on is not None and self._fail_on in text:
+            raise OSError("the database went away")
+
+    async def commit(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakeEngine:
+    """An engine that claims to be Postgres, so ``_acquire`` takes the lock path."""
+
+    def __init__(self, conn: _FakeConnection) -> None:
+        self._conn = conn
+        self.dialect = type("_D", (), {"name": "postgresql"})()
+
+    async def connect(self) -> _FakeConnection:
+        return self._conn
+
+
+async def test_a_failed_lock_acquire_hands_its_connection_back() -> None:
+    """A connection opened for the lock must not leak when the lock statement fails.
+
+    ``_acquire`` opens a connection of its own and only then runs ``pg_advisory_lock``. If that
+    raises — the database went away, the role lacks the right, a statement timeout fired — the
+    connection has to go back to the pool, or every restart of a service against a sick
+    database starts the pool one connection down.
+    """
+    from epicurus_core.db.migrations import _acquire
+
+    conn = _FakeConnection(fail_on="pg_advisory_lock")
+    with pytest.raises(OSError, match="went away"):
+        await _acquire(cast(Any, _FakeEngine(conn)), service=SERVICE, key=1)
+    assert conn.closed, "the lock connection leaked out of the pool"
+
+
+async def test_a_failed_unlock_does_not_replace_the_error_that_caused_it() -> None:
+    """``_release`` runs in ``run_migrations``'s ``finally``, so a raise there masks the cause.
+
+    The likeliest reason ``pg_advisory_unlock`` fails is the same outage that failed the
+    migration; letting it propagate would show the operator a connection error instead of the
+    revision that broke. Closing the connection ends the session and Postgres drops every
+    session-level lock with it, so nothing is stranded by swallowing it.
+    """
+    from epicurus_core.db.migrations import _release
+
+    conn = _FakeConnection(fail_on="pg_advisory_unlock")
+    await _release(cast(Any, conn), key=1)
+    assert conn.closed, "the lock connection must be closed even when the unlock fails"

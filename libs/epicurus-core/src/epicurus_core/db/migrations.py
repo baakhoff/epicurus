@@ -31,6 +31,7 @@ reading a startup log wants to know whether a migration just adopted a years-old
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from collections.abc import Sequence
 from pathlib import Path
@@ -230,17 +231,33 @@ async def _acquire(engine: AsyncEngine, *, service: str, key: int) -> AsyncConne
         return None
     conn = await engine.connect()
     log.info("waiting for the migration advisory lock", service=service)
-    await conn.execute(sa.text("SELECT pg_advisory_lock(:key)"), {"key": key})
-    await conn.commit()
+    try:
+        await conn.execute(sa.text("SELECT pg_advisory_lock(:key)"), {"key": key})
+        await conn.commit()
+    except BaseException:
+        # The lock statement failed (the database went away, the role lacks the right, a
+        # statement timeout fired). Hand the connection back before the error propagates —
+        # otherwise it leaks out of the pool and the retry after the restart starts one down.
+        await conn.close()
+        raise
     return conn
 
 
 async def _release(lock: AsyncConnection | None, *, key: int) -> None:
-    """Release the advisory lock and close its connection. A no-op when there was none."""
+    """Release the advisory lock and close its connection. A no-op when there was none.
+
+    The unlock is best-effort on purpose. This runs in :func:`run_migrations`'s ``finally``, so
+    a raise here *replaces* whatever made the migration fail — and the most likely reason the
+    unlock fails is the very outage that failed the migration, which would leave the operator
+    reading a connection error instead of the revision that broke. Closing the connection ends
+    the session, and Postgres drops every session-level advisory lock with it, so nothing is
+    stranded by swallowing this.
+    """
     if lock is None:
         return
     try:
-        await lock.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": key})
-        await lock.commit()
+        with contextlib.suppress(Exception):
+            await lock.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": key})
+            await lock.commit()
     finally:
         await lock.close()

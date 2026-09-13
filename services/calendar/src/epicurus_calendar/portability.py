@@ -40,7 +40,10 @@ than through ``LocalEventStore``'s API. That is deliberate: the store's methods 
 for the *provider* (partial edits, scope resolution, synthesized instances), and a
 round-trip built on them would have to reconstruct a raw row from a resolved ``Event`` —
 losing exactly the columns that make a series a series. Reading the columns also means a
-column added tomorrow travels tomorrow, with no edit here.
+column added tomorrow travels tomorrow, with no edit here. The encode/decode/normalize
+machinery that buys that is :class:`~epicurus_core.portability_columns.PortableTable`
+(promoted out of here and the core's own ``core_data`` in #918 — see its docstring for the
+shared rule) — this module supplies only the *table specs* and the upsert loop around them.
 
 Three rules make that safe, and they are the contract's (ADR-0133), not this module's:
 
@@ -55,32 +58,22 @@ Three rules make that safe, and they are the contract's (ADR-0133), not this mod
   and ``excluded`` postdate this table's first release and carry no ``server_default``, so
   the additive reconcile added them nullable on every install provisioned before them; a
   fresh target's ``create_all`` makes them ``NOT NULL``. Both ends normalise
-  (:func:`_defaulted`), so an archive from a reconciled source lands on a fresh schema
-  instead of 500-ing the import and taking the whole calendar with it.
+  (:class:`~epicurus_core.portability_columns.PortableTable`), so an archive from a
+  reconciled source lands on a fresh schema instead of 500-ing the import and taking the
+  whole calendar with it.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any, cast
+from collections.abc import AsyncIterator
 
-from sqlalchemy import (
-    Boolean,
-    Column,
-    ColumnDefault,
-    DateTime,
-    Table,
-    insert,
-    select,
-    update,
-)
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from epicurus_calendar.db import _StoredEvent
 from epicurus_calendar.lead_time_prefs import _LeadTimePrefRow
 from epicurus_core import ImportOutcome, ImportReport, PortabilityRecord
+from epicurus_core.portability_columns import PortableTable, table_of
 
 __all__ = [
     "CALENDAR_SCHEMA",
@@ -105,172 +98,18 @@ LEAD_TIME_RECORD_KIND = "lead_time_prefs"
 """The tenant's ``event_starting_soon`` lead time (#664) — one record per tenant."""
 
 
-@dataclass(frozen=True, slots=True)
-class _TableSpec:
-    """One travelling table: its record ``kind`` and the natural key the upsert matches on.
-
-    *key* names the columns that identify a row **across installations**; an empty key means
-    the table holds exactly one row per tenant, so the tenant is the key and the record id is
-    just the kind. *skip* names columns that must not travel — the surrogate primary key,
-    whose value is an artefact of the source database's insert order and nothing else.
-    """
-
-    kind: str
-    table: Table
-    key: tuple[str, ...] = ()
-    skip: tuple[str, ...] = ()
-
-    @property
-    def columns(self) -> list[Column[Any]]:
-        """The columns that travel: everything but ``tenant`` and the skipped surrogates."""
-        return [c for c in self.table.columns if c.name != "tenant" and c.name not in self.skip]
-
-    def identity(self, data: Mapping[str, Any]) -> str:
-        """The record's stable id — the natural key's values, or the kind for a singleton."""
-        if not self.key:
-            return self.kind
-        return "|".join(str(data.get(name)) for name in self.key)
-
-    def encode(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        """A JSON-safe mapping of the travelling columns of *row*, nulls defaulted (#903)."""
-        return {
-            c.name: _encode_value(c, _defaulted(c, row[c.name]))
-            for c in self.columns
-            if c.name in row
-        }
-
-    def decode(self, data: Mapping[str, Any]) -> dict[str, Any]:
-        """Python values for the travelling columns present in *data* (unknown keys dropped)."""
-        by_name = {c.name: c for c in self.columns}
-        return {
-            name: _decode_value(by_name[name], value)
-            for name, value in data.items()
-            if name in by_name
-        }
-
-    def normalize(self, data: Mapping[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
-        """*data* with every fillable ``NULL`` replaced, plus the ones that could not be.
-
-        The import-side twin of :meth:`encode`, and the reason an archive written by a
-        calendar that never had this rule still applies cleanly: the normalisation is what
-        the *reader* does, not only what the writer did. The second half of the answer names
-        the ``NOT NULL`` columns still carrying a ``NULL`` — one skipped row rather than an
-        ``IntegrityError`` that takes the whole calendar with it.
-        """
-        by_name = {c.name: c for c in self.columns}
-        normalized: dict[str, Any] = {}
-        undefaultable: list[str] = []
-        for name, value in data.items():
-            column = by_name.get(name)
-            if column is None:
-                normalized[name] = value
-                continue
-            filled = _defaulted(column, value)
-            if filled is None and not column.nullable:
-                undefaultable.append(name)
-            normalized[name] = filled
-        return normalized, tuple(sorted(undefaultable))
-
-
-def _table(model: Any) -> Table:
-    """A mapped class's ``__table__``, narrowed (it is typed ``FromClause``, always a Table)."""
-    return cast("Table", model.__table__)
-
-
-_SPECS: tuple[_TableSpec, ...] = (
+_SPECS: tuple[PortableTable, ...] = (
     # ``event_id`` is unique per tenant (``uq_calendar_tenant_event``) and stable across
     # installations — a uuid4 the module minted, or an instance id derived from one.
-    _TableSpec(
+    PortableTable(
         kind=EVENT_RECORD_KIND,
-        table=_table(_StoredEvent),
+        table=table_of(_StoredEvent),
         key=("event_id",),
         skip=("id",),
     ),
     # One row per tenant, keyed by the tenant itself — which never travels, so no key.
-    _TableSpec(kind=LEAD_TIME_RECORD_KIND, table=_table(_LeadTimePrefRow)),
+    PortableTable(kind=LEAD_TIME_RECORD_KIND, table=table_of(_LeadTimePrefRow)),
 )
-
-
-def _canonical_dt(value: datetime) -> str:
-    """A timezone-canonical ISO string, so a round trip through any dialect compares equal.
-
-    SQLite has no timezone-aware type: an aware ``datetime`` written to it reads back naive,
-    so the same row would encode differently before and after a round trip and the second
-    apply of an archive would report *updated* where it must report *skipped*. Every instant
-    this module stores is UTC (``LocalEventStore._to_utc``), so a naive value is read as UTC
-    and an aware one is converted to it — one canonical spelling on both sides of the trip.
-    """
-    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-    return aware.isoformat()
-
-
-_NO_DEFAULT = object()
-"""Sentinel — a column has no Python-side scalar default. ``None`` cannot say this: a
-``default=None`` and a missing default are different facts, and so are ``default=False``
-and no default at all."""
-
-
-def _scalar_default(column: Column[Any]) -> Any:
-    """*column*'s Python-side scalar default, or :data:`_NO_DEFAULT`.
-
-    Only a plain value counts: a callable or SQL-expression default is evaluated by the
-    ``insert`` itself — which is already what happens for a column a record omits entirely —
-    and there is no value to write into a *record* here.
-    """
-    default = column.default
-    # ``is_scalar`` is what does the work, not the ``isinstance``: ``CallableColumnDefault``
-    # and ``ColumnElementColumnDefault`` are both ``ColumnDefault`` subclasses and both carry
-    # an ``arg`` (the callable, the SQL element) — it is just not a value that may be frozen
-    # into a record, which is the same answer as having no default at all. A ``Sequence`` is
-    # not a ``ColumnDefault``, so the ``isinstance`` catches that one.
-    if not isinstance(default, ColumnDefault) or not default.is_scalar:
-        return _NO_DEFAULT
-    return default.arg
-
-
-def _defaulted(column: Column[Any], value: Any) -> Any:
-    """*value*, with a ``NULL`` in a ``NOT NULL`` column replaced by the column's default.
-
-    ``all_day`` and ``excluded`` are ``Boolean, default=False`` with no ``server_default``,
-    so the additive reconcile (#249, ADR-0067) added them **nullable** to every database
-    provisioned before they existed — there is nothing to backfill a populated table with —
-    and ``_row_to_event`` coerces the resulting ``NULL`` to ``False`` on every read. A fresh
-    target never went through that reconcile: ``create_all`` made both columns ``NOT NULL``,
-    and an explicit ``None`` in an ``insert()`` bypasses the ORM default and violates the
-    constraint. That is the calendar half of #903 — a 500 on ``POST /import``, and the whole
-    calendar lost with it. Normalising at both ends is the fix.
-
-    A **nullable** column is left alone: its ``NULL`` is data (``recurrence`` on a plain
-    event, ``timezone`` on a pre-#446 master), and defaulting it would rewrite real rows.
-    """
-    if value is not None or column.nullable:
-        return value
-    default = _scalar_default(column)
-    return None if default is _NO_DEFAULT else default
-
-
-def _encode_value(column: Column[Any], value: Any) -> Any:
-    """One column value, JSON-safe."""
-    if value is None:
-        return None
-    if isinstance(column.type, DateTime):
-        return _canonical_dt(value) if isinstance(value, datetime) else str(value)
-    if isinstance(column.type, Boolean):
-        # SQLite hands back 0/1; the target may be Postgres, where the column is a real
-        # boolean. Normalising here keeps an idempotent re-apply idempotent across dialects.
-        return bool(value)
-    return value
-
-
-def _decode_value(column: Column[Any], value: Any) -> Any:
-    """The inverse of :func:`_encode_value`, back to what the column wants."""
-    if value is None:
-        return None
-    if isinstance(column.type, DateTime):
-        return datetime.fromisoformat(str(value)) if isinstance(value, str) else value
-    if isinstance(column.type, Boolean):
-        return bool(value)
-    return value
 
 
 class CalendarPortability:
@@ -352,7 +191,7 @@ class CalendarPortability:
 
 async def _upsert(
     conn: AsyncConnection,
-    spec: _TableSpec,
+    spec: PortableTable,
     record: PortabilityRecord,
     tenant: str,
     dry_run: bool,

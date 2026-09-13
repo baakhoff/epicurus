@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
 from epicurus_core.module import EpicurusModule
@@ -245,6 +245,80 @@ async def test_a_newer_or_foreign_schema_is_refused_before_anything_is_written(
 
     assert response.status_code == 409
     assert store.rows == {}
+
+
+class _ExplodingStore:
+    """A store whose ``import_`` raises something other than ``ValueError`` (#918)."""
+
+    schema = "widgets/2"
+
+    async def export(self, *, tenant_id: str) -> AsyncIterator[PortabilityRecord]:
+        return
+        yield  # pragma: no cover - makes this an async generator; never reached
+
+    async def import_(
+        self,
+        *,
+        tenant_id: str,
+        records: AsyncIterator[PortabilityRecord],
+        dry_run: bool,
+    ) -> ImportReport:
+        async for _ in records:
+            pass
+        raise RuntimeError("disk is on fire")
+
+
+async def test_an_unhandled_store_exception_carries_a_detail_not_a_bodyless_500() -> None:
+    """The gap #903's follow-up named (#918): a module's own crash used to vanish.
+
+    Before this fix, an exception the store did not turn into a deliberate
+    ``HTTPException`` escaped as Starlette's default 500 — ``text/plain``, no JSON, no
+    ``detail`` — so the core's report line had nothing the module said. The route now
+    catches it and answers with a JSON ``detail`` naming it, same as a store's own
+    ``HTTPException`` already would.
+    """
+    app, _ = _app(_ExplodingStore())
+    body = _stream("widgets/2", [{"kind": "widget", "id": "a", "data": {"colour": "red"}}])
+
+    async with _client(app) as client:
+        response = await client.post("/import", params={"tenant_id": TENANT}, content=body)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"] == "RuntimeError: disk is on fire"
+
+
+class _RefusingStore(_ExplodingStore):
+    """A store whose ``import_`` refuses *deliberately*, with its own status and detail."""
+
+    async def import_(
+        self,
+        *,
+        tenant_id: str,
+        records: AsyncIterator[PortabilityRecord],
+        dry_run: bool,
+    ) -> ImportReport:
+        async for _ in records:
+            pass
+        raise HTTPException(status_code=409, detail="a restore is already running")
+
+
+async def test_a_stores_deliberate_refusal_keeps_its_own_status() -> None:
+    """The catch above must not swallow the answer a store already wrote (#918).
+
+    ``HTTPException`` is an ``Exception``, so a bare ``except Exception`` re-answers a store's
+    considered 409 as a 500 with its status folded into the detail string — losing exactly the
+    information the fix exists to carry, and telling the operator the module crashed when it
+    did no such thing.
+    """
+    app, _ = _app(_RefusingStore())
+    body = _stream("widgets/2", [{"kind": "widget", "id": "a", "data": {"colour": "red"}}])
+
+    async with _client(app) as client:
+        response = await client.post("/import", params={"tenant_id": TENANT}, content=body)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "a restore is already running"
 
 
 async def test_a_malformed_record_line_is_a_400_not_a_500() -> None:

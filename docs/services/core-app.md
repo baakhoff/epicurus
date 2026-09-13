@@ -1244,6 +1244,18 @@ card with its report for a day and the operator's only way to clear it was to st
 job. Both kinds, because the job list is not split by kind and a Remove that appeared on some
 rows only would read as a broken button.
 
+**Removal and apply are mutually exclusive per job** (#918). Both `remove` and `start_apply` do
+a read-then-act — check the job's status, then either delete its row and staging directory, or
+flip it to `running` and hand the directory to the background applier. Without a lock, a
+`DELETE` racing a `POST .../apply` for the *same* job could read `staged` in `remove` a moment
+before the apply flips it to `running`, and then delete the row (and the directory the applier
+is about to open) out from under a job that had just been told to start — same tenant, two
+presses in close succession, one lost job. `PortabilityService` now holds one `asyncio.Lock`
+per job id and both methods take it around their read-then-act section, so the two requests
+serialize instead of interleave: whichever gets there first decides the outcome the other sees
+(`JobNotFound` for the apply if the delete won, `JobRunning`/409 for the delete if the apply
+did).
+
 **A `NULL` costs one row, never a set** (#903). `import_set` applies a whole set in one
 transaction — the right trade for ten thousand `agent_messages`, and a trap for anything that
 raises mid-stream. A record can carry `null` for a column the model declares `NOT NULL`,
@@ -1255,13 +1267,27 @@ revisions 0003/0004), but the normalisation stays: an archive written before the
 exported from a module still on the reconcile, carries the `NULL` all the same. Portability read it verbatim, and an explicit `None` in an `insert()` bypasses
 the ORM default — so on a fresh target, where `create_all` made the column `NOT NULL` for
 real, one `module_prefs` row took the operator's entire `prefs` set with it.
-`TableSpec.encode` now normalises on the way out and `TableSpec.normalize` on the way in, from
-the column's own metadata rather than a hand-kept list, so a column added tomorrow inherits the
-rule; the comparison that decides `skipped` vs `updated` runs against the *normalised* record,
-so re-applying an archive written before this is still a no-op. A null with no default to fill
-it (`maintenance_schedule_prefs.cadence`, `agent_messages.content`) is refused before the
-statement is built: `skipped`, with a warning naming the column, and the rest of the set lands.
-The same rule binds every module's own import (ADR-0133).
+`epicurus_core.portability_columns.PortableTable.encode` normalises on the way out and
+`.normalize` on the way in,
+from the column's own metadata rather than a hand-kept list, so a column added tomorrow
+inherits the rule; the comparison that decides `skipped` vs `updated` runs against the
+*normalised* record, so re-applying an archive written before this is still a no-op. A null
+with no default to fill it (`maintenance_schedule_prefs.cadence`, `agent_messages.content`) is
+refused before the statement is built: `skipped`, with a warning naming the column, and the
+rest of the set lands. The same rule binds every module's own table-backed import (ADR-0133) —
+`core_data.py`'s `CORE_SETS` and `calendar`'s own travelling tables both build on
+`PortableTable` rather than each keeping its own copy of this machinery (#918); a module that
+instead goes through a domain store with explicit per-field defaults (`tasks`, `notes`,
+`knowledge`, `storage`, `mail`) never had this defect and has nothing to adopt.
+
+**A module's own crash reaches the report line too** (#918). `_apply_module` already preferred
+a module's own JSON `detail` over httpx's generic text for a deliberate refusal (#869); an
+*unhandled* exception in a module's `import_` used to escape `add_portability_routes` as
+Starlette's bodyless default 500 (`text/plain`, no JSON) — nothing for `_detail()` to read, so
+the report fell back to `"Server error '500 …'"` and the operator was back to
+`docker compose logs`. The route now catches any exception the store does not turn into its own
+`HTTPException` and answers `500` with `detail: "<exception type>: <message>"`, so the report
+line reads the module's own words either way.
 
 ### Chat bridges (ADR-0062)
 

@@ -13,8 +13,9 @@ metadata rather than each store's Python API. That is a deliberate trade: a besp
 serializer per store would be forty hand-written round-trips to keep in step with forty
 evolving models, and the first one to drift would lose data silently. Reading the columns
 means a column added tomorrow travels tomorrow, with no edit here. The encode/decode/
-normalize machinery that buys that is :class:`~epicurus_core.PortableTable` (promoted out of
-here and ``calendar``'s own copy in #918 — see its docstring for the shared rule); this module
+normalize machinery that buys that is
+:class:`~epicurus_core.portability_columns.PortableTable` (promoted out of here and
+``calendar``'s own copy in #918 — see its docstring for the shared rule); this module
 supplies only the table specs below and the set-level upsert loop around them.
 
 Two rules make that safe:
@@ -33,10 +34,11 @@ Two rules make that safe:
   and its row-reader coerces that to the Python-side default on every read. A fresh target
   never went through that reconcile: ``create_all`` made the column ``NOT NULL``, and an
   explicit ``None`` in an ``insert()`` bypasses the ORM default and violates the constraint.
-  Both ends therefore normalise here — :meth:`~epicurus_core.PortableTable.encode` on the way
-  out and :meth:`~epicurus_core.PortableTable.normalize` on the way in — so an archive is
-  portable regardless of which reconcile its source went through, and a null that *cannot* be
-  defaulted costs one row rather than the whole set.
+  Both ends therefore normalise here —
+  :meth:`~epicurus_core.portability_columns.PortableTable.encode` on the way out and
+  :meth:`~epicurus_core.portability_columns.PortableTable.normalize` on the way in — so an
+  archive is portable regardless of which reconcile its source went through, and a null
+  that *cannot* be defaulted costs one row rather than the whole set.
 """
 
 from __future__ import annotations
@@ -46,7 +48,8 @@ from collections.abc import AsyncIterator
 from sqlalchemy import UniqueConstraint, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from epicurus_core import ImportOutcome, ImportReport, PortabilityRecord, PortableTable, table_of
+from epicurus_core import ImportOutcome, ImportReport, PortabilityRecord
+from epicurus_core.portability_columns import PortableTable, table_of
 from epicurus_core_app.agent.instructions import (
     _AgentInstructionsRow,
     _AgentInstructionsVersionRow,
@@ -95,8 +98,9 @@ generic reader above buys. Reserved for a change that would make an old archive 
 # operator's benefit (an import preview that says "conversations: 4,812 records" reads;
 # one that says "agent_messages, agent_attachments, session_models…" does not) — the
 # records inside carry their own ``kind``, so a set is only ever a filename. Each table is
-# read and written through :class:`~epicurus_core.PortableTable` (#918) — the encode/decode/
-# normalize machinery lives there now, shared with ``calendar``'s identical copy.
+# read and written through :class:`~epicurus_core.portability_columns.PortableTable`
+# (#918) — the encode/decode/normalize machinery lives there now, shared with
+# ``calendar``'s identical copy.
 
 CORE_SETS: dict[str, tuple[PortableTable, ...]] = {
     # Chat: the messages themselves, the attachments they reference, and the per-session

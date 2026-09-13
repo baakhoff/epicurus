@@ -41,9 +41,9 @@ for the *provider* (partial edits, scope resolution, synthesized instances), and
 round-trip built on them would have to reconstruct a raw row from a resolved ``Event`` —
 losing exactly the columns that make a series a series. Reading the columns also means a
 column added tomorrow travels tomorrow, with no edit here. The encode/decode/normalize
-machinery that buys that is :class:`~epicurus_core.PortableTable` (promoted out of here and
-the core's own ``core_data`` in #918 — see its docstring for the shared rule) — this module
-supplies only the *table specs* and the upsert loop around them.
+machinery that buys that is :class:`~epicurus_core.portability_columns.PortableTable`
+(promoted out of here and the core's own ``core_data`` in #918 — see its docstring for the
+shared rule) — this module supplies only the *table specs* and the upsert loop around them.
 
 Three rules make that safe, and they are the contract's (ADR-0133), not this module's:
 
@@ -58,8 +58,9 @@ Three rules make that safe, and they are the contract's (ADR-0133), not this mod
   and ``excluded`` postdate this table's first release and carry no ``server_default``, so
   the additive reconcile added them nullable on every install provisioned before them; a
   fresh target's ``create_all`` makes them ``NOT NULL``. Both ends normalise
-  (:class:`~epicurus_core.PortableTable`), so an archive from a reconciled source lands on a
-  fresh schema instead of 500-ing the import and taking the whole calendar with it.
+  (:class:`~epicurus_core.portability_columns.PortableTable`), so an archive from a
+  reconciled source lands on a fresh schema instead of 500-ing the import and taking the
+  whole calendar with it.
 """
 
 from __future__ import annotations
@@ -71,7 +72,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from epicurus_calendar.db import _StoredEvent
 from epicurus_calendar.lead_time_prefs import _LeadTimePrefRow
-from epicurus_core import ImportOutcome, ImportReport, PortabilityRecord, PortableTable, table_of
+from epicurus_core import ImportOutcome, ImportReport, PortabilityRecord
+from epicurus_core.portability_columns import PortableTable, table_of
 
 __all__ = [
     "CALENDAR_SCHEMA",

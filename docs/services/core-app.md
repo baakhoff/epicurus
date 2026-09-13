@@ -1267,7 +1267,8 @@ revisions 0003/0004), but the normalisation stays: an archive written before the
 exported from a module still on the reconcile, carries the `NULL` all the same. Portability read it verbatim, and an explicit `None` in an `insert()` bypasses
 the ORM default — so on a fresh target, where `create_all` made the column `NOT NULL` for
 real, one `module_prefs` row took the operator's entire `prefs` set with it.
-`epicurus_core.PortableTable.encode` normalises on the way out and `.normalize` on the way in,
+`epicurus_core.portability_columns.PortableTable.encode` normalises on the way out and
+`.normalize` on the way in,
 from the column's own metadata rather than a hand-kept list, so a column added tomorrow
 inherits the rule; the comparison that decides `skipped` vs `updated` runs against the
 *normalised* record, so re-applying an archive written before this is still a no-op. A null

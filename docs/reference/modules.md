@@ -191,11 +191,11 @@ module said and the operator's only recourse was `docker compose logs`. A malfor
 unchanged. Write a store's own domain errors as readable sentences — they reach the operator's
 report line verbatim, the same courtesy `ValueError`/`HTTPException` already got.
 
-### Column-metadata-backed stores — `epicurus_core.PortableTable` (#918)
+### Column-metadata-backed stores — `epicurus_core.portability_columns.PortableTable` (#918)
 
 A store whose travelling table is a plain SQLAlchemy `Table` — read and written generically,
 column by column, rather than through a domain API — should build its table specs from
-`epicurus_core.PortableTable` (`table_of(Model)` for the `Table`) rather than reinventing the
+`PortableTable` (`table_of(Model)` for the `Table`) rather than reinventing the
 encode/decode/normalize loop. It is what `calendar` and the core's own core-data set do, and it
 carries the #903 null-normalisation rule (a `NULL` in a column the model gives a Python-side
 default, with no `server_default`, is filled rather than travelling as `NULL` and failing a
@@ -203,6 +203,13 @@ fresh target's `NOT NULL`) for free. A store that instead goes through a domain 
 own explicit per-field defaults (`tasks`, `notes`, `knowledge`, `storage`) has no need of it —
 that shape never had the bug `PortableTable` fixes, because it never passes an *absent* field
 through to the database as an explicit `None` in the first place.
+
+`portability_columns` is a **submodule, not a package-root export** — it imports SQLAlchemy,
+which `epicurus_core` itself does not depend on (a module with no database, like `websearch`,
+must be able to `import epicurus_core` without one). Import it directly:
+`from epicurus_core.portability_columns import PortableTable, table_of` — the same pattern as
+`epicurus_core.db`. Every module that reaches for it already declares SQLAlchemy for its own
+store.
 
 ### Rules
 

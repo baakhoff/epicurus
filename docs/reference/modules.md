@@ -177,6 +177,33 @@ the module's own door (`epicurus_core.schema_verdict`):
 | **newer** | **409** — refused whole, never half-applied |
 | a different module | **409** |
 
+### Errors on `/import` (#918)
+
+Every non-2xx response `add_portability_routes` can produce carries a JSON body with a
+`detail` string — never a bodyless response. A schema refusal already answered this way
+(**409**, `detail` names
+the incompatibility); since #918 an exception the store's `import_` raises and does *not* turn
+into a deliberate `HTTPException` is caught at the route and answered the same way: **500**,
+`detail: "<exception type>: <message>"`. Before this, an unhandled exception escaped as
+Starlette's default 500 — `text/plain`, no JSON — so the core's import report had nothing the
+module said and the operator's only recourse was `docker compose logs`. A malformed request
+(an unreadable line, a truncated blob body) is still **400** with `detail` naming what broke,
+unchanged. Write a store's own domain errors as readable sentences — they reach the operator's
+report line verbatim, the same courtesy `ValueError`/`HTTPException` already got.
+
+### Column-metadata-backed stores — `epicurus_core.PortableTable` (#918)
+
+A store whose travelling table is a plain SQLAlchemy `Table` — read and written generically,
+column by column, rather than through a domain API — should build its table specs from
+`epicurus_core.PortableTable` (`table_of(Model)` for the `Table`) rather than reinventing the
+encode/decode/normalize loop. It is what `calendar` and the core's own core-data set do, and it
+carries the #903 null-normalisation rule (a `NULL` in a column the model gives a Python-side
+default, with no `server_default`, is filled rather than travelling as `NULL` and failing a
+fresh target's `NOT NULL`) for free. A store that instead goes through a domain API with its
+own explicit per-field defaults (`tasks`, `notes`, `knowledge`, `storage`) has no need of it —
+that shape never had the bug `PortableTable` fixes, because it never passes an *absent* field
+through to the database as an explicit `None` in the first place.
+
 ### Rules
 
 * **Additive, never destructive.** Nothing in this contract can delete. Applying the same

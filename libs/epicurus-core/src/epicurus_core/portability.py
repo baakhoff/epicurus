@@ -453,6 +453,20 @@ def add_portability_routes(
             )
         except ValueError as exc:  # a malformed line — the caller's stream, not our bug
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            # Anything the store did not expect. Left alone, this would escape as
+            # Starlette's default 500 — `text/plain`, no JSON, nothing a caller can carry
+            # into a report line (#918: the operator was back to `docker compose logs`
+            # for a fact the module already knew and said, in its own exception). A
+            # `detail` here is exactly the courtesy a deliberate `HTTPException` already
+            # gives; the difference is only that this one is not deliberate.
+            log.error(
+                "portability import failed",
+                module=module.name,
+                tenant=tenant,
+                error=str(exc),
+            )
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
         report.schema_name = store.schema
         if verdict == "older":
             report.warn(

@@ -12,6 +12,21 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The portability seam's last two gaps: a bodyless crash, and a remove/apply race** (#918) —
+  an unhandled exception inside a module's `/import` route used to escape as Starlette's default
+  500 (`text/plain`, no JSON), so a module's own crash reached the operator's report line as
+  nothing at all and the only recourse was `docker compose logs`; `add_portability_routes` now
+  catches it and answers with a `detail` naming it, the same courtesy a deliberate refusal
+  already got. `#903`'s null-normalisation helper (`TableSpec.encode`/`.normalize`) existed as
+  two identical copies in `calendar` and the core's own `core_data`; it is promoted once into
+  `epicurus_core.PortableTable`, and both adopt it — the other five portable modules
+  (`tasks`, `notes`, `knowledge`, `storage`, `mail`) go through a domain store with explicit
+  per-field defaults and never had the defect to begin with, so there was nothing there to
+  adopt. And a `DELETE .../imports/{id}` racing a `POST .../apply` for the same job could delete
+  the row (and the staging directory the applier was about to open) between the apply's read and
+  its write; `PortabilityService` now holds one lock per job id so the two requests serialize.
+  `epicurus-core` 0.39.0→0.41.0 (MINOR), `core-app` 0.124.0→0.124.2 (PATCH),
+  `calendar` 0.22.0→0.22.1 (PATCH).
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
   startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own

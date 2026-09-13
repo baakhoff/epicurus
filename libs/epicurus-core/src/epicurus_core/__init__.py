@@ -104,6 +104,7 @@ from epicurus_core.portability import (
     schema_verdict,
     verified_chunks,
 )
+from epicurus_core.portability_columns import PortableTable, table_of
 from epicurus_core.redaction import REDACTED_KEYS, is_secret_key, redact_mapping, secret_keys_in
 from epicurus_core.review import (
     ApplyResult,
@@ -200,6 +201,7 @@ __all__ = [
     "PlatformMessage",
     "PortabilityRecord",
     "PortabilityStore",
+    "PortableTable",
     "Replier",
     "ReviewAuditData",
     "ReviewData",
@@ -249,6 +251,7 @@ __all__ = [
     "session_id_for",
     "set_current_tenant",
     "setup_tracing",
+    "table_of",
     "tool_envelope",
     "validate_tenant_id",
     "verified_chunks",

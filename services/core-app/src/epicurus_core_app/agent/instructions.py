@@ -7,8 +7,9 @@ one row per tenant, that the agent injects as the **first** system message of ev
 attached context, where the compaction prefix rule protects it from being trimmed.
 
 A NULL/absent row falls back to the shipped :data:`DEFAULT_AGENT_INSTRUCTIONS`. Follows the
-``TimezonePrefsStore`` pattern (ADR-0039): auto-created and column-healed on ``init()``, resolved
-per turn so an edit takes effect on the next turn with no restart. The memory-extraction prompt
+``TimezonePrefsStore`` pattern (ADR-0039): its table comes from the core's migration environment
+(``epicurus_core_app.migrations``, #834), resolved per turn so an edit takes effect on the next
+turn with no restart. The memory-extraction prompt
 (``memory/extraction.py``) is a separate pipeline and out of scope.
 
 Since ADR-0093 this store composes rather than merely reads: :meth:`AgentInstructionsStore.

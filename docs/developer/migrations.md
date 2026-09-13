@@ -5,10 +5,11 @@ service**, applied in-process when the service starts (#834, ADR-XXXX). This pag
 working reference: what to do when you change a model, what happens at startup, and what the
 gates prove.
 
-> **Not every service is migrated yet.** `storage` is the reference; the other store-owning
-> services are being converted one at a time and meanwhile still use the additive reconcile
-> described in [`db` reference](../reference/db.md). `task migrate:list` tells you which
-> services are migration-managed today.
+> **Every store-owning service is migrated** — `storage` (the reference), `calendar`, `tasks`,
+> `notes`, `knowledge`, `mail` and `core-app`. `task migrate:list` names them and their heads.
+> The additive reconcile described in the [`db` reference](../reference/db.md) is no longer on
+> any service's startup path: it survives inside the idempotent baseline, and for a *new*
+> service that has not adopted migrations yet.
 
 ## The short version
 
@@ -200,11 +201,12 @@ render as `postgresql.JSONB()` and needs the import added by hand, plus a second
 
 A baseline is written **once**; the generator refuses to overwrite an existing `versions/`.
 
-## Expect the gate to fail on `server_default="'…'"` — and what to do
+## Why the models say `text("'…'")` and never `"'…'"`
 
-**Every service still carrying a plain-string `server_default` will fail its first `migrations`
-run, on the adoption arm.** This is a real defect the gate surfaces, not a gate bug, and each
-lane fixes it the same way.
+**A plain-string `server_default` fails the `migrations` gate on its adoption arm**, and it
+should: the gate is surfacing a real defect, not misbehaving. No service carries one today — each
+lane fixed its own as it adopted migrations — so this section is the reason the rule exists and
+what to do if a new model reintroduces the pattern.
 
 A *plain string* `server_default` is a **literal SQLAlchemy quotes for you**, not raw SQL. So the
 house pattern `server_default="'fs'"` compiles to `DEFAULT '''fs'''` — a default whose value is
@@ -223,7 +225,7 @@ noticed because inserts set these columns explicitly and the row-readers coerce 
 unexpected to the intended value — but the defaults in the database are wrong, and only a
 migration can fix them.
 
-The fix, per service:
+The fix, if one reappears:
 
 1. Change the model to `server_default=text("'…'")` (keep the quotes — `text()` means "this is
    SQL"). Do **not** drop to the bare `server_default="fs"`: the reconcile would then emit
@@ -235,8 +237,10 @@ The fix, per service:
    makes the revision runnable under `task migrate:check`).
 3. Re-run `task migrate:check -- <service>` and watch the gate's adoption arm.
 
-Columns affected repo-wide: the `"'fs'"` / `"'{}'"` / `"'[]'"` / `"''"` / `"0"` server defaults.
-`storage` is done (#926); each remaining lane does its own.
+The pattern was repo-wide — `"'fs'"` / `"'{}'"` / `"'[]'"` / `"''"` / `"0"` — and `storage`
+(#926), `knowledge` (#931) and `core-app` (#927) each shipped a normalisation revision for
+theirs. A boolean default is the one form that is *not* written as `text(...)`: use `false()` /
+`true()`, which the generator renders as themselves so SQLAlchemy compiles them per dialect.
 
 ## The backfill rule
 
@@ -276,13 +280,34 @@ same column, which is the guarantee the whole framework rests on. The revision t
 no-op on a fresh install (the `UPDATE` matches nothing, the `ALTER` restates what is there) and
 does real work only on the deployments that carry the `NULL`s.
 
-Inventory as the lanes land: **`storage` has none** — its one post-release column (`source`)
-carries a literal `server_default`. **`core-app` has two** of 55 candidates —
-`module_prefs.suggestions_enabled` and `automations.agent_gated_delivery` (revisions 0003/0004).
-`calendar` has seven (`calendar_events.all_day`, `calendar_events.excluded`,
-`calendar_sync_state.collection`, `calendar_synced_event.{collection,title,all_day,change_hash}`);
-the remaining services have not been audited yet. Each service lane audits its own and says so in
-its PR.
+**Pass the target `nullable=False`, not just `existing_nullable=False`.** They read as
+interchangeable and are not: `existing_nullable` only *describes* the column Alembic should expect
+to find, so when that description is wrong Alembic concludes there is nothing to change and
+leaves the column exactly as it is. On the gate's drift arm the description *is* wrong — the
+column has just been dropped and re-added nullable by a baseline whose definition predates this
+revision — so a revision that asserts only `existing_nullable=False` silently leaves it nullable
+and the arm goes red. Naming the *target* state makes the revision correct whichever state it
+finds the column in, which is what the worked example above does; inside `op.batch_alter_table`
+it is the same argument on `batch_op.alter_column`.
+
+**Regenerate the baseline after the model edits, not before.** A baseline rendered while the
+models still lacked their `server_default`s carries the old column definitions, and the drift arm
+is what exposes it: it drops every column with a literal server default and expects the baseline's
+`ep.create_table` reconcile to put it back matching the model — which, working from the stale
+definition, adds it back **nullable**, a real `modify_nullable` against the corrected model.
+Finish the audit, change the models, *then* run `scripts/migrate.py baseline <service>` again and
+re-read the rendered revision. The later revisions do not move: they still normalise an adopted
+database whose columns predate the PR.
+
+Inventory, now that every store-owning service is migrated: **`storage` has none** — its one
+post-release column (`source`) carries a literal `server_default`. **`core-app` has two** of 55
+candidates — `module_prefs.suggestions_enabled` and `automations.agent_gated_delivery` (revisions
+0003/0004). **`calendar` has seven** (`calendar_events.all_day`, `calendar_events.excluded`,
+`calendar_sync_state.collection`, `calendar_synced_event.{collection,title,all_day,change_hash}`,
+revision 0002). **`knowledge` has eight** (revision 0003). **`notes` has seven and `tasks` one,
+none of which needs a revision** — every one of those columns shipped with its table, so no
+deployment can hold a `NULL`. **`mail` has none.** Each service page records its own audit and
+its reasoning; a service adopting migrations later does the same.
 
 **Narrow the candidate list with `git log`, don't blanket-fix it.** A `NOT NULL` column with a
 `default=` and no `server_default` only holds `NULL` if it was **added after its table's first

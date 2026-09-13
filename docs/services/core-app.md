@@ -1947,9 +1947,9 @@ shares one database and keeps its own head revision. Changing a column here mean
 revision — `task migrate:new -- core-app "<what changed>"`, then `task migrate:check -- core-app`.
 See **[Schema migrations](../developer/migrations.md)**.
 
-- **One call replaced 29.** The lifespan used to call each store's `init()` — `create_all` plus,
-  for twelve of them, the additive reconcile (ADR-0067) — each wrapped in its own `try/except`
-  that logged and carried on. `run_migrations` replaces all of it and is deliberately **not**
+- **One call replaced 34.** The lifespan used to call each store's `init()` — `create_all` plus,
+  for twelve of them, the additive reconcile (ADR-0067) — twenty-nine of them wrapped in their own
+  `try/except` that logged and carried on. `run_migrations` replaces all of it and is deliberately **not**
   wrapped: schema is not a per-feature degradation, so a database the core cannot reach now fails
   the boot (and the restart policy retries) instead of bringing the core up with 29 error lines
   and no working feature. The `init()` methods and the `create_all` inside them survive as the

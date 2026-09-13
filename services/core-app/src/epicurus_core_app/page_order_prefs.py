@@ -1,8 +1,9 @@
 """Persisted left-nav page order preference (tenant-scoped, #543).
 
 The operator's drag-and-drop order for module-contributed left-nav pages, stored in the
-core's Postgres so it syncs across devices instead of living in `localStorage`. Auto-created
-on first use via ``PageOrderStore.init()`` — the same pattern as
+core's Postgres so it syncs across devices instead of living in `localStorage`. Its table comes
+from the core's migration environment (``epicurus_core_app.migrations``, #834); ``init()``
+survives as the unit-test schema path only, the same pattern as
 :class:`~epicurus_core_app.timezone_prefs.TimezonePrefsStore`. The stored list is opaque page
 ids (``"<module>/<page_id>"``); merge semantics (unknown ids append, stale ids are ignored)
 are a shell/nav concern (ADR-0018) resolved by the web client, not here — this store only

@@ -55,6 +55,7 @@ from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.memory.extraction import FactExtractor
 from epicurus_core_app.memory.extraction_queue import ExtractionQueue
+from epicurus_core_app.memory.facts import RecallDimensionError
 from epicurus_core_app.memory.memory import Memory
 from epicurus_core_app.memory.profile import StandingProfileStore
 from epicurus_core_app.memory.store import EphemeralSessionStore
@@ -1487,6 +1488,13 @@ class Agent:
         embedder must not delay the first token, so it is time-boxed; on timeout or any error the
         turn proceeds with no recalled facts (the same best-effort degrade as the rest of
         assemble), rather than blocking until our interaction with the model itself stalls.
+
+        Degrading is fine; degrading *anonymously* is not (#944). A vector-width mismatch — the
+        operator switched the embedding model and the stored vectors were built by the old one —
+        is the one backend failure that no retry fixes and that the operator can act on, so it
+        is logged as itself, naming both widths and the cure, rather than as a generic backend
+        error carrying Qdrant's raw rejection text (#879). The same state is readable at
+        ``GET /platform/v1/agent/memory/dimension`` and rendered on the Models page.
         """
         if self._memory is None:
             return []
@@ -1502,6 +1510,15 @@ class Agent:
             log.warning(
                 "recall skipped: embed timed out",
                 timeout_s=self._recall_timeout_s,
+                elapsed_s=round(time.monotonic() - start, 2),
+            )
+            return []
+        except RecallDimensionError as exc:
+            # Named, not generic: the embedding model changed under a collection built at the
+            # old width. Nothing retries out of this — the heal or "Re-embed everything" does.
+            log.warning(
+                "recall skipped: embedding dimension changed",
+                reason=str(exc),
                 elapsed_s=round(time.monotonic() - start, 2),
             )
             return []

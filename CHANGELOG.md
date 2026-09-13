@@ -12,6 +12,23 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A dimension change is healed or named, never silently degraded** (#944 part 2, #879, #860) —
+  switch the embedding model to one with a different output size and every vector already stored
+  becomes unqueryable. Cross-chat memory was supposed to repair itself when that happened; on the
+  owner's install it did not, and said nothing: the reconcile met a vector configuration it did
+  not recognise, resolved no width, repaired nothing — and still cached the collection as
+  repaired, so every later recall repeated the same rejected query while the assistant quietly
+  answered with no memory at all. The cache now records a width that was actually **confirmed**,
+  a configuration it cannot read is raised instead of shrugged off, and the rebuild is shielded
+  from the recall time-box, so a corpus too large to re-embed inside that budget finishes healing
+  instead of being restarted and cancelled on every turn. What cannot be healed is now *said*:
+  recall logs the two widths and the cure, `knowledge` search answers "the embedding model
+  changed — run Re-embed everything" instead of forwarding Qdrant's raw dimension error, and the
+  Models page shows the stuck state on the embedding card beside the button that fixes it. The
+  same card stops calling a **refused** re-embed a failure: a module that declines to rebuild
+  from a source reading empty is protecting your data, and now says so, with its reason, in its
+  own third state. `core-app` 0.125.0→0.126.0 (MINOR) · `web` 0.147.0→0.148.0 (MINOR) ·
+  `knowledge` 0.31.1→0.31.2 (PATCH) · `notes` 0.15.1→0.15.2 (PATCH).
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
   startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own

@@ -28,6 +28,7 @@ from epicurus_core_app.agent.session_delete import SessionDeleteCascade
 from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.llm.models import PowerState
+from epicurus_core_app.memory.facts import RecallDimensionState
 from epicurus_core_app.memory.memory import MemoryItem
 from epicurus_core_app.memory.profile import StandingProfileStore
 from epicurus_core_app.memory.store import (
@@ -202,6 +203,9 @@ class _FakeMemory:
         self.truncated_after: list[int] = []
         self.revised: list[tuple[int, str]] = []
         self._session_list = session_list or []
+        # What the recall store last observed about its vector width (#944) — healthy here
+        # unless a test sets it.
+        self.dimension = RecallDimensionState()
 
     async def sessions(self, *, tenant: str) -> list[SessionSummary]:
         return self._session_list
@@ -240,6 +244,9 @@ class _FakeMemory:
     async def forget(self, *, tenant: str, session_id: str) -> int:
         self.forgot_sessions.append(session_id)
         return 3
+
+    def recall_dimension(self) -> RecallDimensionState:
+        return self.dimension
 
 
 def _memory_app(
@@ -665,6 +672,46 @@ async def test_forget_memory_deletes_one_fact() -> None:
     assert resp.status_code == 200
     assert resp.json() == {"forgotten": 1}
     assert memory.forgotten == ["f7"]
+
+
+async def test_memory_dimension_reports_a_healthy_store() -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(_FakeMemory())), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory/dimension")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+async def test_memory_dimension_reports_a_stuck_width_with_its_cure() -> None:
+    # The surface #944 asks for: an operator whose recall is dead can see *why* on the Models
+    # page, beside the action that fixes it, instead of only in a WARN line nobody is watching.
+    memory = _FakeMemory()
+    memory.dimension = RecallDimensionState(
+        status="changed",
+        stored_dim=768,
+        expected_dim=4096,
+        detail="embedding dimension changed 768→4096; recall memory needs a rebuild",
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        resp = await client.get("/platform/v1/agent/memory/dimension")
+    body = resp.json()
+    assert body["status"] == "changed"
+    assert (body["stored_dim"], body["expected_dim"]) == (768, 4096)
+    assert "768→4096" in body["detail"]
+
+
+async def test_memory_dimension_is_not_read_as_a_fact_id() -> None:
+    # Declaration order matters: /memory/{memory_id} would otherwise swallow this path the way
+    # it once threatened to swallow /memory/profile.
+    memory = _FakeMemory()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_memory_app(memory)), base_url="http://test"
+    ) as client:
+        await client.get("/platform/v1/agent/memory/dimension")
+    assert memory.forgotten == []
 
 
 # ── standing profile (#527, ADR-0094) ────────────────────────────────────────

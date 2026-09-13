@@ -40,6 +40,25 @@ def _chunk_point_id(slug: str, chunk_index: int) -> str:
     return str(uuid.uuid5(_CHUNK_NS, f"{slug}:{chunk_index}"))
 
 
+def _vector_size(vectors_config: object) -> int | None:
+    """The single vector width a collection is configured for, or ``None``.
+
+    ``CollectionParams.vectors`` is ``VectorParams | dict[str, VectorParams] | None``: an
+    unnamed collection reports the first, a *named*-vector one the second. We only create
+    unnamed collections, but a one-entry mapping is still one unambiguous width and must not
+    read as "unknown" — reading it as unknown is what let the core's twin of this check skip
+    its reconcile in silence (#944). A multi-named configuration stays ``None``: there is no
+    single width to compare, and guessing one would drop data.
+    """
+    if isinstance(vectors_config, VectorParams):
+        return vectors_config.size
+    if isinstance(vectors_config, dict) and len(vectors_config) == 1:
+        (only,) = vectors_config.values()
+        if isinstance(only, VectorParams):
+            return only.size
+    return None
+
+
 class NotesIndexer:
     """Maintains one note's chunks in the tenant-scoped Qdrant collection."""
 
@@ -82,6 +101,10 @@ class NotesIndexer:
         module's ``POST /reindex`` and rebuilds the whole collection from the database. Nothing
         queries this collection today (Notes is attach-only, see the module docstring), so a
         window of missing vectors degrades nothing in the meantime.
+
+        ``self._dim`` records a width that was **confirmed**, never merely looked at (#944,
+        ADR-0141): a configuration this cannot read as a single width leaves the cache empty so
+        the next write checks again, instead of claiming a check that never happened.
         """
         if self._dim == dim:
             return
@@ -93,11 +116,20 @@ class NotesIndexer:
             self._dim = dim
             return
         info = await self._qdrant.get_collection(self._collection)
-        vectors = info.config.params.vectors
-        # A named-vector config reports a mapping, not one VectorParams; we never create those,
-        # so anything unrecognised is left alone rather than dropped on a guess.
-        current = vectors.size if isinstance(vectors, VectorParams) else None
-        if current is not None and current != dim:
+        current = _vector_size(info.config.params.vectors)
+        if current is None:
+            # Unconfirmed is not confirmed (#944, ADR-0141): caching ``dim`` here would claim a
+            # width we never actually read, so every later write would skip the check for the
+            # process's lifetime while each upsert kept failing. Leave it uncached — the next
+            # write re-reads — and say so rather than degrading in silence.
+            log.warning(
+                "notes collection vector configuration is not a single width; cannot confirm "
+                "it against the current embedder — leaving the collection untouched",
+                collection=self._collection,
+                new_dim=dim,
+            )
+            return
+        if current != dim:
             log.warning(
                 "embedding dimension changed since the notes collection was created; "
                 "recreating it — run 'Re-embed everything' to rebuild every note's vectors",

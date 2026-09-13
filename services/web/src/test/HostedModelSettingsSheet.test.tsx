@@ -119,7 +119,16 @@ describe("HostedModelSettingsSheet", () => {
 
 // ── capability override (#711) ────────────────────────────────────────────────
 
-const AUTO = { vision: "auto", context_length: null } as const;
+const AUTO = {
+  vision: "auto",
+  tools: "auto",
+  role: "auto",
+  context_length: null,
+  tools_learned: null,
+} as const;
+
+/** The record a saved row carries when only `vision` + `context_length` were ever set. */
+const VISION_ON = { ...AUTO, vision: "on", context_length: 256000 } as const;
 
 describe("HostedModelSettingsSheet capability override", () => {
   beforeEach(() => {
@@ -130,7 +139,7 @@ describe("HostedModelSettingsSheet capability override", () => {
     render(
       <HostedModelSettingsSheet
         model={HOSTED}
-        override={{ vision: "on", context_length: 256000 }}
+        override={VISION_ON}
         onClose={() => {}}
       />,
       { wrapper },
@@ -162,6 +171,8 @@ describe("HostedModelSettingsSheet capability override", () => {
     await waitFor(() =>
       expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
         vision: "on",
+        tools: "auto",
+        role: "auto",
         context_length: null,
       }),
     );
@@ -181,6 +192,8 @@ describe("HostedModelSettingsSheet capability override", () => {
     await waitFor(() =>
       expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
         vision: "auto",
+        tools: "auto",
+        role: "auto",
         context_length: 256000,
       }),
     );
@@ -190,7 +203,7 @@ describe("HostedModelSettingsSheet capability override", () => {
     render(
       <HostedModelSettingsSheet
         model={HOSTED}
-        override={{ vision: "on", context_length: 256000 }}
+        override={VISION_ON}
         onClose={() => {}}
       />,
       { wrapper },
@@ -206,6 +219,8 @@ describe("HostedModelSettingsSheet capability override", () => {
     await waitFor(() =>
       expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
         vision: "auto",
+        tools: "auto",
+        role: "auto",
         context_length: null,
       }),
     );
@@ -217,7 +232,7 @@ describe("HostedModelSettingsSheet capability override", () => {
     render(
       <HostedModelSettingsSheet
         model={HOSTED}
-        override={{ vision: "on", context_length: 256000 }}
+        override={VISION_ON}
         onClose={() => {}}
       />,
       { wrapper },
@@ -229,5 +244,91 @@ describe("HostedModelSettingsSheet capability override", () => {
 
     await waitFor(() => expect(mockSetModelSettings).toHaveBeenCalled());
     expect(mockSetSavedModelOverride).not.toHaveBeenCalled();
+  });
+});
+
+// ── tool calling + model role (#947, #944, ADR-0140) ──────────────────────────
+
+describe("HostedModelSettingsSheet tools and role", () => {
+  beforeEach(() => {
+    mockModelSettings.mockResolvedValue({ context_window: null, keep_alive: null, device: null });
+  });
+
+  it("round-trips the Tool calling control through the capabilities endpoint", async () => {
+    render(<HostedModelSettingsSheet model={HOSTED} override={AUTO} onClose={() => {}} />, {
+      wrapper,
+    });
+
+    const tools = (await screen.findByLabelText("Tool calling support")) as HTMLSelectElement;
+    expect(tools.value).toBe("auto");
+    fireEvent.change(tools, { target: { value: "off" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
+        vision: "auto",
+        tools: "off",
+        role: "auto",
+        context_length: null,
+      }),
+    );
+  });
+
+  it("round-trips the Model role control", async () => {
+    render(<HostedModelSettingsSheet model={HOSTED} override={AUTO} onClose={() => {}} />, {
+      wrapper,
+    });
+
+    const role = (await screen.findByLabelText("Model role")) as HTMLSelectElement;
+    fireEvent.change(role, { target: { value: "embedding" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
+        vision: "auto",
+        tools: "auto",
+        role: "embedding",
+        context_length: null,
+      }),
+    );
+  });
+
+  it("shows a learned answer beside Auto, distinguishable from an explicit off", async () => {
+    render(
+      <HostedModelSettingsSheet
+        model={HOSTED}
+        override={{ ...AUTO, tools_learned: "off" }}
+        onClose={() => {}}
+      />,
+      { wrapper },
+    );
+
+    const tools = (await screen.findByLabelText("Tool calling support")) as HTMLSelectElement;
+    expect(tools.value).toBe("auto");
+    expect(screen.getByText(/Auto — learned: no tool support/)).toBeInTheDocument();
+    expect(screen.getByText(/provider refused a tool list/i)).toBeInTheDocument();
+  });
+
+  it("saving an untouched Auto still clears a learned answer", async () => {
+    // "Reset to Auto" has to mean something even when no control moved — otherwise a learned
+    // "no" would be unclearable from this sheet (ADR-0140).
+    render(
+      <HostedModelSettingsSheet
+        model={HOSTED}
+        override={{ ...AUTO, tools_learned: "off" }}
+        onClose={() => {}}
+      />,
+      { wrapper },
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(mockSetSavedModelOverride).toHaveBeenCalledWith(HOSTED, {
+        vision: "auto",
+        tools: "auto",
+        role: "auto",
+        context_length: null,
+      }),
+    );
   });
 });

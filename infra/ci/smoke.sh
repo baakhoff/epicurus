@@ -7,7 +7,8 @@
 # bootstrap, the compose-only assertions (an external bind mount round-tripping,
 # Docker control through docker-proxy-core, the one-shot init containers), restart
 # and teardown. The runtime-neutral assertions — module discovery, status through
-# core, MCP, attachments, the event spine, automations, secret persistence — live in
+# core, the web shell's proxy, the tenant file space, the KV-cache apply, MCP,
+# attachments, the event spine, automations, secret persistence — live in
 # infra/ci/smoke-assert.sh, which the Kubernetes gate (infra/ci/k8s-smoke.sh, #894)
 # sources too, so the two gates assert the same things from one implementation.
 #
@@ -63,7 +64,10 @@ DATA_PLANE="openbao postgres valkey nats qdrant minio minio-init"
 . "$ROOT/infra/ci/smoke-assert.sh"
 
 EXPECT_MODULES="$(smoke_modules)"
-APP="core-app $EXPECT_MODULES"
+# `web` is not a module (smoke_modules excludes it), but it IS part of every
+# deployment, and until #919 this gate never started it — so nginx's runtime-derived
+# resolver (#891) was gated on Kubernetes only, on the Docker half of its own code.
+APP="core-app web $EXPECT_MODULES"
 
 # ── output helpers ────────────────────────────────────────────────────────────
 log() { printf '\n\033[1;34m== %s ==\033[0m\n' "$*"; }
@@ -109,10 +113,14 @@ restart_core_app() {
   wait_state core-app
 }
 
+settle_llm_runtime() { # the shared KV-cache assertion restarts it; wait for it to be back
+  wait_state ollama
+}
+
 dump_diagnostics() {
   log "Diagnostics (smoke failed)"
   $DC ps || true
-  for s in openbao openbao-unseal core-app $EXPECT_MODULES searxng; do
+  for s in openbao openbao-unseal core-app web $EXPECT_MODULES searxng; do
     printf '\n--- logs: %s ---\n' "$s"
     $DC logs --tail 40 "$s" 2>&1 || true
   done
@@ -193,7 +201,7 @@ log "Starting the auto-unseal sidecar, core, and modules"
 $DC up -d openbao-unseal
 # shellcheck disable=SC2086 # $APP: same deliberate word list as above
 $DC up -d $APP
-for s in core-app $EXPECT_MODULES; do
+for s in core-app web $EXPECT_MODULES; do
   wait_state "$s"
   ok "$s healthy"
 done
@@ -236,26 +244,13 @@ ok "read-after-write round-trips through an external mount (#731)"
 
 # Least-privilege Docker control by default (#708, ADR-0109, and the Docker arm of the
 # container-runtime seam #891): docker-status must report reachable with no operator setup
-# (the proxy, not the opt-in raw socket), and a real KV-cache apply must round-trip through
-# it — set, then clear, so the shared ollama-runtime volume is left as this run found it.
-# This is the acceptance check the issue itself names. The Kubernetes arm of the same seam
-# is asserted by infra/ci/k8s-smoke.sh.
+# — the proxy, not the opt-in raw socket. The *apply* half of that seam (a KV-cache change
+# that restarts the LLM runtime) moved into smoke_assert with #919, because the Kubernetes
+# arm needs the identical assertion; what is Compose-only is which door it goes through.
 ds="$(http "http://core-app:8080/platform/v1/modules/docker-status" || true)"
 printf '%s' "$ds" | grep -q '"available":true' \
   || die "docker-status reports unreachable by default (docker-proxy-core not wired?): $ds"
 ok "core reaches Docker by default through docker-proxy-core (#708)"
-
-kv="$(http -X PUT "http://core-app:8080/platform/v1/llm/prefs/kv-cache-type" \
-  -H 'Content-Type: application/json' -d '{"value":"q8_0"}' || true)"
-printf '%s' "$kv" | grep -q '"applied":true' \
-  || die "KV-cache change did not apply through docker-proxy-core (restart round-trip broken?): $kv"
-ok "KV-cache change applied immediately — restart round-tripped through docker-proxy-core (#708)"
-http -X PUT "http://core-app:8080/platform/v1/llm/prefs/kv-cache-type" \
-  -H 'Content-Type: application/json' -d '{"value":null}' >/dev/null 2>&1 || true
-# Both calls above restart ollama through the proxy. Later assertions do reach the model — the
-# automations run (#666, in smoke_assert) goes agent -> LLM -> ollama — so block until it is
-# back rather than racing a cold container from here on.
-wait_state ollama
 
 # qdrant upgrade-recovery guard (#229): the one-shot must complete cleanly, and the
 # new /proc-based healthcheck must report healthy (a crash-looping qdrant binds no port
@@ -276,6 +271,17 @@ oi_cid="$($DC ps -aq ollama-init 2>/dev/null || true)"
 oi_rc="$(docker inspect -f '{{.State.ExitCode}}' "$oi_cid" 2>/dev/null || echo 1)"
 [ "$oi_rc" = "0" ] || die "ollama-init exited $oi_rc (volume-ownership chown failed)"
 ok "ollama-init completed and chowned the ollama-runtime volume to uid 10001 (#392)"
+
+# minio-init bucket seed (#919): the one-shot that creates the default bucket was
+# asserted by neither gate, so a failed seed was invisible to both — and the storage
+# module creates its bucket lazily on first write, which means nothing goes red until
+# an operator uploads something. `mc` is versioned separately from the server, so a
+# wrong client tag lands exactly here.
+mi_cid="$($DC ps -aq minio-init 2>/dev/null || true)"
+[ -n "$mi_cid" ] || die "minio-init container not found — the default bucket is never seeded"
+mi_rc="$(docker inspect -f '{{.State.ExitCode}}' "$mi_cid" 2>/dev/null || echo 1)"
+[ "$mi_rc" = "0" ] || die "minio-init exited $mi_rc (the default bucket was not created)"
+ok "minio-init completed — the default bucket is seeded (#919)"
 
 # ── the runtime-neutral last mile, shared with the Kubernetes gate ─────────────
 smoke_assert

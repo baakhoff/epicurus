@@ -35,12 +35,17 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 import epicurus_core_app
-from epicurus_core.db.migrations import advisory_lock_key, run_migrations, version_table_name
+from epicurus_core.db.migrations import (
+    advisory_lock_key,
+    alembic_config,
+    run_migrations,
+    version_table_name,
+)
 from epicurus_core_app.automations.store import AutomationStore
 from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
-HEAD = "0004"
+HEAD = "0005"
 PACKAGE_ROOT = Path(epicurus_core_app.__file__).resolve().parent
 
 
@@ -94,6 +99,34 @@ async def _create_all(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         for metadata in METADATAS:
             await conn.run_sync(metadata.create_all)
+
+
+def _upgrade_to_baseline(sync_conn: sa.Connection) -> None:
+    from alembic import command
+
+    config = alembic_config(
+        script_location=SCRIPT_LOCATION,
+        metadatas=METADATAS,
+        version_table=version_table_name(SERVICE),
+        connection=sync_conn,
+    )
+    command.upgrade(config, "0001")
+    sync_conn.exec_driver_sql(f'DROP TABLE "{version_table_name(SERVICE)}"')
+
+
+async def _build_pre_alembic(engine: AsyncEngine) -> None:
+    """The schema as it stood the day core-app adopted Alembic, with no version table.
+
+    That is what the **baseline** revision describes, so that is what builds it — not
+    ``create_all``, which builds the models as they stand *today*. The two were the same thing
+    until a revision after the baseline added a column (#947's ``saved_models`` capability
+    columns, then #944's ``agent_messages.stopped``); from
+    then on a ``create_all``-built database is at head, and an "adoption" test over it would be
+    asserting that ``op.add_column`` is idempotent rather than that adoption works — the exact
+    thing ADR-0138 says a post-baseline revision need not be.
+    """
+    async with engine.begin() as conn:
+        await conn.run_sync(_upgrade_to_baseline)
 
 
 async def _scalar(engine: AsyncEngine, sql: str) -> object:
@@ -208,7 +241,7 @@ async def test_a_pre_alembic_database_is_adopted_and_keeps_its_rows(engine: Asyn
     the baseline's idempotent ops take the reconcile arm instead, the rows survive, and the
     version table lands at head.
     """
-    await _create_all(engine)
+    await _build_pre_alembic(engine)
     await ModulePrefsStore(engine).set_enabled("test", "notes", False)
     assert await _version(engine) is None
 
@@ -355,7 +388,7 @@ async def test_revision_0004_backfills_a_reconciled_null_agent_gated_delivery(
     engine: AsyncEngine,
 ) -> None:
     """The same position as 0003's column, on ``automations`` (#706 landed after #682)."""
-    await _create_all(engine)
+    await _build_pre_alembic(engine)
     async with engine.begin() as conn:
         # Put the table back in the state the reconcile left it: the column nullable, and a row
         # from before it existed. SQLite cannot ALTER, so rebuild the one column that matters.

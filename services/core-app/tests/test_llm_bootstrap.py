@@ -87,15 +87,36 @@ async def test_blank_spec_disables_everything() -> None:
     assert gateway.pull_calls == []
 
 
-async def test_auto_pulls_only_the_missing_defaults() -> None:
-    # The embed default is already installed (under its :latest tag) — only chat is pulled.
-    gateway = FakeGateway(installed=["nomic-embed-text:latest"])
+async def test_auto_pulls_both_defaults_on_an_empty_runtime() -> None:
+    # A from-scratch install: nothing installed, both effective defaults get pulled.
+    gateway = FakeGateway(installed=[])
     await make_bootstrap(gateway, models_spec="auto").run()
-    assert gateway.pull_calls == ["llama3.2"]
+    assert gateway.pull_calls == ["llama3.2", "nomic-embed-text"]
+
+
+async def test_auto_noops_when_anything_is_already_installed() -> None:
+    # #923: a runtime that has been provisioned — even with just one model, even one that
+    # is neither effective default — is not "empty" any more; `auto` must not reconsider
+    # the defaults at all, so a model the operator deleted on purpose stays deleted.
+    gateway = FakeGateway(installed=["some-other-model:latest"])
+    await make_bootstrap(gateway, models_spec="auto").run()
+    assert gateway.pull_calls == []
 
 
 async def test_auto_noops_when_everything_is_present() -> None:
     gateway = FakeGateway(installed=["llama3.2:latest", "nomic-embed-text:latest"])
+    await make_bootstrap(gateway, models_spec="auto").run()
+    assert gateway.pull_calls == []
+
+
+async def test_auto_does_not_resolve_defaults_when_runtime_is_non_empty() -> None:
+    # The no-op happens before `effective_default`/`effective_embed_default` are even
+    # consulted — a provisioned runtime skips the resolution entirely, not just the pull.
+    class TattlingGateway(FakeGateway):
+        async def effective_default(self, tenant_id: str | None = None) -> str:
+            raise AssertionError("auto must not resolve defaults on a non-empty runtime")
+
+    gateway = TattlingGateway(installed=["llama3.2:latest"])
     await make_bootstrap(gateway, models_spec="auto").run()
     assert gateway.pull_calls == []
 
@@ -112,6 +133,14 @@ async def test_explicit_list_is_parsed_and_deduped() -> None:
     gateway = FakeGateway(installed=[])
     await make_bootstrap(gateway, models_spec=" qwen3:8b, ,qwen3:8b ,mistral ").run()
     assert gateway.pull_calls == ["qwen3:8b", "mistral"]
+
+
+async def test_explicit_list_still_ensures_on_a_non_empty_runtime() -> None:
+    # Unlike `auto`, a named pin is a standing instruction: it is checked (and re-pulled if
+    # missing) on every start regardless of what else is already installed.
+    gateway = FakeGateway(installed=["some-other-model:latest", "mistral:latest"])
+    await make_bootstrap(gateway, models_spec="qwen3:8b,mistral").run()
+    assert gateway.pull_calls == ["qwen3:8b"]
 
 
 async def test_unreachable_runtime_gives_up_quietly() -> None:
@@ -145,8 +174,12 @@ async def test_context_suggestion_runs_per_pulled_model() -> None:
         suggested.append(model)
         return 8192
 
+    # An explicit list, not `auto` — `auto` would no-op outright on a non-empty runtime,
+    # which would defeat the point of this test (already-present vs. freshly-pulled).
     gateway = FakeGateway(installed=["nomic-embed-text:latest"])
-    await make_bootstrap(gateway, models_spec="auto", suggest_context=suggest).run()
+    await make_bootstrap(
+        gateway, models_spec="llama3.2,nomic-embed-text", suggest_context=suggest
+    ).run()
     # Only the freshly-pulled model is sized; the already-present one is untouched (#386
     # parity: the web only suggests after a pull finishes).
     assert suggested == ["llama3.2"]

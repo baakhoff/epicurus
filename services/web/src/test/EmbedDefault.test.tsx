@@ -89,8 +89,9 @@ describe("EmbedDefault", () => {
     });
     expect(hosted).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "nomic-embed-text" })).toBeInTheDocument();
-    // And the help text warns that the saved list cannot tell chat models from embedding ones.
-    expect(screen.getByText(/chat model will fail at embed time/i)).toBeInTheDocument();
+    // And the help text now describes the filtering the role field makes possible (#944),
+    // instead of asking the operator to remember which of their saved ids is which.
+    expect(screen.getByText(/aren't offered here/i)).toBeInTheDocument();
   });
 
   it("saves a hosted id as the global embedding default", async () => {
@@ -126,6 +127,83 @@ describe("EmbedDefault", () => {
     // A local model since deleted is still what the core embeds with; the select must say so
     // rather than silently reading "System default".
     expect(await screen.findByRole("option", { name: "bge-m3" })).toBeInTheDocument();
+  });
+});
+
+// ── the role filter (#944, ADR-0140) ─────────────────────────────────────────
+
+describe("EmbedDefault role filtering", () => {
+  const AUTO = {
+    vision: "auto",
+    tools: "auto",
+    role: "auto",
+    context_length: null,
+    tools_learned: null,
+  } as const;
+
+  it("does not offer a saved model the catalogue knows is a chat model", async () => {
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "claude/claude-sonnet-4-6",
+        provider: "claude",
+        capabilities: ["tools"],
+        role: "chat",
+        override: AUTO,
+      },
+      {
+        model: "openrouter/openai/text-embedding-3-small",
+        provider: "openrouter",
+        capabilities: ["embedding"],
+        role: "embedding",
+        override: AUTO,
+      },
+    ]);
+    render(<EmbedDefault />, { wrapper });
+
+    expect(
+      await screen.findByRole("option", { name: "openrouter/openai/text-embedding-3-small" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "claude/claude-sonnet-4-6" })).toBeNull();
+  });
+
+  it("still offers a model of unknown role — a thin catalogue is not a verdict", async () => {
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "openrouter/brand/new-embedder",
+        provider: "openrouter",
+        capabilities: ["tools"],
+        role: "unknown",
+        override: AUTO,
+      },
+    ]);
+    render(<EmbedDefault />, { wrapper });
+    expect(
+      await screen.findByRole("option", { name: "openrouter/brand/new-embedder" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a stored chat-model choice selectable and says it will fail", async () => {
+    // Set before the gate existed, or through another surface: the core really is using it, so
+    // hiding it would misreport the state. Naming it is the fix.
+    mockLlmPrefs.mockResolvedValue({
+      global_embed_default: "claude/claude-sonnet-4-6",
+      hidden: [],
+    });
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "claude/claude-sonnet-4-6",
+        provider: "claude",
+        capabilities: ["tools"],
+        role: "chat",
+        override: AUTO,
+      },
+    ]);
+    render(<EmbedDefault />, { wrapper });
+
+    expect(
+      await screen.findByRole("option", { name: "claude/claude-sonnet-4-6" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/embedding with it will fail/i)).toBeInTheDocument();
   });
 });
 

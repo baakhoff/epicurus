@@ -64,13 +64,51 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest
+task migrate:check            # only if you touched a model — see below
 ```
 
 CI additionally runs a secret scan (gitleaks), validates the compose file, renders
 and schema-checks the Helm chart, lints every shell script (see below), checks
 every docs cross-reference (see below), lints the observability config (see
-below), and boots the whole stack — twice, once on Docker Compose and once on
-Kubernetes (see below).
+below), proves every migrated service's schema upgrades (see below), and boots the
+whole stack — twice, once on Docker Compose and once on Kubernetes (see below).
+
+## Schema migration gate
+
+Nothing in this repo exercised a schema **upgrade** until the `migrations` job
+existed: the unit tests build tables from the models on SQLite, and
+`runtime-smoke` / `k8s-smoke` boot from an empty Postgres, so between them they
+only ever prove the fresh-install path. Both failures that motivated adopting
+Alembic (#214, #218) were visible only on a database that had been running a while.
+
+The **`migrations` CI job** runs against a real `postgres:17` service container and,
+for every service with a migration environment, on a throwaway database per arm:
+
+- an empty database reaches head, and then matches its models exactly
+  (`alembic check`) — **this is the "a model changed and nobody wrote a revision"
+  gate**;
+- a second run is a no-op, which is what every restart does;
+- a database built the old `create_all` way is adopted and still matches its models;
+- the same, with the columns the additive reconcile was responsible for stripped out
+  first — the #214 / #218 state the baseline has to repair.
+
+Services are discovered by glob inside `scripts/migrate.py`, so a service adopting
+migrations is covered from its own commit with no workflow edit.
+
+Locally, the cheap half of that is one command — a throwaway SQLite database, about
+a second:
+
+```bash
+task migrate:check -- storage   # one service
+task migrate:check              # every migrated service
+```
+
+Run it whenever you touch a model. The rest (authoring a revision, what the startup
+paths do, the backfill rule) is in **[Schema migrations](migrations.md)**.
+
+**It is not a required check yet.** As with `k8s-smoke`, the bar is *required once
+green two weeks running* — until then read a red one and investigate it, but it does
+not block a merge on its own.
 
 ## Observability lint gate
 

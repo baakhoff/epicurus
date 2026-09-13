@@ -224,6 +224,33 @@ longer mounts or scans the shared file space (the core does, behind `FILES_WATCH
   `storage_object_*` tools store text objects in the same bucket under the agent's chosen key.
   Either way the object is catalogued in `storage_files` so the core Files page lists it.
 
+### Schema is migration-managed (#834, ADR-XXXX)
+
+Storage is the **reference service** for Alembic adoption. The deployed shape of `storage_files`
+comes from the revisions in `src/epicurus_storage/migrations/versions/`, applied once at startup:
+the lifespan calls `epicurus_core.db.migrations.run_migrations` before anything reads a row, under
+a Postgres advisory lock so two replicas — or a restart overlapping a start — cannot both run
+`upgrade head`. Its private version table is `alembic_version_storage`; every service shares one
+database and keeps its own head revision.
+
+- `FileIndex.init()` still exists and still calls `create_all`, but **the deployed service no
+  longer calls it** — it is the unit-test schema path, kept because an Alembic run per test is
+  needless cost. CI's `migrations` gate is what proves the two agree.
+- The additive reconcile left `init()` with adoption: `storage_files.source` (a post-release column
+  carrying a literal `server_default` of `'fs'`) is repaired by the baseline revision instead,
+  which reconciles an existing table rather than failing to create one.
+- Storage has **no** `default=`-without-`server_default=` NOT NULL column, so the #903 backfill
+  rule does not apply to it.
+- Revision **0002** normalises `storage_files.source`'s default. It was declared
+  `server_default="'fs'"` — a *plain string*, which SQLAlchemy quotes as a literal, so
+  `create_all` wrote `DEFAULT '''fs'''` (value: the four characters `'fs'`) while the reconcile,
+  treating the same string as raw SQL, wrote `DEFAULT 'fs'`. Two deployments, two different
+  defaults; invisible because every insert sets `source` and the row-reader maps anything that is
+  not `object` to `fs`. The model now says `text("'fs'")` and 0002 fixes the default and any row
+  the old one produced — the first change here the additive reconcile could never have made.
+- Changing a column here means writing a revision: `task migrate:new -- storage "<what changed>"`,
+  then `task migrate:check -- storage`. See **[Schema migrations](../developer/migrations.md)**.
+
 ## Portability (#876)
 
 Storage is the one module whose export is **bytes**. Every other portable module carries rows;

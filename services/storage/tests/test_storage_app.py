@@ -75,9 +75,10 @@ class _Harness:
 async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Harness]:
     """Build the app with an in-memory index + object store the test can seed.
 
-    A shared SQLite engine is created up front and ``init()``-ed (the lifespan that would
-    normally do this is not run under ASGITransport); the app is patched to reuse the same
-    index and a fake object store.
+    A shared SQLite engine is created up front and ``init()``-ed; the app is patched to reuse
+    the same index and a fake object store. ASGITransport does not run the lifespan, so the
+    schema migration the deployed service performs there never happens here — which is exactly
+    why the fixture builds the tables from the models (see ``FileIndex.init``).
     """
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
     monkeypatch.setenv("DEFAULT_TENANT_ID", TENANT)

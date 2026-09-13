@@ -1,6 +1,15 @@
-"""Additive schema reconcile for stores that have no migration framework.
+"""Additive schema reconcile — the pre-Alembic schema path, and the baseline's repair arm.
 
-epicurus services evolve their Postgres schema with ``Base.metadata.create_all``,
+Re-exported as ``epicurus_core.db.ensure_columns``, its original import path, which every
+store still on the pre-Alembic path uses. It has two callers now:
+
+* a store that has **not** yet adopted Alembic, from its ``init()`` — the original use;
+* :mod:`epicurus_core.db.ops`, when a *migrated* service's baseline revision meets a table
+  that already exists — a database provisioned before that service adopted Alembic. The
+  baseline reconciles such a table instead of creating it, which is what lets a single
+  ``upgrade head`` serve an empty database and a years-old one alike (ADR-XXXX).
+
+epicurus services evolved their Postgres schema with ``Base.metadata.create_all``,
 which creates a *missing* table but never alters an *existing* one. So any column
 added to a model after that table's first release silently never reaches an
 already-provisioned database, and every query that references the new column fails on
@@ -12,8 +21,9 @@ deployment). This module promotes that helper into one shared, audited reconcile
 store calls from ``init()`` after ``create_all`` (#249, ADR-0067).
 
 It is **additive only**: it adds columns that exist on the ORM model but not yet in the
-live table. It never drops, renames, retypes, or backfills — those need a real migration
-(Alembic), which the project has deliberately not adopted yet. A reconciled column
+live table. It never drops, renames, retypes, or backfills — those need a real migration,
+which is what :mod:`epicurus_core.db.migrations` now provides; this helper survives for the
+two callers above, not as the way to change a migrated schema. A reconciled column
 reproduces the model's type and, when the model declares a ``server_default``, its
 ``NOT NULL`` constraint and default, so a column looks the same whether the table was
 freshly created or reconciled. The one exception: a column the model marks ``NOT NULL``
@@ -21,7 +31,7 @@ but gives *no* server default cannot be added to a populated table (there is not
 backfill the existing rows with), so it is added **nullable** and the row-reader coerces
 the resulting ``NULL`` to the model's Python-side default.
 
-This module lives in the shared library but is intentionally **not** re-exported from
+This subpackage lives in the shared library but is intentionally **not** re-exported from
 ``epicurus_core`` — importing it pulls in SQLAlchemy (the optional ``db`` extra), which
 modules without a database should not have to carry. Stores import it directly::
 

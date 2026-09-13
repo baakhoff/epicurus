@@ -94,9 +94,23 @@ early bump collides with their own version-line edits.
 
 ## Schema changes before 1.0
 
-The startup reconcile (`epicurus_core.db.ensure_columns` — see the
-[reference](../reference/db.md), ADR-0067) is **additive-only by design**: it adds
-columns the ORM model declares but the live table lacks, and never drops,
-renames, retypes, or backfills. Until a real migration framework replaces it
-(#834), the same limit is policy: **no destructive schema change before
-`1.0.0`.** Model the need additively — a new column, a new table — or defer it.
+Schema is **Alembic-managed, one migration environment per service** (#834, ADR-XXXX).
+A change to a model ships with a revision in the same PR; `task migrate:check --
+<service>` and CI's `migrations` gate fail the change if it does not. The mechanics
+are in **[Schema migrations](migrations.md)**; what belongs here is the *policy*,
+which now differs by service:
+
+- **A migrated service has no special rule.** A drop, a rename, a retype, a
+  NOT-NULL backfill — all ordinary revisions, reviewable and reversible, and all
+  allowed before `1.0.0`. The interim prohibition below is **retired** for these
+  services. `task migrate:list` names them; `storage` was the first.
+- **A service not yet migrated** still builds its schema with
+  `Base.metadata.create_all` plus the additive reconcile
+  (`epicurus_core.db.ensure_columns` — see the [reference](../reference/db.md),
+  ADR-0067), which adds columns the model declares and the live table lacks and
+  **never** drops, renames, retypes, or backfills. For those the interim policy
+  stands: **no destructive schema change before `1.0.0`.** Model the need
+  additively — a new column, a new table — defer it, or migrate that service first.
+
+Either way the bump follows the table above: a schema change the user can see is a
+MINOR, one they cannot is a PATCH.

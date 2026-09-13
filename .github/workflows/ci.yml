@@ -45,6 +45,64 @@ jobs:
           # is unnecessary on ephemeral CI runners and avoids flakiness.
           TESTCONTAINERS_RYUK_DISABLED: "true"
 
+  # Schema is Alembic-managed per service (#834, ADR-XXXX), and nothing anywhere exercised an
+  # *upgrade* before this job: the unit tests build schema from the models on SQLite, and
+  # runtime-smoke / k8s-smoke boot from an empty Postgres, so between them they only ever prove
+  # the fresh-install path. The two failures that motivated the whole framework (#214, #218)
+  # were visible only on a database that had been running a while. So for every service with a
+  # migration environment, against real Postgres:
+  #
+  #   fresh      an empty database reaches head, then matches its models exactly
+  #              (`alembic check`) — this is the "a model changed with no revision" gate
+  #   managed    a second run is a no-op, which is what every restart does
+  #   adopted    a database built the old `create_all` way comes under management, and still
+  #              matches its models afterwards
+  #   drifted    the same, with the columns the additive reconcile was responsible for
+  #              stripped out first — the #214 / #218 state the baseline has to repair
+  #
+  # Each arm runs on a throwaway database of its own (see scripts/migrate.py), because "fresh
+  # install" means nothing in a database a previous arm left tables in. Services are discovered
+  # by glob inside that script and never listed here, so a service lane adopting migrations is
+  # covered from its own commit with no workflow edit.
+  #
+  # NOT a required check until it has run green for two weeks — the bar k8s-smoke was held to
+  # (#894). Until then a red here is a signal to read, not a merge block; never merge one
+  # without reading it.
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        # The stack's pin (infra/compose/docker-compose.yml, and the chart's default), so the
+        # gate cannot pass on a Postgres the product does not actually run on.
+        image: postgres:17
+        env:
+          POSTGRES_USER: epicurus
+          POSTGRES_PASSWORD: epicurus-dev
+          POSTGRES_DB: epicurus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U epicurus -d epicurus"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-packages --dev
+
+      - name: Every migrated service — fresh install, restart, and adoption, on real Postgres
+        run: |
+          uv run python scripts/migrate.py gate \
+            --url postgresql+asyncpg://epicurus:epicurus-dev@localhost:5432/epicurus
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

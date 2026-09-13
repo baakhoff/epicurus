@@ -12,6 +12,31 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Schema changes are real migrations now** (#834, #926) — schema was additive-only by design:
+  the startup reconcile could add a column and nothing else, so a rename, a retype or a backfill
+  was un-shippable, a `NOT NULL` column added without a server default reached existing rows as
+  `NULL` (the cause of #903), and no gate anywhere ever exercised an *upgrade* — the unit tests
+  build tables from the models and the smoke gates boot an empty database, so both production
+  failures that motivated this (#214, #218) were visible only on a deployment that had been
+  running a while. epicurus now uses **Alembic, one migration environment per service**, applied
+  in-process at startup under a Postgres advisory lock so two replicas or an overlapping restart
+  never migrate at once — the same on Compose and on Kubernetes. Each service keeps its own
+  version table (`alembic_version_<service>`), because all seven share one database and own
+  disjoint tables in it. A service's *baseline* revision is idempotent, so one `upgrade head`
+  serves an empty database, one built by the old reconcile, and one already at head — with no
+  branch and, unlike a stamp, no revision ever silently skipped. `storage` is migrated as the
+  reference; authoring is `task migrate:new` and `task migrate:check` (a second, on SQLite), and
+  a new **`migrations`** CI gate proves every migrated service on real Postgres: fresh install,
+  restart, adoption of a pre-Alembic database, and adoption of a *drifted* one. A model change
+  with no revision now fails review instead of production. The gate earned its keep on its very
+  first run: a *plain string* `server_default` is a literal SQLAlchemy quotes for you, so the
+  house pattern `server_default="'fs'"` has been compiling to `DEFAULT '''fs'''` — a default whose
+  value carries the quote characters — while the additive reconcile, pasting the same string in as
+  raw SQL, produced `DEFAULT 'fs'`: two deployments of the same release could disagree about their
+  own column defaults. Storage's is corrected and an existing database normalised by a revision —
+  the first change here the reconcile could never have made. The remaining services carry the same
+  pattern and each lane fixes its own. `epicurus-core` 0.38.0→0.39.0 (MINOR), `storage`
+  0.11.0→0.12.0 (MINOR).
 - **Add a hosted model straight from the Models page** (#922) — the Hosted models card's
   "None yet" copy used to send the operator to a chat's model picker just to save an id; now an
   **Add a hosted model** row sits on the card itself, with a provider select drawn from what the

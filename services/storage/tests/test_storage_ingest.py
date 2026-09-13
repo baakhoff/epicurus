@@ -281,25 +281,10 @@ async def test_upsert_batch_defaults_source_to_fs(index: FileIndex) -> None:
     assert entry is not None and entry.source == "fs"
 
 
-async def test_init_adds_source_column_to_a_legacy_table() -> None:
-    """A pre-source deployment gains the column at init, backfilled to 'fs'."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.exec_driver_sql(
-            "CREATE TABLE storage_files ("
-            "id INTEGER PRIMARY KEY, tenant VARCHAR(63), path VARCHAR(4096), "
-            "name VARCHAR(255), size BIGINT, mtime FLOAT, kind VARCHAR(8), updated_at DATETIME)"
-        )
-        await conn.exec_driver_sql(
-            "INSERT INTO storage_files (tenant, path, name, size, mtime, kind, updated_at) "
-            "VALUES ('test', 'docs/readme.txt', 'readme.txt', 10, 0, 'file', '2026-01-01 00:00:00')"
-        )
-    idx = FileIndex(engine)
-    await idx.init()  # idempotent: adds the missing 'source' column
-    await idx.init()  # second call is a no-op (column already present)
-    entry = await idx.get(tenant="test", path="docs/readme.txt")
-    assert entry is not None
-    assert entry.source == "fs"
+# A pre-``source`` deployment gaining that column is no longer an ``init()`` concern: the
+# additive reconcile left ``init()`` when storage adopted Alembic, and the baseline revision
+# repairs such a table instead. The case itself did not go away — it moved, with the row it
+# backfills, to test_storage_migrations.py.
 
 
 # ── put_object: an agent-written file appears in the Files UI (#347) ───────────

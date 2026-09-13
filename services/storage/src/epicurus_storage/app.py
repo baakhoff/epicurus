@@ -34,8 +34,10 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
+from epicurus_core.db.migrations import run_migrations
 from epicurus_core.tenancy import TenantError, validate_tenant_id
 from epicurus_storage.db import FileIndex
+from epicurus_storage.migrations import METADATAS, SCRIPT_LOCATION
 from epicurus_storage.object_store import ObjectStore
 from epicurus_storage.portability import StoragePortability
 from epicurus_storage.service import (
@@ -133,7 +135,18 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
-            await index.init()
+            # Schema first, before anything reads or writes a row. In-process rather than a
+            # separate init step: a container has one entry point on both runtimes this stack
+            # supports, and a Kubernetes-only init container would put the schema behind a
+            # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
+            # start — is handled by the Postgres advisory lock inside run_migrations, not by
+            # assuming this process is alone (#834, ADR-XXXX).
+            await run_migrations(
+                engine,
+                service=MODULE_NAME,
+                script_location=SCRIPT_LOCATION,
+                metadatas=METADATAS,
+            )
             await bus.connect()
             log.info("storage service ready", default_tenant=_default_tenant)
             try:

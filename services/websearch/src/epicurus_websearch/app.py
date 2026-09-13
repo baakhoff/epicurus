@@ -101,9 +101,31 @@ def create_app() -> FastAPI:
 
     @app.get("/status")
     async def get_status() -> dict[str, Any]:
-        """SearXNG reachability status for the manifest-driven UI status panel."""
+        """SearXNG reachability *and* search-quality status for the Modules-page panel.
+
+        ``searxng_healthy`` is liveness (``/healthz``, unchanged) — it answers ``true`` as
+        long as the SearXNG process itself is up, even when every engine it asks is
+        blocked or rate-limited (#920's exact failure mode). ``degraded`` and
+        ``unresponsive_engines`` report the *last actual search's* engine health instead of
+        a separate canary query: a canary would mean the module polling SearXNG's own
+        (possibly rate-limited) engines on an interval purely to test them, which competes
+        with real traffic for the same limited budget on the engines already flagged as the
+        problem — the operator's own use of the tool is a free, always-fresh signal, and
+        this module makes no other request to SearXNG anyway. The tradeoff: a degraded
+        instance nobody has searched with since it broke still reads healthy here until the
+        next search — acceptable for a health panel that exists to explain the *next*
+        result, not to poll for outages independent of use.
+        """
         healthy = await client.health_check()
-        return {"searxng_healthy": healthy, "searxng_url": settings.searxng_url}
+        unresponsive = client.last_unresponsive_engines
+        return {
+            "searxng_healthy": healthy,
+            "searxng_url": settings.searxng_url,
+            "degraded": bool(unresponsive),
+            "unresponsive_engines": [
+                {"engine": engine, "error": error} for engine, error in unresponsive
+            ],
+        }
 
     @app.get("/resolve/result/{ref_id}", response_model=HoverCard)
     async def resolve_result(ref_id: str) -> HoverCard:

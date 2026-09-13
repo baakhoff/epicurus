@@ -12,6 +12,21 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A degraded web search no longer looks like an empty one** (#936, #920) — SearXNG can answer
+  `200 {"results": [], "unresponsive_engines": [...]}` when every engine it asked timed out,
+  was blocked, or got rate-limited, and `web_search` used to discard that field, making a
+  genuinely empty query indistinguishable from a search instance quietly failing. The tool now
+  tells the three outcomes apart — results, genuinely empty, degraded — logs a WARNING naming
+  the unresponsive engines, and `GET /status` gains a `degraded` flag reflecting the most recent
+  search rather than a separate probe. `web_search` also stopped swallowing every exception into
+  a clean `[]`: a SearXNG failure now reaches the model as an actionable message through the
+  ADR-0136 tool-error seam, which is why `httpx.HTTPStatusError`/`TransportError` joined
+  `epicurus-core`'s anticipated-exception set in the same change — a provider HTTP error is
+  expected traffic, not a crash, so it logs at WARNING instead of ERROR-with-traceback (fixing
+  the same misclassification for mail's Gmail client along the way). The default agent prompt
+  now says plainly when search is unavailable instead of narrating "no results" and quietly
+  falling back to training data. `epicurus-core` 0.39.0→0.40.0 (MINOR), `websearch`
+  0.3.1→0.4.0 (MINOR), `core-app` 0.124.0→0.124.1 (PATCH).
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
   startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own

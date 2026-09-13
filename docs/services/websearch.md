@@ -24,6 +24,21 @@ have changed since training — matching the source-grounding ladder the core's
 default agent instructions gained in the same change. The tool's behavior is
 unchanged.
 
+**v0.4.0** (#936, #920, ADR-0139): `web_search` no longer folds every failure mode into a
+plain "no results." SearXNG's `/search?format=json` response carries an `unresponsive_engines`
+field — `[engine, error_type]` pairs for engines that timed out, were blocked, or got
+rate-limited — that the client previously discarded, making a genuine zero-hit query
+indistinguishable from every engine failing at once. `SearXNGClient.search()` now returns a
+`SearchOutcome` (results **plus** `unresponsive_engines`/`number_of_results`), the tool
+distinguishes three outcomes (results, genuinely empty, degraded), a WARNING names the
+unresponsive engines, and `GET /status` gains a `degraded` flag. The tool also stopped
+catching every exception `SearXNGClient.search()` can raise: a genuine SearXNG failure (down,
+erroring, unreachable) now reaches the model as an actionable `ToolError` through the
+ADR-0136 tool-error seam instead of a silent empty envelope — which is also why `httpx`'s
+`HTTPStatusError`/`TransportError` joined `epicurus-core`'s anticipated-exception set in the
+same change (#920): a provider HTTP error is expected traffic, not a crash, so it is logged
+at WARNING rather than ERROR-with-traceback.
+
 **v0.3.0** (#739, ADR-0120): a second tool, **`link_ingest`**. Search could find a page;
 nothing in the platform could *read* one. `link_ingest(url)` fetches an operator-supplied
 link under a purpose-built SSRF guard and returns its substance — an article's byline and
@@ -62,8 +77,21 @@ The module adds two containers to the stack:
 the same way as the entity-ref id block (`epicurus_core.capped_listing`) — fed
 back to the model so it can still cite URLs directly; `entity_refs` carries one
 `EntityRef` per (deduplicated) result (`module="websearch"`, `kind="result"`,
-`summary` = snippet) so the UI renders chips. An empty/unreachable search
-returns `tool_envelope("No web results found.", [])` rather than failing the turn.
+`summary` = snippet) so the UI renders chips.
+
+**Three distinguishable outcomes (#936, ADR-0139)**, since folding them into one shape hid a
+degraded search behind a clean "nothing found":
+
+| Outcome | Shape |
+| ------- | ----- |
+| Results found | The listing above; if SearXNG's response also carried `unresponsive_engines`, a trailing note names them and says the results may be incomplete. |
+| Genuinely empty (`results: []`, `unresponsive_engines: []`) | `tool_envelope("No web results found.", [])` — unchanged from before v0.4.0. |
+| Degraded (`results: []`, `unresponsive_engines` non-empty) | A distinct envelope stating plainly that this is **not a confirmed empty result** — SearXNG answered but one or more engines did not — naming which engines and why, so the model reports "search is degraded/unreliable" rather than narrating a clean empty search. |
+| SearXNG unreachable or erroring | `SearXNGClient.search()`'s exception is no longer caught here — it reaches the ADR-0136 tool-error seam and returns to the model as a `ToolError` carrying the real reason, logged at WARNING (see `httpx.HTTPStatusError`/`TransportError` in `epicurus-core`'s anticipated-exception set, #920) rather than a silent `[]`. |
+
+A WARNING is logged (naming the unresponsive engines and their error types) whenever
+`unresponsive_engines` is non-empty, independent of whether the operator happens to ask about
+it — so the condition is visible in the container log on its own.
 
 #### `link_ingest` return shape
 
@@ -149,10 +177,22 @@ what the page might have said.
 | `GET` | `/health` | Liveness probe (standard epicurus health response). |
 | `GET` | `/metrics` | Prometheus metrics. |
 | `GET` | `/manifest` | Module manifest (tools, UI, config schema). |
-| `GET` | `/status` | SearXNG reachability: `{"searxng_healthy": true, "searxng_url": "..."}`. |
+| `GET` | `/status` | SearXNG reachability **and** last-search health (#936): `{"searxng_healthy": true, "searxng_url": "...", "degraded": false, "unresponsive_engines": []}`. `searxng_healthy` is `/healthz` liveness — true as long as the SearXNG process is up, even if every engine it asks is blocked. `degraded`/`unresponsive_engines` report the **most recent `web_search` call's** engine health (`SearXNGClient.last_unresponsive_engines`), not a separate probe — see the note below. |
 | `GET` | `/resolve/result/{ref_id}` | Hover-card resolver for a search result (ADR-0019) — see below. |
 | `GET` | `/resolve/source/{ref_id}` | Hover-card resolver for an ingested link (#739) — see below. |
 | `*` | `/mcp/*` | Streamable-HTTP MCP transport (agent connects here). |
+
+**Why `/status` piggybacks on real traffic instead of a canary query (#920).** A cached
+canary — a fixed low-cost query on an interval, distinguishing "process up" from "process
+up, zero engines answering" — was the other option. Rejected: the exact failure mode this
+exists to catch is engines being rate-limited or blocked, and a canary would mean the module
+polling those same engines on a schedule purely to test them, competing with the operator's
+own searches for the same limited budget on the engines already flagged as the problem. The
+operator's actual use of `web_search` is a free, always-fresh signal, and the module makes no
+other request to SearXNG regardless — so `/status` reads `SearXNGClient.last_unresponsive_engines`,
+set by the most recent `search()` call, at zero extra cost. The tradeoff: an instance nobody
+has searched with since it broke still reads `degraded: false` until the next search. Accepted
+— `/status` exists to explain the *next* result, not to poll for outages independent of use.
 
 #### `HoverCard` shape (from resolver)
 
@@ -237,6 +277,16 @@ internal use).  Key settings to review before production:
 
 Override the settings file by setting `SEARXNG_SETTINGS_FILE` in `.env` to
 an absolute path on the host.
+
+**Tuning note (#920): expect Google/Bing/DuckDuckGo-style engines to be rate-limited or
+blocked.** A self-hosted instance sits behind a single egress IP with no browser
+fingerprint — any VPS or Kubernetes deployment included — which is exactly what those
+engines' anti-bot posture is built to catch. The stock default (SearXNG's own default
+engine set, `WEBSEARCH_ENGINES` empty) is left as-is here; this is an operator tuning note,
+not a behavior change. If `web_search` starts reporting degraded results (`GET /status`'s
+`degraded` flag, or the WARNING logged whenever `unresponsive_engines` is non-empty), narrow
+`WEBSEARCH_ENGINES` to engines with a looser anti-bot posture (e.g. `duckduckgo,brave,mojeek`)
+rather than the full default set.
 
 ## Data model
 

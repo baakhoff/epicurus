@@ -681,15 +681,6 @@ and routes to the connected Google list the operator selects, which lives in the
 
 Unique constraint on `(tenant_id, id)`. A read's `scope` selects the rows by the `completed` flag (ADR-0049): `open` (the default, `completed = FALSE`), `done` (`completed = TRUE`), or `all` (no filter); all ordered by `created_at DESC`. `tasks_list` always reads the `open` scope; the board's *Show* filter passes the chosen scope.
 
-Schema is created automatically by `TaskStore.init()` at startup, which also **reconciles
-columns added after the table's first release** — there is no migration framework, so `init()`
-runs `create_all` and then `ALTER TABLE … ADD COLUMN` for any model column missing from an
-existing table (additive only; the v0.5.0 `status`/`priority`/`tags` fields and the v0.14.0
-`repeat` field). Without this, a database provisioned before v0.5.0 has no `status` column and
-**every** task read (the board, `tasks_list`, the attachment picker, the resolver) 500s with
-`column tasks_local.status does not exist` (#247). Destructive changes — drops, renames, type
-changes, `NOT NULL` backfills — still require a real migration.
-
 - **Postgres `task_repeats`** (added v0.14.0, #471, ADR-0082) — emulated recurrence rules for
   **external-provider** tasks (Google has no recurrence field). Tenant-scoped, keyed by
   `(tenant_id, list_id, task_id)`; the local store keeps its own rule in `tasks_local.repeat`
@@ -708,6 +699,40 @@ Unique constraint on `(tenant_id, list_id, task_id)`. Created by the same `TaskS
 `create_all` (it shares the module's SQLAlchemy metadata). A row is written on `add_task`/
 `update_task`, filled onto reads, and **retired** on `delete_task` or a `get_task` 404 (GC on
 miss). Writes are delete-then-insert so they work identically on SQLite (tests) and Postgres.
+
+### Schema is migration-managed (#929, ADR-XXXX)
+
+The deployed shape of every table on this page comes from the revisions in
+`src/epicurus_tasks/migrations/versions/`, applied once at startup: the lifespan calls
+`epicurus_core.db.migrations.run_migrations` before anything reads a row, under a Postgres
+advisory lock so two replicas — or a restart overlapping a start — cannot both run
+`upgrade head`. Its private version table is `alembic_version_tasks`; every service shares one
+database and keeps its own head revision. `epicurus_tasks.migrations.METADATAS` lists all three
+of this service's `DeclarativeBase` objects (`db.py`'s, `lead_time_prefs.py`'s and
+`scheduler.py`'s) so the drift gate sees every table below, not just `tasks_local`.
+
+- `TaskStore.init()`, `LeadTimePrefsStore.init()` and `FiredMarkerStore.init()` still exist and
+  still call `create_all`, but **the deployed service no longer calls any of them** — they are
+  the unit-test schema path, kept because an Alembic run per test is needless cost. CI's
+  `migrations` gate is what proves the revisions and the models agree.
+- The additive reconcile (`TaskStore._ensure_columns`, #247) left `init()` with adoption: a
+  pre-#218 `tasks_local` table — missing `status`/`priority`/`tags`, and later `repeat` (#471,
+  v0.14.0) — is now repaired by the baseline revision, which reconciles an existing table
+  (adding the missing columns and their indexes) rather than failing to create one.
+- **Backfill audit (#834):** one column is `NOT NULL` with a Python-side `default=` and no
+  `server_default=` — `tasks_local.completed` (`default=False`). It needs no backfill revision:
+  it has been part of `tasks_local` since the table's first release (it is not one of the
+  columns `_ensure_columns` ever reconciled), so `create_all` has always created it `NOT NULL`
+  from day one, and its only two writers — `TaskStore.add_task` and `TaskStore.upsert_task` —
+  always pass an explicit value. No deployment can have a `NULL` row here. Every other column is
+  either nullable already or has no Python-side default to begin with, so nothing else in this
+  service's models matches the #903 pattern.
+- No column in this service carries a plain-string `server_default` (the `"'…'"` defect
+  `storage`'s 0002 fixes) — both timestamp columns use `server_default=func.now()`, which
+  renders dialect-neutrally as itself — so this lane's baseline (`0001`) is the whole history;
+  there is no `0002`.
+- Changing a column here means writing a revision: `task migrate:new -- tasks "<what changed>"`,
+  then `task migrate:check -- tasks`. See **[Schema migrations](../developer/migrations.md)**.
 
 ### Google provider
 

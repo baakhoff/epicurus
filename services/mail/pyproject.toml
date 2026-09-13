@@ -1,10 +1,14 @@
 [project]
 name = "epicurus-mail"
-version = "0.21.0"
+version = "0.22.0"
 description = "Mail module — provider-agnostic mail (Gmail v0.1): search, read, draft-first send/reply, mark read/unread, local cache + incremental sync + background reconcile."
 requires-python = ">=3.11"
 dependencies = [
-    "epicurus-core",
+    # The `db` extra, not bare `epicurus-core`: this service's schema is Alembic-managed
+    # (#834, #932), and the runner lives behind that extra. SQLAlchemy was always declared
+    # directly below, so the extra is what actually puts Alembic in the runtime image —
+    # the Dockerfile installs `--package epicurus-mail` with no extras of its own.
+    "epicurus-core[db]",
     "fastapi>=0.141.1",
     "uvicorn[standard]>=0.52.0",
     "sqlalchemy[asyncio]>=2.0.51",

@@ -12,6 +12,15 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`mail` adopts the migration foundation** (#834, #932) — the five `mail_*` local-cache tables
+  (ADR-0096) are now schema-migration-managed like `storage`: a baseline revision, applied
+  in-process at startup under a Postgres advisory lock, replaces the old `create_all` +
+  `ensure_columns` reconcile. Mail turned out to need neither of the two per-service defects the
+  foundation warned about: it carries no plain-string `server_default` (only `func.now()`), and
+  every `default=`-without-`server_default=` NOT NULL column has existed since its table's
+  first release rather than being added later to a populated table, so the #903 backfill rule
+  finds nothing to write here either — both are recorded in the PR body's audit. `mail`
+  0.21.0→0.22.0 (MINOR).
 - **`knowledge` schema is migration-managed** (#834, #931) — the fourth service to adopt the
   migration foundation. Every model change now ships as an Alembic revision: startup runs
   `run_migrations` once, before any store touches a row, and no store reconciles its own schema

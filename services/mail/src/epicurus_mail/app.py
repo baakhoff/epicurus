@@ -26,9 +26,11 @@ from epicurus_core import (
     emit_event,
     get_logger,
 )
+from epicurus_core.db.migrations import run_migrations
 from epicurus_mail.cache import CachedMailbox
 from epicurus_mail.db import MailCache
 from epicurus_mail.gmail import GmailProvider
+from epicurus_mail.migrations import METADATAS, SCRIPT_LOCATION
 from epicurus_mail.poller import run_periodic
 from epicurus_mail.portability import MailPortability
 from epicurus_mail.provider import ComposedMessage, MailNotConnected
@@ -148,7 +150,18 @@ def create_app(*, engine: AsyncEngine | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
-            await cache.init()
+            # Schema first, before anything reads or writes a row. In-process rather than a
+            # separate init step: a container has one entry point on both runtimes this stack
+            # supports, and a Kubernetes-only init container would put the schema behind a
+            # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
+            # start — is handled by the Postgres advisory lock inside run_migrations, not by
+            # assuming this process is alone (#834, #932, ADR-XXXX).
+            await run_migrations(
+                engine,
+                service=MODULE_NAME,
+                script_location=SCRIPT_LOCATION,
+                metadatas=METADATAS,
+            )
             await bus.connect()
             # The background reconcile (#796) — mail's first periodic job, the same pattern
             # calendar and tasks already use. Without it `mail.received` only ever fired while

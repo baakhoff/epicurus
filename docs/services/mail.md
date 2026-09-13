@@ -25,13 +25,13 @@ to, and per ADR-0032 it declares no `collections` at all — so it also has no p
 provider switch. What it does instead is
 [No connected account](#no-connected-account-764).
 
-**v0.2.0** (Phase 3.8): `mail_search` results now surface as entity-reference chips
+**v0.2.0**: `mail_search` results now surface as entity-reference chips
 in the chat UI (ADR-0019).  Hover shows a compact preview; clicking opens the full
 message in the right-panel `email-reader` view (ADR-0018), read-only.  The module
 now declares `resolver: true` and serves `GET /resolve/message/{ref_id}` (hover-card)
 and `GET /messages/{ref_id}` (full email for the panel).
 
-**v0.4.0** (Phase 3.8): the hover-card resolver now reports the message's **unread**
+**v0.4.0**: the hover-card resolver now reports the message's **unread**
 status.  When a referenced message is unread, the `HoverCard` leads its detail rows
 with `Status: Unread`; read messages omit the row rather than render a redundant
 "Read".  The provider-agnostic `MailMessage` gains an `unread` flag the Gmail

@@ -1939,7 +1939,7 @@ set `MEMORY_EXTRACTION_MODE=immediate` to distil as a background task right afte
 instead (the original ADR-0045 behaviour). A dedicated small `MEMORY_EXTRACTION_MODEL` keeps the
 distillation cheap and off the chat model.
 
-### Schema is migration-managed (#834, ADR-XXXX)
+### Schema is migration-managed (#834, ADR-0138)
 
 All **40** tables above come from the revisions in `src/epicurus_core_app/migrations/versions/`,
 applied once at startup: the lifespan calls `epicurus_core.db.migrations.run_migrations` before

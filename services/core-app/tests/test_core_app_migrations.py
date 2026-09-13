@@ -3,7 +3,7 @@
 The core owns 40 tables across 28 ``DeclarativeBase`` objects — by far the biggest schema in the
 repository — and as of #927 every one of them comes from the revisions in
 ``epicurus_core_app.migrations`` rather than from 34 ``create_all`` + additive-reconcile calls in
-the lifespan (#834, ADR-XXXX). Five things are worth proving here:
+the lifespan (#834, ADR-0138). Five things are worth proving here:
 
 * the revisions and the models agree — ``upgrade head`` from empty produces exactly what
   ``create_all`` would, table for table and column for column, so the test suite's cheaper

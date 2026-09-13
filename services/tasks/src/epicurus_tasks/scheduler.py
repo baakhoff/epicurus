@@ -85,7 +85,7 @@ class FiredMarkerStore:
         """Build this store's table straight from the model — the **unit-test** schema path.
 
         The deployed service does not call this; its schema comes from the migration
-        environment (#929, ADR-XXXX). It survives for the tests, where a fresh SQLite file per
+        environment (#929, ADR-0138). It survives for the tests, where a fresh SQLite file per
         test is cheaper to build from the model than to migrate. Honest only because the
         `migrations` CI gate proves the model and the revisions agree on real Postgres.
         """

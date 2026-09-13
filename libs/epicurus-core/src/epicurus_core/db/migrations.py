@@ -4,7 +4,7 @@
 point and cannot carry it further: it adds a column and nothing else — no rename, no retype,
 no backfill, no drop — so a schema change that needs any of those has been un-shippable, and
 a column added ``NOT NULL`` without a server default reaches existing rows as ``NULL`` (#903).
-Alembic replaces it, one migration environment per service (#834, ADR-XXXX).
+Alembic replaces it, one migration environment per service (#834, ADR-0138).
 
 Three facts about this deployment shape determine the design:
 

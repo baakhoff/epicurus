@@ -7,7 +7,7 @@ store still on the pre-Alembic path uses. It has two callers now:
 * :mod:`epicurus_core.db.ops`, when a *migrated* service's baseline revision meets a table
   that already exists — a database provisioned before that service adopted Alembic. The
   baseline reconciles such a table instead of creating it, which is what lets a single
-  ``upgrade head`` serve an empty database and a years-old one alike (ADR-XXXX).
+  ``upgrade head`` serve an empty database and a years-old one alike (ADR-0138).
 
 epicurus services evolved their Postgres schema with ``Base.metadata.create_all``,
 which creates a *missing* table but never alters an *existing* one. So any column

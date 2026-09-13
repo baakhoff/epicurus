@@ -11,7 +11,7 @@ the moment a deployment skips the adoption release — the stamp would swallow e
 in between, including a backfill the stamp cannot perform. The other is to make the
 *baseline itself* idempotent, which is what this module does: one ``upgrade head`` then
 serves an empty database, a database built by the old reconcile, and a database already at
-head, with no branch anywhere and no revision ever skipped (ADR-XXXX).
+head, with no branch anywhere and no revision ever skipped (ADR-0138).
 
 Only the baseline is rendered against these. Every revision after it is ordinary Alembic —
 ``op.add_column``, ``op.alter_column``, an ``UPDATE`` for a backfill — because after

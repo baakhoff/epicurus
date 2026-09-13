@@ -108,7 +108,7 @@ def create_app() -> FastAPI:
             # supports, and a Kubernetes-only init container would put the schema behind a
             # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
             # start — is handled by the Postgres advisory lock inside run_migrations, not by
-            # assuming this process is alone (#834, #930, ADR-XXXX). Replaces the four
+            # assuming this process is alone (#834, #930, ADR-0138). Replaces the four
             # `<store>.init()` calls this lifespan used to make — each did nothing but
             # `create_all`, which the baseline revision now covers; they survive only as the
             # unit-test schema path (see each store's `init()` docstring).

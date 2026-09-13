@@ -1,6 +1,6 @@
 """Storage's migration environment, exercised end to end on SQLite.
 
-Storage is the first service whose schema is Alembic-managed (#834, ADR-XXXX), so these tests
+Storage is the first service whose schema is Alembic-managed (#834, ADR-0138), so these tests
 are also the reference the other service lanes copy. Three things are worth proving here and
 only here:
 

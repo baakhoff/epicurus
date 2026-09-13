@@ -88,7 +88,7 @@ class TaskStore:
         """Build this store's tables straight from the models — the **unit-test** schema path.
 
         The deployed service does not call this; its schema comes from the migration
-        environment (#929, ADR-XXXX). It survives for the tests, where a fresh SQLite file per
+        environment (#929, ADR-0138). It survives for the tests, where a fresh SQLite file per
         test is cheaper to build from the models than to migrate. Honest only because the
         `migrations` CI gate proves the models and the revisions agree on real Postgres.
         """

@@ -45,7 +45,7 @@ jobs:
           # is unnecessary on ephemeral CI runners and avoids flakiness.
           TESTCONTAINERS_RYUK_DISABLED: "true"
 
-  # Schema is Alembic-managed per service (#834, ADR-XXXX), and nothing anywhere exercised an
+  # Schema is Alembic-managed per service (#834, ADR-0138), and nothing anywhere exercised an
   # *upgrade* before this job: the unit tests build schema from the models on SQLite, and
   # runtime-smoke / k8s-smoke boot from an empty Postgres, so between them they only ever prove
   # the fresh-install path. The two failures that motivated the whole framework (#214, #218)

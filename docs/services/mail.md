@@ -751,7 +751,7 @@ materialization of the landing view, not a mail store. Every table is scoped by 
 | `mail_landing` | `(tenant_id, label)` | Per-folder landing metadata: the page-1 `next_cursor` (so a cached view keeps its "Older") and when it was last full-synced. |
 | `mail_category` | `(tenant_id, label, category_id)` | The Inbox's category tabs (#765): title, unread count, and the newest-message preview, in strip order, with the `cached_at` that drives the TTL. An empty `category_id` is the negative-cache row — "the provider was asked and has no categories here". |
 
-### Schema is migration-managed (#834, #932, ADR-XXXX)
+### Schema is migration-managed (#834, #932, ADR-0138)
 
 The deployed shape of the five tables above comes from the revisions in
 `src/epicurus_mail/migrations/versions/`, applied once at startup: the lifespan calls

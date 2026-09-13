@@ -224,7 +224,7 @@ longer mounts or scans the shared file space (the core does, behind `FILES_WATCH
   `storage_object_*` tools store text objects in the same bucket under the agent's chosen key.
   Either way the object is catalogued in `storage_files` so the core Files page lists it.
 
-### Schema is migration-managed (#834, ADR-XXXX)
+### Schema is migration-managed (#834, ADR-0138)
 
 Storage is the **reference service** for Alembic adoption. The deployed shape of `storage_files`
 comes from the revisions in `src/epicurus_storage/migrations/versions/`, applied once at startup:

@@ -94,7 +94,7 @@ early bump collides with their own version-line edits.
 
 ## Schema changes before 1.0
 
-Schema is **Alembic-managed, one migration environment per service** (#834, ADR-XXXX).
+Schema is **Alembic-managed, one migration environment per service** (#834, ADR-0138).
 A change to a model ships with a revision in the same PR; `task migrate:check --
 <service>` and CI's `migrations` gate fail the change if it does not. The mechanics
 are in **[Schema migrations](migrations.md)**; what belongs here is the *policy*.

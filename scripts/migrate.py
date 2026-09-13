@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every schema-migration chore, in one place: baseline, new, check, gate, services.
 
-Schema is Alembic-managed, one migration environment per service (#834, ADR-XXXX). This
+Schema is Alembic-managed, one migration environment per service (#834, ADR-0138). This
 script is the only entry point for authoring and verifying those environments — the Taskfile
 (`task migrate:new`, `task migrate:check`) and the `migrations` CI job both call it, so the
 gate and the developer run the same code.
@@ -307,7 +307,7 @@ def _render_baseline(service: Service) -> str:
             f"{service.name}``. Every operation goes\nthrough ``epicurus_core.db.ops``"
             " (``ep.``), which creates a table that is absent and additively\nreconciles one"
             " that is already there — so this revision applies both to an empty database and"
-            f"\nto a deployment provisioned before {service.name} adopted Alembic (ADR-XXXX)."
+            f"\nto a deployment provisioned before {service.name} adopted Alembic (ADR-0138)."
             " Later revisions\nare ordinary Alembic; only a baseline needs this."
         ),
         extra_imports=(

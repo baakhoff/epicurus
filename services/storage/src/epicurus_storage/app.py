@@ -140,7 +140,7 @@ def create_app() -> FastAPI:
             # supports, and a Kubernetes-only init container would put the schema behind a
             # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
             # start — is handled by the Postgres advisory lock inside run_migrations, not by
-            # assuming this process is alone (#834, ADR-XXXX).
+            # assuming this process is alone (#834, ADR-0138).
             await run_migrations(
                 engine,
                 service=MODULE_NAME,

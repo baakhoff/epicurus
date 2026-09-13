@@ -22,7 +22,7 @@ CalDAV backend fills the same column with its own ctag/sync-token and reuses thi
 unchanged — the same neutrality ADR-0096 holds for mail's cursor.
 
 The schema of all three tables comes from the revisions in :mod:`epicurus_calendar.migrations`
-(#834, #928, ADR-XXXX). Change a column here and you owe a revision —
+(#834, #928, ADR-0138). Change a column here and you owe a revision —
 ``uv run python scripts/migrate.py check calendar`` says so in a second, and CI's `migrations`
 gate fails the PR if you skip it.
 """
@@ -169,7 +169,7 @@ class CalendarSyncStore:
 
         The deployed service does not call this; its schema comes from the migration
         environment in :mod:`epicurus_calendar.migrations`, applied once at startup by
-        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-XXXX) — which is
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-0138) — which is
         also what retired the additive reconcile this method used to run after ``create_all``
         (ADR-0067).
 
@@ -394,7 +394,7 @@ class SelfWriteLedger:
         """Build the schema from the models (shared metadata with :class:`CalendarSyncStore`).
 
         The **unit-test** path only — the deployed service's schema comes from
-        :mod:`epicurus_calendar.migrations` (#834, #928, ADR-XXXX). See
+        :mod:`epicurus_calendar.migrations` (#834, #928, ADR-0138). See
         :meth:`CalendarSyncStore.init` for the full rationale.
         """
         async with self._engine.begin() as conn:

@@ -700,7 +700,7 @@ Unique constraint on `(tenant_id, list_id, task_id)`. Created by the same `TaskS
 `update_task`, filled onto reads, and **retired** on `delete_task` or a `get_task` 404 (GC on
 miss). Writes are delete-then-insert so they work identically on SQLite (tests) and Postgres.
 
-### Schema is migration-managed (#929, ADR-XXXX)
+### Schema is migration-managed (#929, ADR-0138)
 
 The deployed shape of every table on this page comes from the revisions in
 `src/epicurus_tasks/migrations/versions/`, applied once at startup: the lifespan calls

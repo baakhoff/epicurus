@@ -7,7 +7,7 @@ Four modules, deliberately split by what they drag in:
     ``from epicurus_core.db import ensure_columns`` keeps working for every store that has
     not adopted Alembic yet. It imports **SQLAlchemy only** — no Alembic — because a service
     still on the pre-Alembic path installs plain ``epicurus-core`` plus SQLAlchemy and must
-    not break when this library gains a migration runner (ADR-XXXX).
+    not break when this library gains a migration runner (ADR-0138).
 
 :mod:`epicurus_core.db.migrations`
     :func:`~epicurus_core.db.migrations.run_migrations` — the one call a migrated service

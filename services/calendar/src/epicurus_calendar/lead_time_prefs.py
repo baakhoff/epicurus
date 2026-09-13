@@ -53,7 +53,7 @@ class LeadTimePrefsStore:
 
         The deployed service does not call this; its schema comes from the migration
         environment in :mod:`epicurus_calendar.migrations`, applied once at startup by
-        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-XXXX). It survives
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-0138). It survives
         for the tests, where a fresh SQLite file per test is cheaper to build from the models
         than to migrate.
         """

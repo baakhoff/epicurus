@@ -1,4 +1,4 @@
-"""Tasks' migration environment, exercised end to end on SQLite (#929, ADR-XXXX).
+"""Tasks' migration environment, exercised end to end on SQLite (#929, ADR-0138).
 
 This is the service's second migration-managed store, so it is also where the
 "one `run_migrations` call, several `DeclarativeBase` objects" shape gets its first real

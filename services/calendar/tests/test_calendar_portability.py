@@ -37,6 +37,7 @@ from epicurus_calendar.portability import (
 from epicurus_calendar.providers.local import LocalCalendarProvider
 from epicurus_calendar.service import build_module
 from epicurus_core import ImportReport, PortabilityRecord, add_portability_routes
+from epicurus_core.db import ensure_columns
 
 TENANT = "local"
 OTHER_TENANT = "other"
@@ -494,16 +495,22 @@ async def test_attendees_and_all_day_survive_the_trip(source: _Side, target: _Si
 
 
 async def _reconciled_source(path: Path) -> _Side:
-    """A calendar the way a long-lived install actually is: ``all_day``/``excluded`` nullable.
+    """A calendar the way a long-lived, not-yet-fully-migrated install actually is:
+    ``all_day``/``excluded`` nullable.
 
-    Not hand-carved DDL pretending to be old — the real path. ``calendar_events`` is created
-    with only the columns of its *first* release and a row in it, then
-    :meth:`LocalEventStore.init` runs, which is where the shared additive reconcile (#249,
-    ADR-0067) adds the rest. Neither boolean has a ``server_default``, so there is nothing to
-    backfill a populated table with and both are added **nullable** — leaving the pre-existing
-    row with ``NULL`` in a column the model declares ``NOT NULL``. ``_row_to_event`` coerces
-    that to ``False`` on every ordinary read, which is exactly why it went unnoticed until
-    portability inserted the value verbatim into a fresh schema and the module 500'd (#903).
+    Not hand-carved DDL pretending to be old — the real path, minus its final step. Before
+    #834/#928, ``calendar_events`` was created with only the columns of its *first* release and
+    a row in it, then :meth:`LocalEventStore.init` ran the shared additive reconcile (#249,
+    ADR-0067) to add the rest. That reconcile now lives in the migration baseline's
+    ``ep.create_table`` (:mod:`epicurus_core.db.ops`) instead of in ``init()`` — called here
+    directly, the very code the baseline calls, to reproduce the exact intermediate state a
+    real upgrade passes through: revision 0001 has reconciled the table but 0002 (which
+    backfills these two columns and adds their server default) has not run yet. Neither boolean
+    has a ``server_default`` at 0001, so there is nothing to backfill a populated table with and
+    both are added **nullable** — leaving the pre-existing row with ``NULL`` in a column the
+    model declares ``NOT NULL``. ``_row_to_event`` coerces that to ``False`` on every ordinary
+    read, which is exactly why it went unnoticed until portability inserted the value verbatim
+    into a fresh schema and the module 500'd (#903).
     """
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
     async with engine.begin() as conn:
@@ -527,7 +534,19 @@ async def _reconciled_source(path: Path) -> _Side:
             " '2026-07-08 09:00:00.000000', '2026-07-08 10:00:00.000000',"
             " '2026-01-01 00:00:00.000000')"
         )
+        # What the baseline's reconcile arm does to a table it finds already present — the
+        # same helper, called over the full model column list, the way ``ep.create_table``
+        # calls it. This is 0001's half of the upgrade; 0002 (not run here) is what fixes it.
+        await conn.run_sync(
+            lambda sync_conn: ensure_columns(
+                sync_conn,
+                _StoredEvent.__table__,
+                [c.name for c in _StoredEvent.__table__.columns],
+            )
+        )
     side = _Side(engine)
+    # events.init() is now a plain create_all — a no-op against the table just built above —
+    # so this only creates the lead-time-prefs table the export below also reads.
     await side.init()
     return side
 

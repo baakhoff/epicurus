@@ -21,10 +21,12 @@ from epicurus_core import (
     configure_logging,
     get_logger,
 )
+from epicurus_core.db.migrations import run_migrations
 from epicurus_tasks.db import RepeatStore, TaskStore
 from epicurus_tasks.google_provider import GoogleTasksError, GoogleTasksProvider
 from epicurus_tasks.lead_time_prefs import LeadTimePrefsStore
 from epicurus_tasks.local_provider import LocalTasksProvider
+from epicurus_tasks.migrations import METADATAS, SCRIPT_LOCATION
 from epicurus_tasks.models import Task, TaskScope
 from epicurus_tasks.portability import TasksPortability
 from epicurus_tasks.providers import TasksProvider
@@ -129,10 +131,19 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         async with module.mcp.session_manager.run():
-            # The local store always backs the module now (it is the silent default).
-            await store.init()
-            await lead_prefs.init()
-            await markers.init()
+            # Schema first, before anything reads or writes a row. In-process rather than a
+            # separate init step: a container has one entry point on both runtimes this stack
+            # supports, and a Kubernetes-only init container would put the schema behind a
+            # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
+            # start — is handled by the Postgres advisory lock inside run_migrations, not by
+            # assuming this process is alone (#929, ADR-XXXX). Covers all three stores' tables
+            # (tasks_local/task_repeats, tasks_lead_time_prefs, tasks_fired_markers) in one call.
+            await run_migrations(
+                engine,
+                service=MODULE_NAME,
+                script_location=SCRIPT_LOCATION,
+                metadatas=METADATAS,
+            )
             await bus.connect()
             # The lead-time scheduler (#664) — tasks' first periodic background job, the same
             # pattern as calendar's. Started/cancelled around the app lifetime.

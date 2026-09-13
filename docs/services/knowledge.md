@@ -641,8 +641,7 @@ container user needs read access). `EPICURUS_FILES_ROOT` **replaces** the old pe
   (`create`/`update`/`delete`/`move`/`mkdir`/`mkproject`), `proposed_content`, `to_path`
   (the destination of a `move`, empty otherwise), `origin`, `note`, `created_at`. A row is
   removed on approve (after the change is applied) or reject; the table only ever holds
-  pending suggestions. The `to_path` column is added in place at init on a pre-#KB-refactor
-  deployment (the store uses `create_all`, no migration tool — mirrors `storage_files`).
+  pending suggestions.
 - **Postgres `knowledge_suggestion_decisions`** — resolved-decision audit trail (ADR-0090):
   `id`, `tenant`, `sid`, `path`, `operation`, `origin`, `note`, `proposed_content`,
   `applied_content` (empty for a reject or a content-less structural op), `to_path`,
@@ -667,6 +666,40 @@ core path `knowledge/<rel>`): knowledge **reads and writes** them through the co
 (`PlatformClient.files_*` — #356/ADR-0064 for writes, #346/ADR-0070 for reads), holding no
 `/data` mount in normal mode. The Postgres ledgers and Qdrant collections above are derived
 indexes over those files.
+
+### Schema is migration-managed (#834, #931, ADR-XXXX)
+
+The deployed shape of all six Postgres tables above comes from the revisions in
+`src/epicurus_knowledge/migrations/versions/`, applied once at startup: the lifespan calls
+`epicurus_core.db.migrations.run_migrations` before anything reads a row, under a Postgres
+advisory lock so two replicas — or a restart overlapping a start — cannot both run
+`upgrade head`. Its private version table is `alembic_version_knowledge`; every service shares
+one database and keeps its own head revision.
+
+- Every store's `init()` still exists and still calls `create_all`, but **the deployed service
+  no longer calls it** — it is the unit-test schema path, kept because an Alembic run per test
+  is needless cost. CI's `migrations` gate is what proves the two agree.
+- `SuggestionStore` no longer runs the additive reconcile from `init()`: `knowledge_suggestions.
+  to_path` (a post-#KB-refactor column) is repaired by the baseline revision instead, which
+  reconciles an existing table rather than failing to create one.
+- Revision **0002** normalises `knowledge_suggestions.to_path`'s default. It was declared
+  `server_default="''"` — a *plain string*, which SQLAlchemy quotes as a literal, so
+  `create_all` wrote `DEFAULT ''''''` (value: the two characters `''`) while the reconcile,
+  treating the same string as raw SQL, wrote `DEFAULT ''` (the real empty string). Two
+  deployments, two different defaults; invisible because every insert sets `to_path` explicitly.
+  The model now says `text("''")` and 0002 fixes the default and any row the old one produced —
+  the first change here the additive reconcile could never have made.
+- **Backfill audit (#834):** eight further columns carried a Python-side `default=` with no
+  `server_default=` — `knowledge_suggestions.{proposed_content, origin, note}` and
+  `knowledge_suggestion_decisions.{origin, note, proposed_content, applied_content, to_path}`.
+  Unlike `to_path` above, none of these was ever added to an existing table by the reconcile —
+  each has been part of its table's `create_table` since the table's first release, so it has
+  always been `NOT NULL` at the database level and could never hold a `NULL` row on any
+  deployment. Revision **0003** still closes the gap between the model's default and the
+  database's, on principle rather than because a `NULL` was ever observed.
+- Changing a column here means writing a revision: `task migrate:new -- knowledge "<what
+  changed>"`, then `task migrate:check -- knowledge`. See
+  **[Schema migrations](../developer/migrations.md)**.
 
 ## Portability
 

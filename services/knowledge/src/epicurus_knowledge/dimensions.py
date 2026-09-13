@@ -51,9 +51,10 @@ from epicurus_core import get_logger
 
 _log = get_logger("knowledge.dimensions")
 
-#: The one recovery the operator can run by hand. Worded identically to the core's recall
-#: surface (``epicurus_core_app.memory.facts.REBUILD_CURE``) so a dimension change reads the
-#: same wherever it is reported (#879, ADR-0141).
+#: The one recovery the operator can run by hand *for a module's index*. The core's recall
+#: store names a different one (``epicurus_core_app.memory.facts.REBUILD_CURE``), because
+#: "Re-embed everything" fans out to module ``/reindex`` endpoints only and never touches the
+#: fact collection — each surface names the action that actually rebuilds it (#879, ADR-0141).
 REBUILD_CURE = "run “Re-embed everything” on the Models page"
 
 

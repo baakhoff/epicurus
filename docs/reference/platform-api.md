@@ -354,9 +354,12 @@ Returns `{status, stored_dim, expected_dim, detail}`:
 
 `stored_dim` / `expected_dim` are the old and new widths (either may be `null` when unknown);
 `detail` is an operator-facing sentence naming the cure — never a provider payload, and never
-the tenant-scoped collection name. The value is **observation-based and process-local**: it
-reports what a real save/recall saw, so the call costs no embed, and it resets when the memory
-facts re-embed runs. The web's **Models → Embedding model** card renders `changed` and
+the tenant-scoped collection name. The cure it names is the **Memory facts re-embed**
+maintenance job, *not* the Models page's "Re-embed everything", which fans out to the modules'
+`/reindex` and never touches the fact collection. The value is **observation-based and
+process-local**: it reports what a real save/recall saw for **the caller's tenant** (the
+observation is kept per collection, so one tenant's drift is never reported to another), so
+the call costs no embed, and it resets when that tenant's memory facts re-embed runs. The web's **Models → Embedding model** card renders `changed` and
 `unreadable`; `ok` and `healed` render nothing. Identical on Docker and Kubernetes — the check
 is lazy, driven by request handling rather than container start-up (ADR-0134).
 

@@ -24,11 +24,14 @@ images to GHCR.
   instead of being restarted and cancelled on every turn. What cannot be healed is now *said*:
   recall logs the two widths and the cure, `knowledge` search answers "the embedding model
   changed — run Re-embed everything" instead of forwarding Qdrant's raw dimension error, and the
-  Models page shows the stuck state on the embedding card beside the button that fixes it. The
+  Models page shows the stuck state on the embedding card and names the cure — which, for
+  recall memory, is the **Memory facts re-embed** maintenance job rather than "Re-embed
+  everything" (that one fans out to the modules only). The
   same card stops calling a **refused** re-embed a failure: a module that declines to rebuild
   from a source reading empty is protecting your data, and now says so, with its reason, in its
   own third state. `core-app` 0.125.0→0.126.0 (MINOR) · `web` 0.147.0→0.148.0 (MINOR) ·
-  `knowledge` 0.31.1→0.31.2 (PATCH) · `notes` 0.15.1→0.15.2 (PATCH).
+  `knowledge` 0.31.0→0.31.2 (PATCH) · `notes` 0.15.0→0.15.2 (PATCH) — the wave's ladder
+  reserved a patch each for a lane that turned out not to touch them.
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
   startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own

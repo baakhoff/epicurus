@@ -46,9 +46,13 @@ Embedder = Callable[[list[str]], Awaitable[list[list[float]]]]
 SOURCE_TOOL = "tool"
 SOURCE_AUTO = "auto"
 
-#: The one recovery the operator can run by hand, named identically wherever a dimension
-#: change surfaces (core recall, knowledge search) so the cure reads the same everywhere.
-REBUILD_CURE = "run “Re-embed everything” on the Models page"
+#: The recovery the operator can run by hand for *recall* memory. Deliberately not the
+#: Models page's "Re-embed everything": that fans out to the modules' ``/reindex`` only
+#: (``ModuleRegistry.reembed``) and never touches the fact collection, which is rebuilt by the
+#: ``facts-reembed`` maintenance job, which the Maintenance card's "Run maintenance now"
+#: includes. Naming the wrong button would be exactly the failure this issue is about.
+#: Closing the gap — one action covering modules *and* facts — is a follow-up (#944).
+REBUILD_CURE = "run “Run maintenance now” under Settings → Maintenance"
 
 
 class RecallDimensionError(RuntimeError):
@@ -168,16 +172,21 @@ class UserFactStore:
         # be garbage-collected mid-flight — which is precisely the window in which the
         # collection has been dropped and not yet refilled.
         self._reconciling: set[asyncio.Task[None]] = set()
-        self._dimension_state = RecallDimensionState()
+        # Per *collection*, therefore per tenant (constraint #1): a width observed while
+        # serving one tenant is not a fact about another's collection, and must never be
+        # reported to — or cleared by — anyone else.
+        self._dimension_state: dict[str, RecallDimensionState] = {}
 
-    def recall_dimension(self) -> RecallDimensionState:
-        """What this process last observed about the facts collection's width (#944).
+    def recall_dimension(self, *, tenant: str) -> RecallDimensionState:
+        """What this process last observed about *tenant*'s facts collection width (#944).
 
         Free to call: it reports an observation already made by a save or a recall, and never
-        embeds or queries. Surfaced on the Models page next to "Re-embed everything", which is
-        the action that clears a ``changed`` state the lazy heal could not.
+        embeds or queries. Surfaced on the Models page next to the maintenance job that clears
+        a ``changed`` state the lazy heal could not.
         """
-        return self._dimension_state.model_copy()
+        return self._dimension_state.get(
+            scope_collection(self._base, tenant), RecallDimensionState()
+        ).model_copy()
 
     async def _ensure(self, collection: str, dim: int) -> None:
         """Make sure *collection* exists and matches *dim*, reconciling a drifted one.
@@ -241,7 +250,7 @@ class UserFactStore:
                     f"single width, so it cannot be reconciled with the current {dim}-d "
                     f"embedding model — {REBUILD_CURE}"
                 )
-                self._dimension_state = RecallDimensionState(
+                self._dimension_state[collection] = RecallDimensionState(
                     status="unreadable", expected_dim=dim, detail=detail
                 )
                 log.error(
@@ -259,7 +268,7 @@ class UserFactStore:
                     old_dim=current_dim,
                     new_dim=dim,
                 )
-                self._dimension_state = RecallDimensionState(
+                self._dimension_state[collection] = RecallDimensionState(
                     status="changed",
                     stored_dim=current_dim,
                     expected_dim=dim,
@@ -267,7 +276,7 @@ class UserFactStore:
                 )
                 migrated = await self._reembed_existing(collection, dim=dim)
                 log.info("facts collection reconciled", collection=collection, migrated=migrated)
-                self._dimension_state = RecallDimensionState(
+                self._dimension_state[collection] = RecallDimensionState(
                     status="healed",
                     stored_dim=current_dim,
                     expected_dim=dim,
@@ -298,7 +307,7 @@ class UserFactStore:
         if stored is None or stored == dim:
             return None
         self._ensured.discard(collection)
-        self._dimension_state = RecallDimensionState(
+        self._dimension_state[collection] = RecallDimensionState(
             status="changed",
             stored_dim=stored,
             expected_dim=dim,
@@ -395,7 +404,7 @@ class UserFactStore:
                 self._ensured.add(collection)
             # The operator ran the documented cure; whatever this process had observed about a
             # stale width no longer holds, so the Models page stops reporting it (#944).
-            self._dimension_state = RecallDimensionState()
+            self._dimension_state.pop(collection, None)
         return migrated
 
     async def save(self, *, tenant: str, text: str, source: str = SOURCE_AUTO) -> UserFact | None:

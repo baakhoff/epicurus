@@ -1560,9 +1560,13 @@ export function EmbedDefault() {
           with the current model. It runs in the background and can take a while.
         </p>
         {/* A stuck recall store (#944): the embedding model changed under vectors built at the
-            old width, and the lazy heal either hasn't run or couldn't. Named here, beside the
-            action that fixes it — a WARN line in the log is not a surface. Identical on Docker
-            and Kubernetes: the check is lazy, driven by request handling, not container start. */}
+            old width, and the lazy heal either hasn't run or couldn't. Named here because this
+            is the screen the operator is on when they change the model — a WARN line in the log
+            is not a surface. The cure is in `detail`, and it is *not* the button below:
+            "Re-embed everything" fans out to the modules' indexes, while recall is rebuilt by
+            the Maintenance card's "Memory facts re-embed" job. One action covering both is a
+            follow-up (#944). Identical on Docker and Kubernetes: the check is lazy, driven by
+            request handling, not container start. */}
         {dimStuck && dim && (
           <p
             className="mb-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-warn"

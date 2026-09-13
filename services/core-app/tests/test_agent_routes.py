@@ -245,7 +245,8 @@ class _FakeMemory:
         self.forgot_sessions.append(session_id)
         return 3
 
-    def recall_dimension(self) -> RecallDimensionState:
+    def recall_dimension(self, *, tenant: str) -> RecallDimensionState:
+        self.dimension_tenant = tenant
         return self.dimension
 
 

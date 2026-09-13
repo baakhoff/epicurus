@@ -815,10 +815,23 @@ looking. Three rules hold across every store above:
   embedding model changed — this index holds 768-d vectors and the current model produces
   4096-d … run “Re-embed everything” on the Models page" instead of forwarding the raw
   `Vector dimension error` (#879); and `GET /platform/v1/agent/memory/dimension` reports the
-  state the Models page renders beside the **Re-embed everything** button.
+  state the Models page renders beside the **Re-embed everything** button. The state is scoped
+  to the caller's tenant, like every other `/memory` route — a width observed while serving one
+  tenant says nothing about another's collection (constraint #1).
 
-Search **never rebuilds** — that stays the indexer's job, and a rebuild triggered by a read
-would drop the vectors the operator is still searching. Search only names what it found.
+**The two cures are not the same button, and each surface names its own.** "Re-embed
+everything" fans out to the *modules*' `/reindex` and never touches the fact collection, so a
+module's message names it while recall's names **Settings → Maintenance**, whose
+`facts-reembed` job (*Memory facts re-embed*) is what rebuilds recall. Folding both into one
+action is a follow-up (#944); until then the fact collection is deliberately outside
+"Re-embed everything", and saying otherwise would be the exact failure this section exists to
+remove.
+
+A **module** search never rebuilds — that stays the indexer's job, and a rebuild triggered by a
+read would drop the vectors the operator is still searching; it only names what it found. Core
+recall is the deliberate exception: its `_ensure` heals in place on the way to the query,
+because a fact is hand-distilled and has no source to re-derive it from (ADR-0074). What recall
+never does is rebuild from the *error* path — that only names the mismatch.
 
 The `/memory/dimension` state is *observation-based and process-local*: it reports what a real
 save or recall saw, so reading it costs no embed call, and it resets when `reembed_all` runs.

@@ -116,9 +116,9 @@ class Memory:
         """The agent's recall path: the text of the facts most relevant to ``query``."""
         return await self._facts.recall(tenant=tenant, query=query, limit=limit)
 
-    def recall_dimension(self) -> RecallDimensionState:
-        """What this process last observed about the fact collection's vector width (#944)."""
-        return self._facts.recall_dimension()
+    def recall_dimension(self, *, tenant: str) -> RecallDimensionState:
+        """What this process last observed about *tenant*'s fact collection width (#944)."""
+        return self._facts.recall_dimension(tenant=tenant)
 
     async def sessions(self, *, tenant: str) -> list[SessionSummary]:
         """The tenant's conversations, most recently active first."""

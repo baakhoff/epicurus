@@ -351,10 +351,10 @@ async def test_an_unreadable_vector_configuration_is_named_and_never_cached() ->
     with pytest.raises(EmbeddingDimensionUnreadable):
         await store.search(tenant="t1", query="anything")
 
-    state = store.recall_dimension()
+    state = store.recall_dimension(tenant="t1")
     assert state.status == "unreadable"
     assert state.expected_dim == 8
-    assert "Re-embed everything" in state.detail
+    assert "Settings → Maintenance" in state.detail
 
     with pytest.raises(EmbeddingDimensionUnreadable):
         await store.search(tenant="t1", query="anything")
@@ -371,10 +371,28 @@ async def test_search_names_a_width_change_instead_of_forwarding_qdrants_error()
 
     message = str(raised.value)
     assert "16→8" in message
-    assert "Re-embed everything" in message
+    assert "Settings → Maintenance" in message  # the action that rebuilds *facts*
     assert "Unexpected Response" not in message  # never the provider's raw text
     assert "t1__facts" not in message  # nor the tenant-scoped collection name
-    assert store.recall_dimension().status == "changed"
+    assert store.recall_dimension(tenant="t1").status == "changed"
+
+
+async def test_one_tenants_width_drift_is_never_reported_to_another() -> None:
+    """The observed width is a fact about one collection, so it is stored per collection.
+
+    A single process-wide field would have told every tenant about the first tenant's drift —
+    both widths included — and let any tenant's re-embed clear it (constraint #1).
+    """
+    qdrant = _ScriptedQdrant(confirmed=8, actual=16)
+    store = UserFactStore(qdrant, _embedder(8))  # type: ignore[arg-type]
+
+    with pytest.raises(EmbeddingDimensionChanged):
+        await store.search(tenant="t1", query="anything")
+
+    assert store.recall_dimension(tenant="t1").status == "changed"
+    other = store.recall_dimension(tenant="t2")
+    assert other.status == "ok"
+    assert other.stored_dim is None and other.expected_dim is None
 
 
 async def test_an_unrelated_backend_failure_is_forwarded_unchanged() -> None:
@@ -386,7 +404,7 @@ async def test_an_unrelated_backend_failure_is_forwarded_unchanged() -> None:
         await store.search(tenant="t1", query="anything")
 
     assert not isinstance(raised.value, RecallDimensionError)
-    assert store.recall_dimension().status == "ok"
+    assert store.recall_dimension(tenant="t1").status == "ok"
 
 
 async def test_a_heal_is_reported_to_the_models_page() -> None:
@@ -396,17 +414,17 @@ async def test_a_heal_is_reported_to_the_models_page() -> None:
         await old_store.save(tenant="t1", text="Prefers dark mode")
 
         new_store = UserFactStore(client, _embedder(8))
-        assert new_store.recall_dimension().status == "ok"
+        assert new_store.recall_dimension(tenant="t1").status == "ok"
         await new_store.search(tenant="t1", query="Prefers dark mode")
 
-        state = new_store.recall_dimension()
+        state = new_store.recall_dimension(tenant="t1")
         assert state.status == "healed"
         assert (state.stored_dim, state.expected_dim) == (16, 8)
         assert "16-d to 8-d" in state.detail
 
         # Running the documented cure clears what this process had observed.
         await new_store.reembed_all(tenant="t1")
-        assert new_store.recall_dimension().status == "ok"
+        assert new_store.recall_dimension(tenant="t1").status == "ok"
     finally:
         await client.close()
 
@@ -431,11 +449,11 @@ async def test_a_recall_that_gives_up_on_its_budget_still_finishes_the_rebuild()
             await asyncio.wait_for(new_store.search(tenant="t1", query="dark mode please"), 0.05)
 
         for _ in range(200):  # the shielded rebuild finishes on its own
-            if new_store.recall_dimension().status == "healed":
+            if new_store.recall_dimension(tenant="t1").status == "healed":
                 break
             await asyncio.sleep(0.02)
 
-        assert new_store.recall_dimension().status == "healed"
+        assert new_store.recall_dimension(tenant="t1").status == "healed"
         facts = await new_store.list_facts(tenant="t1")
         assert [f.text for f in facts] == ["Prefers dark mode"]  # nothing was lost
         info = await client.get_collection("t1__facts")

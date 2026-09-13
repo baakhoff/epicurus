@@ -766,14 +766,16 @@ def create_agent_router(
         An embedding model with a different output size makes every stored vector unqueryable.
         The fact store heals that in place on the next save or recall, but a heal that cannot
         run (an unreadable vector configuration) or that failed must not stay invisible — the
-        Models page reads this beside "Re-embed everything", the action that fixes it.
+        Models page reads this beside "Re-embed everything" and names the cure in ``detail``.
+        That cure is *not* that button: the fan-out behind it reaches the modules' ``/reindex``
+        only, and recall is rebuilt by the ``facts-reembed`` maintenance job.
 
         Observation-based and process-local: it reports what a save/recall actually saw, so it
         costs no embed call and is ``{"status": "ok"}`` on a healthy installation. Identical on
         Docker and Kubernetes — the check is lazy, driven by request handling rather than
         container start-up (ADR-0134).
         """
-        return memory.recall_dimension()
+        return memory.recall_dimension(tenant=tenant)
 
     @router.get("/memory/profile", response_model=ProfileView)
     async def get_profile() -> ProfileView:

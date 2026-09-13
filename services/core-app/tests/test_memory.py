@@ -20,6 +20,7 @@ class _FakeStore:
         self.last_refs: list[dict[str, Any]] | None = None
         self.last_attachments: list[dict[str, Any]] | None = None
         self.last_activity: dict[str, Any] | None = None
+        self.last_stopped: str | None = None
 
     async def append(
         self,
@@ -31,11 +32,13 @@ class _FakeStore:
         entity_refs: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         activity: dict[str, Any] | None = None,
+        stopped: str | None = None,
     ) -> int:
         self.rows.append((tenant, session_id, role, content))
         self.last_refs = entity_refs
         self.last_attachments = attachments
         self.last_activity = activity
+        self.last_stopped = stopped
         self._next_id += 1
         return self._next_id
 

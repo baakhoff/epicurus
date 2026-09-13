@@ -24,6 +24,7 @@ import {
   Square,
   SendHorizonal,
   Trash2,
+  TriangleAlert,
   WifiOff,
   Wrench,
   X,
@@ -1608,7 +1609,35 @@ export function ChatScreen() {
                   streaming={false}
                   entityRefs={message.entity_refs}
                 />
-                {(message.content !== "" || (i === lastAssistantIdx && turnControlsVisible)) && (
+                {/* A turn that failed part-way is marked on the message itself, not only on
+                    the live stream (#944, ADR-0142): the reply stops mid-thought and nothing
+                    else says why, so a reload — or a re-attach that lands on history rather
+                    than on the failing stream — used to show a bare partial answer. Regenerate
+                    moves in here for that message, so the affordance sits with the explanation
+                    instead of repeating below it. */}
+                {message.stopped === "error" && (
+                  <div
+                    role="status"
+                    className="mt-1.5 ml-7 flex max-w-[85%] flex-wrap items-center gap-x-2.5 gap-y-1 rounded-lg border border-danger/40 bg-surface-2 px-3 py-1.5 text-[11px] text-ink-dim"
+                  >
+                    <TriangleAlert size={12} className="shrink-0 text-danger" />
+                    <span>This reply was interrupted before it finished — it may be incomplete.</span>
+                    {i === lastAssistantIdx && turnControlsVisible && (
+                      <button
+                        aria-label="Regenerate response"
+                        onClick={regenerate}
+                        disabled={connectionLost}
+                        className="flex items-center gap-1 font-medium text-ink hover:text-accent-strong disabled:opacity-50"
+                      >
+                        <RefreshCw size={12} /> Regenerate
+                      </button>
+                    )}
+                  </div>
+                )}
+                {(message.content !== "" ||
+                  (i === lastAssistantIdx &&
+                    turnControlsVisible &&
+                    message.stopped !== "error")) && (
                   <div className="mt-1 ml-7 flex items-center gap-3">
                     {message.content !== "" && (
                       <CopyMessage
@@ -1621,16 +1650,18 @@ export function ChatScreen() {
                         )}
                       />
                     )}
-                    {i === lastAssistantIdx && turnControlsVisible && (
-                      <button
-                        aria-label="Regenerate response"
-                        onClick={regenerate}
-                        disabled={connectionLost}
-                        className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink disabled:opacity-50"
-                      >
-                        <RefreshCw size={12} /> Regenerate
-                      </button>
-                    )}
+                    {i === lastAssistantIdx &&
+                      turnControlsVisible &&
+                      message.stopped !== "error" && (
+                        <button
+                          aria-label="Regenerate response"
+                          onClick={regenerate}
+                          disabled={connectionLost}
+                          className="flex items-center gap-1 text-[11px] text-ink-faint hover:text-ink disabled:opacity-50"
+                        >
+                          <RefreshCw size={12} /> Regenerate
+                        </button>
+                      )}
                   </div>
                 )}
               </div>

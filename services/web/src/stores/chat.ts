@@ -82,6 +82,13 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  */
 type ReattachMode = "probe" | "recovery";
 
+/** What the shell says when re-attach gives up on a turn it knows was running (#944). It
+ *  names both halves of the user's situation: the connection is gone, *and* whatever is on
+ *  screen may be less than the whole answer — so Reconnect (beside it) or Regenerate (under
+ *  the reply) is an informed choice rather than a guess. Never silence. */
+export const REATTACH_LOST_MESSAGE =
+  "The connection to the assistant was lost — the reply may be incomplete.";
+
 /**
  * Decide what happens when `reattachLoop` exhausts every retry attempt without reaching a
  * terminal outcome (`done` / `gone` / a confirmed absence of a run).
@@ -116,7 +123,7 @@ function classifyExhaustion(
   return {
     streaming: false,
     abort: null,
-    error: "lost connection to the running turn",
+    error: REATTACH_LOST_MESSAGE,
     reconnectable: true,
   };
 }
@@ -398,6 +405,13 @@ export const useChat = create<ChatState>()(
         stream: AsyncGenerator<SseMessage>,
         abort: AbortController,
       ): Promise<StreamEnd> => {
+        // An `error` frame is no longer necessarily the last one (#944, ADR-0142). A turn that
+        // failed after streaming a partial answer now emits `error` *and then* `done` carrying
+        // the persisted turn — so the banner fires for that case too, without costing us the
+        // history refetch that `done` triggers. Keep reading for the terminal frame; if the
+        // stream simply ends after an error (nothing was produced, the old shape), the error is
+        // still the end — not a drop to re-attach to.
+        let sawError = false;
         try {
           for await (const message of stream) {
             if (message.id) set({ lastSeq: Number(message.id) });
@@ -416,7 +430,7 @@ export const useChat = create<ChatState>()(
             else if (event.type === "error") {
               const detail = event.detail ?? "the stream failed";
               set({ error: detail, paused: /paused/i.test(detail), reconnectable: false });
-              return "error";
+              sawError = true;
             } else if (event.type === "gone") return "gone";
             else if (event.type === "awaiting_input") {
               // The turn paused for the user. A `draft_review` pause (ADR-0085, #563) carries a
@@ -445,10 +459,13 @@ export const useChat = create<ChatState>()(
               return "awaiting_input";
             } else if (event.type === "done") return "done";
           }
-          return "dropped"; // ended without a terminal frame → the connection was lost
+          // Ended with no terminal frame: an error we already saw *is* the end (the turn never
+          // produced anything and the server stopped there); otherwise the connection was lost.
+          return sawError ? "error" : "dropped";
         } catch (err) {
           if (abort.signal.aborted) return "aborted";
           if (typeof (err as { status?: number }).status === "number") throw err; // HTTP error
+          if (sawError) return "error"; // the failure was reported before the socket gave way
           return "dropped"; // network/stream failure mid-turn — the turn runs on server-side
         }
       };

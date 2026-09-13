@@ -345,7 +345,7 @@ def upgrade() -> None:
 
 The baseline is **not** touched: it describes the schema as it stood the day the service adopted
 Alembic, and a fresh install reaches the new column by running the revision like every other
-state does. `core-app`'s revision 0005 (ADR-0140) is the worked example.
+state does. `core-app`'s revisions 0005 (ADR-0140) and 0006 (ADR-0142) are the worked examples.
 
 What this does change is how the gates build a "pre-Alembic" database for their **adoption** arms
 — see the adoption-arm note under *How a baseline is written*: they run `upgrade 0001` and drop

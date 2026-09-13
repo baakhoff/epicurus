@@ -201,11 +201,13 @@ def _render_server_default(default: object) -> str | Literal[False]:
     rendered against SQLite would carry SQLite's `(CURRENT_TIMESTAMP)` into a Postgres
     migration. Both are invisible until the revision runs.
 
-    So the two forms this repo actually uses are rendered explicitly and dialect-neutrally:
-    a literal SQL string as `sa.text(<the string, verbatim>)`, and `func.now()` as itself, so
-    SQLAlchemy compiles it per dialect at DDL time. Anything else raises rather than guessing —
-    a server default that reaches production wrong is exactly the class of defect this whole
-    migration framework exists to remove.
+    So the forms this repo actually uses are rendered explicitly and dialect-neutrally: a
+    literal SQL string as `sa.text(<the string, verbatim>)`, `func.now()` as itself, and the
+    boolean singletons `false()` / `true()` as themselves — all three so SQLAlchemy compiles
+    them per dialect at DDL time (`false()` is `false` on Postgres and `0` on SQLite, which is
+    exactly why it must not be frozen into text here). Anything else raises rather than
+    guessing — a server default that reaches production wrong is exactly the class of defect
+    this whole migration framework exists to remove.
     """
     if not isinstance(default, DefaultClause):
         return False
@@ -215,11 +217,15 @@ def _render_server_default(default: object) -> str | Literal[False]:
         return f"sa.text({arg!r})"
     if isinstance(arg, sql_now):
         return "sa.func.now()"
+    if isinstance(arg, sa.sql.elements.False_):
+        return "sa.false()"
+    if isinstance(arg, sa.sql.elements.True_):
+        return "sa.true()"
     if isinstance(text, str):
         return f"sa.text({text!r})"
     raise MigrateError(
-        f"cannot render server default {arg!r} dialect-neutrally — add it to "
-        f"scripts/migrate.py:_render_server_default, or give the column a literal "
+        f"cannot render server default of type {type(arg).__name__} dialect-neutrally — add "
+        f"it to scripts/migrate.py:_render_server_default, or give the column a literal "
         f"server_default instead"
     )
 

@@ -12,6 +12,18 @@ Fire-and-forget from the lifespan: it never blocks startup, readiness, or a live
 flaky network gets bounded per-model retries with exponential backoff; exhaustion is a loud
 warning, not a crash — the operator can always pull from the Models page instead. Hosted
 model ids (``claude/…``) are skipped: pulling only means anything for the local runtime.
+
+``auto`` seeds an *empty* runtime only (#923, ADR-0118 amendment): the moment ``/api/tags``
+reports any installed model, ``auto`` no-ops, full stop — it never diffs against the
+effective defaults again. Before this fix, "first-boot" was a docstring, not a guard:
+``_run`` diffed the effective defaults against the runtime on *every* start, so a model the
+operator deliberately deleted on the Models page was silently pulled back on the next
+restart — and a restart is routine (an update reconcile, a Compose ``up``, a Kubernetes
+rollout, ADR-0134). The runtime's own tag list is the only state consulted (constraint #2 —
+no marker on local disk, no extra table); a from-scratch install still gets its defaults
+exactly as ADR-0118 intends. An explicit ``LLM_BOOTSTRAP_MODELS`` list keeps today's
+ensure-every-boot semantics unchanged — it is a stated pin, not an inferred default, so it
+may re-pull an operator's named model on every start.
 """
 
 from __future__ import annotations
@@ -47,12 +59,16 @@ def _tagged(model: str) -> str:
 
 
 class ModelBootstrap:
-    """Pull the deployment's default local models into the runtime, once, at startup.
+    """Seed the deployment's default local models into an empty runtime, at startup.
 
-    ``models_spec`` is the raw ``LLM_BOOTSTRAP_MODELS`` setting: ``"auto"`` resolves the
-    effective chat + embedding defaults (the operator's stored prefs, else the env
-    defaults — the same resolution every turn uses); blank disables the bootstrap
-    entirely; anything else is a comma-separated explicit list.
+    ``models_spec`` is the raw ``LLM_BOOTSTRAP_MODELS`` setting: ``"auto"`` seeds a runtime
+    that reports **no** installed models with the effective chat + embedding defaults (the
+    operator's stored prefs, else the env defaults — the same resolution every turn uses),
+    then no-ops on every later start once anything is installed — it does not tell a never-
+    installed model apart from one the operator removed on purpose, so it stops looking the
+    moment the runtime is no longer empty. Blank disables the bootstrap entirely. Anything
+    else is a comma-separated explicit list, ensured on *every* start regardless of what is
+    already installed — an explicit pin is a standing instruction, not a one-time seed.
     """
 
     def __init__(
@@ -94,6 +110,17 @@ class ModelBootstrap:
             log.warning(
                 "local runtime unreachable; skipping model bootstrap",
                 waited_s=self._ready_timeout_s,
+            )
+            return
+
+        if spec.lower() == "auto" and installed:
+            # A provisioned runtime, whatever the operator has done to it since: `auto`
+            # seeds an empty install, never a running one (#923). The count is logged so
+            # the no-op — and the choice behind it — is visible, not silent.
+            log.info(
+                "model bootstrap: runtime already has models — auto seeds an empty "
+                "runtime only, skipping",
+                installed_count=len(installed),
             )
             return
 

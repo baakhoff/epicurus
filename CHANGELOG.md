@@ -12,6 +12,16 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **`auto` model bootstrap now seeds an empty runtime only, instead of every restart** (#923,
+  ADR-0118 amendment) — "first-boot" was a docstring, not a guard: the bootstrap diffed the
+  effective chat + embedding defaults against the local runtime on *every* start, so a model
+  deleted on the Models page was silently pulled back on the next restart — routine on both
+  Compose and Kubernetes (a rollout-restart, ADR-0134). `auto` now no-ops the instant `/api/tags`
+  reports any installed model at all — logged at INFO with the count — and never resolves the
+  defaults again; a from-scratch install still gets its defaults exactly as ADR-0118 intends. An
+  explicit `LLM_BOOTSTRAP_MODELS` list is unchanged: a stated pin, ensured on every start
+  regardless of what else is installed. `core-app` 0.124.2→0.124.3 (PATCH).
+
 - **The portability seam's last two gaps: a bodyless crash, and a remove/apply race** (#918) —
   an unhandled exception inside a module's `/import` route used to escape as Starlette's default
   500 (`text/plain`, no JSON), so a module's own crash reached the operator's report line as

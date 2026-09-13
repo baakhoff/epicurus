@@ -93,8 +93,15 @@ class CoreAppSettings(CoreSettings):
         "http://notes:8080,"
         "http://messaging:8080"
     )
-    # Max tool-calling rounds in one agent turn before it must answer.
+    # Default max tool-calling rounds in one agent turn before it must answer. The operator's
+    # stored pref (``llm_prefs.agent_max_steps``) overrides it per tenant, and since #925 that
+    # pref has no ceiling — a long task is allowed to be long; runaway is caught by behaviour.
     agent_max_steps: int = 4
+    # Per-turn wall-clock budget in seconds — the last backstop behind the repeat and
+    # error-streak stops (#925, ADR-0143). ``0`` (the default) disables it: a deadline can kill
+    # exactly the long turn the lifted bound exists to allow, so it is the operator's opt-in.
+    # Checked between tool rounds; the turn still delivers a partial answer, ``stopped="deadline"``.
+    agent_turn_deadline_s: int = 0
     # ── Inbound messaging / chat bridges (ADR-0058) ─────────────────────────────
     # The core's inbound consumer subscribes ``<tenant>.messaging.inbound``, runs a headless
     # turn per bridge message, and publishes the reply to ``messaging.outbound`` (the

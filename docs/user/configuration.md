@@ -32,6 +32,40 @@ reaches, and memory storage; the full list is in the
 provider **API keys** are managed at runtime through the web UI (and stored in
 OpenBao), not in `.env`.
 
+## How long a turn may run ("Agent cycles")
+
+**Settings → Agent cycles** is how many tool-calling rounds the assistant runs
+before it must answer. There is **no upper limit** — set it as high as the work
+needs. A long task (search → read → read → summarize → write) genuinely wants
+dozens of rounds, and until recently anything above 12 was silently rewritten to
+12, so the turn ran out of rounds and gave you a truncated answer without saying
+why. The trade-off is real but it is yours to make: every extra round costs time
+and tokens. Leave the field blank to use the `AGENT_MAX_STEPS` default (`4`);
+the minimum is 1.
+
+A high bound is safe because a runaway turn is caught by **what the model does**,
+not by the number:
+
+- the turn ends if the model issues the **same tool call with the same arguments
+  three times in a row** (the repeat is never re-executed, so a repeated write
+  can't double-apply);
+- it ends after **three tool errors in a row** — any success resets the count;
+- optionally, it ends when a **wall-clock budget** runs out.
+
+In every case the turn still gives you an answer — "here's what I found / what
+failed" — rather than stopping silently.
+
+The wall-clock budget is **off by default**, because a deadline can cut short
+exactly the long turn a high round bound exists to allow. Turn it on by setting
+`AGENT_TURN_DEADLINE_S` in `.env` to a number of seconds (say `600` for ten
+minutes) and restarting the core. It is checked between rounds, so a turn already
+inside a slow tool call finishes that call first; when it fires, the assistant
+answers with what it has and says that it stopped early.
+
+While a turn is running, the activity indicator above the reply names the round
+it is on — "Working… · round 7 of 40" — so a long turn reads as progress rather
+than a hang.
+
 ## Host bind address & ports
 
 Published container ports bind to `BIND_ADDRESS`, which defaults to

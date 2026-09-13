@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, cast
 from urllib.parse import unquote
 
@@ -14,9 +15,12 @@ from structlog.testing import capture_logs
 from epicurus_core import LIST_CAP, Attachment, EntityRef, draft_review, tool_envelope
 from epicurus_core_app.agent.agent import (
     _ANSWER_NUDGE,
+    _DEADLINE_FINAL_NOTE,
     _EMPTY_ANSWER_FALLBACK,
     _MAX_CONSECUTIVE_TOOL_ERRORS,
     _REPEAT_NUDGE,
+    _REPEAT_STOP_RUN,
+    _STOPPED_DEADLINE,
     _STOPPED_REPEAT_CALL,
     _STOPPED_TOOL_ERRORS,
     _STOPPED_UNSUPPORTED_MEDIA,
@@ -1555,15 +1559,43 @@ def test_canonical_calls_is_order_free_but_arg_sensitive() -> None:
 
 
 def test_loop_guard_repeat_verdict_new_then_nudge_then_stop() -> None:
+    assert _REPEAT_STOP_RUN == 3
     guard = _LoopGuard()
     same = [_tool_call("echo", "{}")]
     assert guard.repeat_verdict(same) == "new"  # first sight
-    assert guard.repeat_verdict(same) == "nudge"  # immediate repeat → one-shot nudge
-    assert guard.repeat_verdict(same) == "stop"  # a further repeat → stop
-    # The nudge is one-shot per turn: a fresh distinct call is "new", but its own repeat now stops
-    # straight away (the single nudge is already spent) — matching _ANSWER_NUDGE's one-shot rule.
-    assert guard.repeat_verdict([_tool_call("echo", '{"x": 1}')]) == "new"
-    assert guard.repeat_verdict([_tool_call("echo", '{"x": 1}')]) == "stop"
+    assert guard.repeat_verdict(same) == "nudge"  # immediate repeat → nudge
+    assert guard.repeat_verdict(same) == "stop"  # K identical in a row → stop
+
+
+def test_loop_guard_repeat_run_is_counted_per_run_not_once_per_turn() -> None:
+    """#925: every fresh run of identical calls gets the same K-in-a-row allowance.
+
+    The old guard spent a single per-turn nudge flag, so *any* later repeated call stopped the
+    turn on its second occurrence. With no ceiling on the round bound, the repeat stop is one of
+    the things actually bounding a turn, so it has to mean one stateable thing — K identical
+    calls in a row — rather than "two, if the turn already nudged once".
+    """
+    guard = _LoopGuard()
+    first = [_tool_call("echo", "{}")]
+    second = [_tool_call("echo", '{"x": 1}')]
+    assert guard.repeat_verdict(first) == "new"
+    assert guard.repeat_verdict(first) == "nudge"
+    # A distinct call breaks the run; its own repeat starts counting again from one.
+    assert guard.repeat_verdict(second) == "new"
+    assert guard.repeat_verdict(second) == "nudge"  # was "stop" before #925
+    assert guard.repeat_verdict(second) == "stop"
+
+
+def test_loop_guard_deadline_is_off_unless_a_budget_is_set() -> None:
+    """``0`` — the shipped default — must never stop a turn, however long it runs (#925)."""
+    assert _LoopGuard().past_deadline() is False
+    assert _LoopGuard(deadline_s=0.0).past_deadline() is False
+    assert _LoopGuard(deadline_s=-1.0).past_deadline() is False
+    # A budget already spent by the time it is asked: the guard reports it, nothing else.
+    spent = _LoopGuard(deadline_s=0.001)
+    time.sleep(0.01)
+    assert spent.past_deadline() is True
+    assert _LoopGuard(deadline_s=600).past_deadline() is False
 
 
 def test_loop_guard_error_streak_counts_consecutive_and_resets() -> None:
@@ -1618,6 +1650,170 @@ async def test_distinct_args_repeats_are_not_flagged() -> None:
     assert turn.content == "all pages read"
     assert mcp.called == [("echo", {"page": 1}), ("echo", {"page": 2})]  # both ran
     assert not any(m.role == "user" and m.content == _REPEAT_NUDGE for c in gw.calls for m in c)
+
+
+@pytest.mark.timeout(10)
+async def test_a_second_repeated_call_still_gets_its_own_allowance() -> None:
+    """#925 end-to-end: the repeat stop is "K identical in a row", not "two after the nudge".
+
+    Two identical ``page 1`` calls (nudged), a distinct ``page 2``, then a repeat of it. Before
+    #925 that last one stopped the turn — the single per-turn nudge was already spent; now it
+    earns its own nudge and the model is allowed to recover, which is what makes the guard safe
+    to lean on with no ceiling above it.
+    """
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"page": 1}')]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"page": 1}')]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"page": 2}')]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"page": 2}')]),
+            ChatResult(model="m", content="both pages read"),
+        ]
+    )
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=40).run(  # type: ignore[arg-type]
+        [ChatMessage(role="user", content="go")]
+    )
+    assert turn.stopped == "completed"
+    assert turn.content == "both pages read"
+    # Each distinct call ran once; neither repeat was re-executed (a repeated write would
+    # double-apply), and the turn was never cut short.
+    assert mcp.called == [("echo", {"page": 1}), ("echo", {"page": 2})]
+
+
+@pytest.mark.timeout(10)
+async def test_a_long_bound_runs_to_it_and_the_turn_reports_the_rounds() -> None:
+    """A high bound is honoured — the old 1-12 ceiling would have cut this at 12 (#925).
+
+    Twenty distinct, useful calls in a row: no guard fires, the loop uses every round it was
+    given, and the turn reports ``rounds``/``max_rounds`` so a reader can see the bound was the
+    binding constraint rather than guessing why it stopped.
+    """
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", f'{{"n": {n}}}')])
+            for n in range(20)
+        ]
+        + [ChatResult(model="m", content="read all twenty")]
+    )
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=20).run(  # type: ignore[arg-type]
+        [ChatMessage(role="user", content="read everything")]
+    )
+    assert turn.stopped == "max_steps"  # every round used, then the single tool-less final round
+    assert turn.content == "read all twenty"
+    assert len(mcp.called) == 20
+    assert (turn.rounds, turn.max_rounds) == (20, 20)
+
+
+class _SlowMcp(_FakeMcp):
+    """A tool that takes real time, so a short wall-clock budget can actually expire."""
+
+    def __init__(self, *args: Any, delay_s: float = 0.05, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._delay_s = delay_s
+
+    async def call(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        url: str,
+        *,
+        tenant: str,
+        session_id: str | None = None,
+    ) -> str:
+        await asyncio.sleep(self._delay_s)
+        self.called.append((name, arguments))
+        return "slow-output"
+
+
+class _NeverFinishesGateway(_FakeGateway):
+    """A model that would keep calling tools forever — only the final tool-less round answers.
+
+    Scripted by *shape* rather than by count, deliberately: how many rounds fit inside a wall-clock
+    budget depends on the machine, so a fixed script would either under-run (the loop asking for a
+    result that isn't there) or pin the test to this host's speed.
+    """
+
+    def __init__(self, answer: str) -> None:
+        super().__init__([])
+        self._answer = answer
+        self._n = 0
+
+    async def chat(self, messages: list[ChatMessage], **kwargs: Any) -> ChatResult:
+        self.calls.append(list(messages))
+        self.tools_seen.append(kwargs.get("tools"))
+        self.automation_ids.append(kwargs.get("automation_id"))
+        if kwargs.get("tools") is None:  # the forced final round — no tools offered
+            return ChatResult(model="m", content=self._answer)
+        self._n += 1
+        return ChatResult(
+            model="m", content="", tool_calls=[_tool_call("echo", f'{{"n": {self._n}}}')]
+        )
+
+
+@pytest.mark.timeout(10)
+async def test_the_deadline_ends_a_slow_turn_with_a_partial_answer_that_says_so() -> None:
+    """The wall-clock backstop: a turn whose tools are slow stops, and the answer explains why."""
+    gw = _NeverFinishesGateway("here is what I got before time ran out")
+    mcp = _SlowMcp(specs=[_echo_spec()], route={"echo": "u"}, delay_s=0.05)
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+        max_steps=100,
+        turn_deadline_s=0.08,
+    )
+    turn = await agent.run([ChatMessage(role="user", content="go")])
+    assert turn.stopped == _STOPPED_DEADLINE
+    # Stopped well short of the bound — the deadline, not max_steps, is what ended it.
+    assert 0 < turn.rounds < 100
+    assert turn.max_rounds == 100
+    # The partial answer still ships, and the final round was told to say the clock ran out, so
+    # the user is never left with a silently truncated reply (#925).
+    assert turn.content == "here is what I got before time ran out"
+    assert any(m.role == "user" and m.content == _DEADLINE_FINAL_NOTE for m in gw.calls[-1])
+
+
+@pytest.mark.timeout(10)
+async def test_the_deadline_never_cuts_the_first_round() -> None:
+    """A budget always buys at least one round, however small it is — never a zero-work turn."""
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", "{}")]),
+            ChatResult(model="m", content="one round's worth"),
+        ]
+    )
+    mcp = _SlowMcp(specs=[_echo_spec()], route={"echo": "u"}, delay_s=0.02)
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+        max_steps=5,
+        turn_deadline_s=0.001,
+    )
+    turn = await agent.run([ChatMessage(role="user", content="go")])
+    assert turn.stopped == _STOPPED_DEADLINE
+    assert turn.rounds == 1
+    assert mcp.called == [("echo", {})]  # the round it bought actually ran
+    assert turn.content == "one round's worth"
+
+
+@pytest.mark.timeout(10)
+async def test_no_deadline_by_default_however_long_the_turn_takes() -> None:
+    """The shipped default (``0``) must not stop anything — the opt-in is the whole point."""
+    gw = _FakeGateway(
+        [
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"n": 1}')]),
+            ChatResult(model="m", content="", tool_calls=[_tool_call("echo", '{"n": 2}')]),
+            ChatResult(model="m", content="took its time"),
+        ]
+    )
+    mcp = _SlowMcp(specs=[_echo_spec()], route={"echo": "u"}, delay_s=0.05)
+    turn = await Agent(gateway=gw, mcp=mcp, max_steps=6).run(  # type: ignore[arg-type]
+        [ChatMessage(role="user", content="go")]
+    )
+    assert turn.stopped == "completed"
+    assert turn.content == "took its time"
+    assert len(mcp.called) == 2
 
 
 class _AlwaysFailMcp(_FakeMcp):

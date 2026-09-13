@@ -364,26 +364,35 @@ async def test_prefs_context_window_no_store_returns_503() -> None:
     assert resp.status_code == 503
 
 
-async def test_agent_max_steps_route_clamps_and_round_trips() -> None:
+@pytest.mark.parametrize("steps", [1, 12, 40, 500])
+async def test_agent_max_steps_route_stores_any_bound_unchanged(steps: int) -> None:
+    """No ceiling since #925 — what the operator asks for is what is stored and read back.
+
+    The 1-12 clamp used to rewrite a 40 to 12 *silently*, which is the whole defect: a long
+    task ran out of rounds and nothing said why. 12 stays in the list so the old ceiling is
+    pinned as an ordinary value, not a boundary.
+    """
     prefs = await _fresh_prefs()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
     ) as client:
-        # Over the ceiling → clamped to 12.
-        put = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": 99})
+        put = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": steps})
         assert put.status_code == 200
-        assert put.json()["value"] == 12
+        assert put.json()["value"] == steps
         got = await client.get("/platform/v1/llm/prefs")
-    assert got.json()["global_agent_max_steps"] == 12
+    assert got.json()["global_agent_max_steps"] == steps
 
 
 async def test_agent_max_steps_floor_and_clear() -> None:
+    """The floor survives the lifted ceiling: 0 and negatives still mean "at least one round"."""
     prefs = await _fresh_prefs()
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=_app(prefs=prefs)), base_url="http://test"
     ) as client:
         floored = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": 0})
         assert floored.json()["value"] == 1  # clamped up to the floor
+        negative = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": -5})
+        assert negative.json()["value"] == 1
         cleared = await client.put("/platform/v1/llm/prefs/agent-max-steps", json={"value": None})
         assert cleared.json()["value"] is None
         got = await client.get("/platform/v1/llm/prefs")

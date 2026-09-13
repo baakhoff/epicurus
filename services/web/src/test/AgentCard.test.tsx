@@ -67,4 +67,28 @@ describe("AgentCard", () => {
     fireEvent.blur(input);
     await waitFor(() => expect(mockSetAgentMaxSteps).toHaveBeenCalledWith(null));
   });
+
+  it("has no upper bound — the operator picks the number (#925)", async () => {
+    mockLlmPrefs.mockResolvedValue(PREFS(null));
+    render(<AgentCard />, { wrapper });
+    const input = (await screen.findByLabelText("Agent cycles")) as HTMLInputElement;
+    // The floor stays (a bound of zero could never answer); the ceiling is gone, and with it the
+    // browser-side validation that used to reject a 40 before it was ever sent.
+    expect(input.getAttribute("min")).toBe("1");
+    expect(input.getAttribute("max")).toBeNull();
+    fireEvent.change(input, { target: { value: "40" } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(mockSetAgentMaxSteps).toHaveBeenCalledWith(40));
+  });
+
+  it("names the trade-off instead of a range", async () => {
+    mockLlmPrefs.mockResolvedValue(PREFS(null));
+    render(<AgentCard />, { wrapper });
+    await screen.findByLabelText("Agent cycles");
+    // The old copy promised "the range is 1–12" — a promise the route no longer keeps. What the
+    // operator needs instead is what a bigger number costs, and what stops a runaway turn.
+    expect(document.body.textContent).not.toMatch(/1–12|1-12/);
+    expect(document.body.textContent).toMatch(/costs time and tokens/);
+    expect(document.body.textContent).toMatch(/repeats the same tool call/);
+  });
 });

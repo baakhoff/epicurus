@@ -461,6 +461,11 @@ export const AgentTurn = z.object({
   tools_used: z.array(z.string()),
   stopped: z.string(),
   entity_refs: z.array(EntityRef).default([]),
+  // How many tool rounds the turn used, and the bound in force for it (#925). The operator's
+  // bound has no ceiling any more, so "7 of 40" is what tells a reader whether a long turn was
+  // working or whether the bound is what cut it off. Nullish: an older core omits them.
+  rounds: z.number().nullish(),
+  max_rounds: z.number().nullish(),
 });
 export type AgentTurn = z.infer<typeof AgentTurn>;
 
@@ -555,6 +560,12 @@ export const AgentEvent = z.object({
   // to. Ephemeral — a preview reads an unfinished call, so it is never persisted and the `tool`
   // frame's `document` above overwrites whatever it drew.
   preview: DocumentPreview.nullish(),
+  // Present on a `tool` event (#925): which tool round the call belongs to, and the round bound
+  // in force for the turn. The bound has no ceiling since #925, so a turn can legitimately run
+  // for minutes — the activity indicator reads these back as "round 7 of 40" so a long turn shows
+  // as progress rather than a hang. Additive, so a stale cached PWA renders exactly as before.
+  round: z.number().nullish(),
+  max_rounds: z.number().nullish(),
 });
 export type AgentEvent = z.infer<typeof AgentEvent>;
 

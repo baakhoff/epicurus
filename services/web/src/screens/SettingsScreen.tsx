@@ -340,7 +340,14 @@ export function TimezoneCard() {
   );
 }
 
-/** Agent cycles — how many tool-calling rounds a turn runs before it must answer (#297). */
+/** Agent cycles — how many tool-calling rounds a turn runs before it must answer (#297).
+ *
+ *  There is no ceiling on the number since #925: the old 1–12 range silently rewrote anything
+ *  larger, so a long task (search → read → read → summarize → write) ran out of rounds with no
+ *  way to give it more. The copy therefore names the *trade-off* — time and tokens — rather than
+ *  a range, because that is the real thing the operator is choosing between. What stops a
+ *  confused model is the loop's behaviour guards, not this number.
+ */
 export function AgentCard() {
   const queryClient = useQueryClient();
   const prefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
@@ -354,9 +361,12 @@ export function AgentCard() {
     <Card>
       <h3 className="mb-2 font-serif text-base text-ink">Agent cycles</h3>
       <p className="mb-3 text-sm text-ink-dim">
-        How many tool-calling rounds the assistant runs before it must answer. Higher lets it
-        chain more steps (search → read → summarize) but a turn takes longer; lower keeps
-        replies snappy. Leave blank for the default (4); the range is 1–12.
+        How many tool-calling rounds the assistant runs before it must answer. Set it as high as
+        the work needs — a long task (search → read → read → summarize → write) wants dozens —
+        knowing that every extra round costs time and tokens; lower keeps replies snappy. A
+        confused model is stopped by behaviour, not by this number: a turn ends early if it
+        repeats the same tool call or hits a run of tool errors. Minimum 1; leave blank for the
+        default (4).
       </p>
       {prefs.isLoading ? (
         <Spinner />
@@ -364,7 +374,6 @@ export function AgentCard() {
         <div className="flex items-center gap-2">
           <NumberInput
             min={1}
-            max={12}
             step={1}
             key={current ?? "default"}
             defaultValue={current ?? ""}

@@ -66,6 +66,30 @@ describe("ProcessTimeline (#121)", () => {
     expect(screen.queryByText("secret reasoning")).not.toBeInTheDocument();
   });
 
+  it("names the round a live turn is on, and its bound (#925)", () => {
+    // With no ceiling on the operator's bound a turn can honestly run for minutes, so the
+    // indicator has to read as progress rather than as an unexplained spinner.
+    render(<ProcessTimeline items={ITEMS} progress={{ round: 7, maxRounds: 40 }} />);
+    expect(screen.getByRole("button", { name: "Working… · round 7 of 40" })).toBeInTheDocument();
+  });
+
+  it("falls back to the plain working label with no round to report", () => {
+    // A reopened past turn (and an older core that sends no round) must look exactly as before.
+    render(<ProcessTimeline items={ITEMS} progress={null} />);
+    expect(screen.getByRole("button", { name: "Working…" })).toBeInTheDocument();
+  });
+
+  it("keeps the step-count summary once nothing is running", () => {
+    // The round belongs to a *running* turn; a finished one is summarized by what it did.
+    render(
+      <ProcessTimeline
+        items={[{ kind: "tool", run: { tool: "a.b", status: "ok" } }]}
+        progress={{ round: 7, maxRounds: 40 }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /1 step/i })).toBeInTheDocument();
+  });
+
   it("renders nothing for an empty timeline", () => {
     const { container } = render(<ProcessTimeline items={[]} />);
     expect(container).toBeEmptyDOMElement();

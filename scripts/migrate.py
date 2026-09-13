@@ -597,8 +597,8 @@ async def _build_pre_alembic(service: Service, url: str, *, drop_reconciled: boo
     `create_all` builds the schema at **head** instead, and this arm stops testing adoption —
     it asserts that `op.add_column` is idempotent, which ADR-0138 explicitly says a
     post-baseline revision need not be, since after adoption the database's state is known
-    exactly. `agent_messages.stopped` (#944) was the first such column, and the first to fail
-    here.
+    exactly. `saved_models`' three capability columns (#944, #947) were the first, and the first
+    to fail here.
 
     With *drop_reconciled*, the columns the reconcile was responsible for are dropped again,
     leaving the database in the state a deployment is in when it last booted before those

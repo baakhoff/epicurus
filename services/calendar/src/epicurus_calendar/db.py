@@ -1,9 +1,10 @@
 """Postgres schema for the local calendar provider — tenant-scoped event store.
 
-The ``calendar_events`` table is owned exclusively by this module.  It is
-created lazily on startup (``LocalEventStore.init``).  Columns are prefixed
-``calendar_`` to avoid collisions with other modules sharing the same Postgres
-database.
+The ``calendar_events`` table is owned exclusively by this module. The deployed shape comes
+from the revisions in :mod:`epicurus_calendar.migrations` (#834, #928, ADR-XXXX). Change a
+column here and you owe a revision — ``uv run python scripts/migrate.py check calendar`` says
+so in a second, and CI's `migrations` gate fails the PR if you skip it. Columns are prefixed
+``calendar_`` to avoid collisions with other modules sharing the same Postgres database.
 """
 
 from __future__ import annotations
@@ -21,26 +22,14 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     delete,
+    false,
     func,
     select,
 )
-from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from epicurus_calendar.models import Attendee, Event
-from epicurus_core.db import ensure_columns
-
-# Columns added after the table's first release; reconciled in place at startup by
-# ``LocalEventStore._ensure_columns`` (the store has no migration framework).
-_ADDED_COLUMNS = (
-    "all_day",
-    "recurrence",
-    "recurring_event_id",
-    "excluded",
-    "attendees",
-    "timezone",
-)
 
 # Separates a recurring series' event id from an occurrence's original-start suffix in an
 # instance id, e.g. ``<series-uuid>_20260710T150000Z`` — the same convention Google's own
@@ -110,17 +99,22 @@ class _StoredEvent(_Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     location: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # All-day (date-only) event — ``start_dt``/``end_dt`` are UTC-midnight day boundaries
-    # with ``end_dt`` exclusive (see ``Event.all_day``). Added after first release, so it
-    # is reconciled in place by ``_ensure_columns``; existing rows read NULL → False.
-    all_day: Mapped[bool] = mapped_column(Boolean, default=False)
+    # with ``end_dt`` exclusive (see ``Event.all_day``). Added after the table's first
+    # release; a deployment that predates it was reconciled by the old additive
+    # ``ensure_columns`` helper, which — having no server default to backfill with — added
+    # it nullable, so an upgraded deployment could hold a real ``NULL`` here (existing rows
+    # coerced to ``False`` in ``_row_to_event``). Migration 0002 backfills those rows and
+    # adds the server default below, matching what has always been true at this layer.
+    all_day: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
     # RFC 5545 RRULE string (no ``"RRULE:"`` prefix) on a series master; NULL otherwise (#432).
     recurrence: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The master's event_id, on an exception row only; NULL for a plain event or a master
     # itself. Indexed — every exception lookup for a series filters on this (#432).
     recurring_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # Tombstones a single occurrence (an exception row with excluded=True is a deleted
-    # instance, never returned) — meaningless outside an exception row (#432).
-    excluded: Mapped[bool] = mapped_column(Boolean, default=False)
+    # instance, never returned) — meaningless outside an exception row (#432). Same
+    # nullable-on-adoption history as ``all_day`` above; 0002 backfills and adds the default.
+    excluded: Mapped[bool] = mapped_column(Boolean, server_default=false(), default=False)
     # JSON-encoded list of attendee dicts (see Attendee); NULL/blank means no guests (#432).
     attendees: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The IANA zone (e.g. "America/New_York") a series master's RRULE expands in, on a
@@ -160,21 +154,20 @@ class LocalEventStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
-        """Create the ``calendar_events`` table, then add any later-added columns."""
+        """Build this store's table straight from the models — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment in :mod:`epicurus_calendar.migrations`, applied once at startup by
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-XXXX) — which is
+        also what retired the additive reconcile this method used to run after ``create_all``
+        (ADR-0067): the baseline revision absorbed it.
+
+        It survives for the tests, where a fresh SQLite file per test is cheaper to build from
+        the models than to migrate. That is only honest because the `migrations` CI gate
+        proves the models and the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_Base.metadata.create_all)
-            await conn.run_sync(self._ensure_columns)
-
-    @staticmethod
-    def _ensure_columns(sync_conn: Connection) -> None:
-        """Reconcile columns added after first release via the shared additive helper (#249).
-
-        ``all_day`` postdates the table's first release; a database provisioned before then
-        lacks it and every local event read 500s on Postgres until it is added in place. It
-        has no server default, so it is added nullable and existing rows read NULL, coerced
-        to ``False`` in ``_row_to_event``. See :func:`epicurus_core.db.ensure_columns`.
-        """
-        ensure_columns(sync_conn, _StoredEvent.__table__, _ADDED_COLUMNS)
 
     async def list_events(self, *, tenant: str, start: datetime, end: datetime) -> list[Event]:
         """Return **plain** (non-recurring) events for *tenant* overlapping ``[start, end)``.

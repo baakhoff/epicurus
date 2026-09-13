@@ -55,9 +55,11 @@ def _categories_off(provider: MailProvider) -> None:
 def _client_with_provider(provider: MailProvider) -> TestClient:
     """A TestClient over *provider* with a mocked event bus + in-memory cache (ADR-0087 tests).
 
-    The cache path (the plain landing view) needs the schema, which ``create_app`` builds in
-    its lifespan — enter the client as a context manager (``with``) for those tests so
-    ``MailCache.init`` runs; the live/thread/send routes work without it.
+    The cache path (the plain landing view) needs the schema, which the lifespan now migrates
+    into place (``run_migrations``, #834, #932) rather than building via ``MailCache.init`` —
+    enter the client as a context manager (``with``) for those tests so that runs; the
+    live/thread/send routes work without it. ``TestClient`` runs the lifespan; a bare
+    ``ASGITransport`` would not.
 
     The background reconcile is switched **off** here (``MAIL_POLL_INTERVAL_S=0``, #796): these
     tests assert exact provider call counts for one page read, and a poll tick racing the

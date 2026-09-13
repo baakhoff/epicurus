@@ -160,7 +160,17 @@ anywhere and no revision ever skipped.
 
 **Only the baseline is written this way.** Every revision after it is ordinary Alembic —
 `op.add_column`, `op.alter_column`, an `UPDATE` for a backfill — because after adoption the
-database's state is known exactly.
+database's state is known exactly. In particular a later revision need **not** be idempotent, and
+should not pretend to be: a guard around `op.add_column` hides a real disagreement between the
+revisions and the database rather than surfacing it.
+
+That has one consequence for the **adoption arms** of the gates. "A pre-Alembic database" is the
+schema as it stood *the day the service adopted Alembic* — which is what the baseline describes,
+and what both the `migrations` job and the per-service unit tests build by running `upgrade 0001`
+and then dropping the version table. `Base.metadata.create_all` used to build it, and was correct
+for exactly as long as the baseline was also head; the first revision that adds a column makes
+`create_all` build the schema at **head**, and an adoption arm over that asserts only that
+`op.add_column` is idempotent. `saved_models`' capability columns (#944, #947) were the first.
 
 What the reconcile arm deliberately does *not* do: add a constraint, or alter a column that is
 already present. A table that exists but carries no unique constraint is beyond an additive
@@ -323,35 +333,26 @@ have been 53 chances to get a value wrong.
 
 ## Adding a column after adoption
 
-The first column added to an already-migrated service exposes a wrinkle in "every revision after
-the baseline is ordinary Alembic": **the gate's adoption arm builds its database with
-`create_all` from the *current* models**, which already carry the new column, and then runs
-`upgrade head` over it. A bare `op.add_column` is correct on a real deployment (whose table
-predates the PR) and a duplicate-column failure on that arm.
-
-So a column-adding revision adds only what is absent:
+The first column added to an already-migrated service is **ordinary Alembic** — a bare
+`op.add_column`, no guard. After adoption the database's state is known exactly, so a revision
+that tolerates the column already being there hides a real disagreement between the revisions and
+the database rather than surfacing it.
 
 ```python
 def upgrade() -> None:
-    present = {c["name"] for c in sa.inspect(op.get_bind()).get_columns("saved_models")}
-    if "tools_override" not in present:
-        op.add_column(
-            "saved_models", sa.Column("tools_override", sa.String(length=8), nullable=True)
-        )
+    op.add_column(
+        "saved_models", sa.Column("tools_override", sa.String(length=8), nullable=True)
+    )
 ```
 
-and the baseline is **regenerated** in the same PR so a fresh install creates the column outright
-(see the regeneration note in the backfill rule above — it applies to every model edit, not only a
-`server_default` one). The three states then line up: *fresh* → the baseline creates it and the
-revision finds nothing to do; *adopted* → `create_all` made it and the revision finds nothing to
-do; *managed* → the revision adds it, which is the whole point. `core-app`'s revision 0005
-(ADR-0140) is the worked example.
+The baseline is **not** touched: it describes the schema as it stood the day the service adopted
+Alembic, and a fresh install reaches the new column by running the revision like every other
+state does. `core-app`'s revision 0005 (ADR-0140) is the worked example.
 
-The generator writes a baseline **once** and refuses to overwrite a populated `versions/`, so
-regenerating means moving the later revisions aside, deleting `0001_baseline.py`, running
-`scripts/migrate.py baseline <service>`, putting them back — and then **reading the diff**, which
-should be exactly the columns you added. Anything else in it is a model change nobody wrote a
-revision for.
+What this does change is how the gates build a "pre-Alembic" database for their **adoption** arms
+— see the adoption-arm note under *How a baseline is written*: they run `upgrade 0001` and drop
+the version table, because `Base.metadata.create_all` builds the models as they stand *today*,
+which from the first post-baseline column onwards is the schema at head, not at adoption.
 
 ## SQLite, Postgres, and what each gate proves
 
@@ -371,7 +372,7 @@ Production is Postgres. The unit tests are SQLite, and there are two places that
 | Gate | What it proves |
 | --- | --- |
 | `task migrate:check -- <service>` (local, ~1s) | Upgrade from empty on SQLite, then `alembic check`: the models and the revisions agree. |
-| **`migrations`** (CI, Postgres 17, ~2 min) | The same on real Postgres, plus: a second run is a no-op; a `create_all`-built database is adopted and still matches its models; and a *drifted* pre-Alembic database — the columns the reconcile was responsible for stripped out first, the #214 / #218 state — is repaired by the baseline. Each arm runs on a throwaway database of its own. |
+| **`migrations`** (CI, Postgres 17, ~2 min) | The same on real Postgres, plus: a second run is a no-op; a database built at the **baseline** (the pre-Alembic state) is adopted, reaches head and still matches its models; and a *drifted* pre-Alembic database — the columns the reconcile was responsible for stripped out first, the #214 / #218 state — is repaired by the baseline. Each arm runs on a throwaway database of its own. |
 | `runtime-smoke` / `k8s-smoke` (CI) | The fresh-install path for real: both boot the stack from an empty Postgres, so a baseline that does not apply fails them. |
 
 The `migrations` job discovers services by glob (`services/*/src/*/migrations/env.py`) inside

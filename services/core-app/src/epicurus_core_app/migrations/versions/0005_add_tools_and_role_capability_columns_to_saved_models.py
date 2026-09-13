@@ -8,14 +8,12 @@ existing ``vision_override``) and ``tools_learned`` (what the gateway learned fr
 that refused a tool list). All nullable with no server default, so there is nothing to backfill
 — NULL *is* the "auto" case, exactly as it is for ``vision_override``.
 
-**Why the guard, when ADR-0138 says a revision after the baseline is ordinary Alembic.** The
-`migrations` gate's *adoption* arm builds a database with ``create_all`` from the **current**
-models — which already carry these columns — and then runs ``upgrade head`` over it. A bare
-``op.add_column`` is correct on a real deployment (whose ``saved_models`` predates this PR) and
-a duplicate-column failure on that arm. Adding the column only when it is absent is right in
-both, and on a fresh install the regenerated baseline creates it and this revision finds
-nothing to do. This is the first column added to core-app after adoption, so it is also the
-first time the case arises; the rule is written up in `docs/developer/migrations.md`.
+Ordinary Alembic, which is what ADR-0138 says a revision after the baseline is: the baseline
+describes the schema as it stood the day core-app adopted Alembic, and every state after that is
+known exactly, so ``op.add_column`` needs no guard — one would only hide a real disagreement
+between the revisions and the database. The adoption arms of the gates build their "pre-Alembic"
+database by running the baseline rather than ``create_all``, for the same reason
+(`docs/developer/migrations.md`).
 """
 
 from __future__ import annotations
@@ -36,22 +34,13 @@ _TABLE = "saved_models"
 _COLUMNS = (("tools_override", 8), ("role_override", 16), ("tools_learned", 8))
 
 
-def _present() -> set[str]:
-    """The column names ``saved_models`` already carries."""
-    return {column["name"] for column in sa.inspect(op.get_bind()).get_columns(_TABLE)}
-
-
 def upgrade() -> None:
-    """Add the tools / role capability columns that are not already there."""
-    present = _present()
+    """Add the tools / role capability columns."""
     for name, length in _COLUMNS:
-        if name not in present:
-            op.add_column(_TABLE, sa.Column(name, sa.String(length=length), nullable=True))
+        op.add_column(_TABLE, sa.Column(name, sa.String(length=length), nullable=True))
 
 
 def downgrade() -> None:
     """Drop them again (the capability record reverts to vision + context length)."""
-    present = _present()
     for name, _ in reversed(_COLUMNS):
-        if name in present:
-            op.drop_column(_TABLE, name)
+        op.drop_column(_TABLE, name)

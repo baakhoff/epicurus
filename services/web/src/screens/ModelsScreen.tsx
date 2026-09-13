@@ -1752,7 +1752,8 @@ function keyStateHint(provider: ProviderInfo): string | null {
  * never the static `HOSTED_PROVIDER_ALIASES` — a provider the core doesn't know can't be
  * picked. The alias is prepended from the select, so OpenRouter's two-slash ids
  * (`openrouter/anthropic/claude-sonnet-4.6`) are entered as their model part only and never
- * mis-split by hand.
+ * mis-split by hand — and a pasted *full* id has that one leading `<alias>/` stripped back off
+ * rather than doubled.
  */
 function AddHostedModel() {
   const queryClient = useQueryClient();
@@ -1776,11 +1777,20 @@ function AddHostedModel() {
   });
 
   const trimmedId = modelId.trim();
+  // A pasted *full* id already carries the alias the select is about to prepend, and pasting is
+  // the natural gesture — every other surface (the chat picker, the docs until #922) takes the
+  // whole `alias/model`. Strip exactly one leading `<alias>/`, and only the selected alias, so
+  // `openrouter` + `gpt/oss-120b` keeps both of its segments. Without this the doubled id is
+  // saved: the core's `is_hosted` sees a known alias and a non-empty rest, returns 200, and the
+  // junk row only fails later, at inference.
+  const modelPart = trimmedId.startsWith(`${effectiveAlias}/`)
+    ? trimmedId.slice(effectiveAlias.length + 1).trim()
+    : trimmedId;
   // Mirrors the core's `is_hosted`: a known alias plus a non-empty model part. The alias is
   // fixed by the select (only aliases the core reports appear there), so the only thing left to
   // validate client-side is that the model part isn't blank — the server's 400 still covers
   // anything this misses, and is surfaced verbatim below rather than swallowed.
-  const canAdd = effectiveAlias !== "" && trimmedId !== "";
+  const canAdd = effectiveAlias !== "" && modelPart !== "";
 
   return (
     <div className="mt-3 border-t border-edge pt-3">
@@ -1820,7 +1830,7 @@ function AddHostedModel() {
               variant="outline"
               busy={add.isPending}
               disabled={!canAdd || add.isPending}
-              onClick={() => canAdd && add.mutate(`${effectiveAlias}/${trimmedId}`)}
+              onClick={() => canAdd && add.mutate(`${effectiveAlias}/${modelPart}`)}
             >
               <Plus size={14} />
               Add

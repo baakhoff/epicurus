@@ -198,6 +198,68 @@ describe("SavedHostedModels — add a hosted model (#922)", () => {
     );
   });
 
+  it("does not double the alias when the operator pastes a full model id", async () => {
+    // Pasting the whole `alias/model` is the natural gesture — the chat picker takes it, and so
+    // did the docs until #922. The core would accept `openrouter/openrouter/anthropic/…` (a
+    // known alias plus a non-empty rest is all `is_hosted` checks), so the junk row would save
+    // and only fail later, at inference.
+    mockProviders.mockResolvedValue([
+      {
+        alias: "openrouter",
+        local: false,
+        configured: true,
+        needs_base_url: false,
+        key_state: "present",
+      },
+    ]);
+    render(<SavedHostedModels />, { wrapper });
+    fireEvent.change(await screen.findByRole("textbox", { name: "Model id" }), {
+      target: { value: "openrouter/anthropic/claude-sonnet-4.6" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() =>
+      expect(mockAddSavedModel).toHaveBeenCalledWith("openrouter/anthropic/claude-sonnet-4.6"),
+    );
+  });
+
+  it("strips only the selected alias, so a model part that looks like one survives", async () => {
+    // `gpt/oss-120b` under OpenRouter starts with another provider's alias. Only the alias the
+    // select is about to prepend may be stripped, or the id loses a segment.
+    mockProviders.mockResolvedValue([
+      {
+        alias: "openrouter",
+        local: false,
+        configured: true,
+        needs_base_url: false,
+        key_state: "present",
+      },
+    ]);
+    render(<SavedHostedModels />, { wrapper });
+    fireEvent.change(await screen.findByRole("textbox", { name: "Model id" }), {
+      target: { value: "gpt/oss-120b" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => expect(mockAddSavedModel).toHaveBeenCalledWith("openrouter/gpt/oss-120b"));
+  });
+
+  it("keeps Add disabled when the paste is nothing but the alias", async () => {
+    mockProviders.mockResolvedValue([
+      {
+        alias: "openrouter",
+        local: false,
+        configured: true,
+        needs_base_url: false,
+        key_state: "present",
+      },
+    ]);
+    render(<SavedHostedModels />, { wrapper });
+    fireEvent.change(await screen.findByRole("textbox", { name: "Model id" }), {
+      target: { value: "openrouter/" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(mockAddSavedModel).not.toHaveBeenCalled();
+  });
+
   it("surfaces the server's 400 verbatim instead of swallowing it", async () => {
     // The real `ApiError` sets `message` to the core's `detail` (see lib/api.ts); a plain Error
     // with the same message exercises the same render path without reaching into the mocked

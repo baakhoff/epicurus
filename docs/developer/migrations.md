@@ -340,9 +340,7 @@ the database rather than surfacing it.
 
 ```python
 def upgrade() -> None:
-    op.add_column(
-        "saved_models", sa.Column("tools_override", sa.String(length=8), nullable=True)
-    )
+    op.add_column("saved_models", sa.Column("tools_override", sa.String(length=8), nullable=True))
 ```
 
 The baseline is **not** touched: it describes the schema as it stood the day the service adopted

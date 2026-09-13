@@ -17,7 +17,11 @@ from qdrant_client.models import Distance, VectorParams
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from epicurus_knowledge.db import DocIndex, NoteIndex
-from epicurus_knowledge.dimensions import CollectionDimensionGuard, EmbeddingDimensionChanged
+from epicurus_knowledge.dimensions import (
+    CollectionDimensionGuard,
+    EmbeddingDimensionChanged,
+    EmbeddingDimensionMismatch,
+)
 from epicurus_knowledge.indexer import KnowledgeIndexer
 from epicurus_knowledge.module_docs import ModuleDocLedger, ModuleDocsIndexer
 
@@ -33,18 +37,26 @@ class _FakeQdrant:
         self.points: dict[str, dict[str, tuple[list[float], dict[str, Any]]]] = {}
         self.created: list[tuple[str, int]] = []
         self.dropped: list[str] = []
-        # Set to force the "named vector config" shape get_collection can also return.
-        self.named_vectors = False
+        # The shape get_collection reports for ``config.params.vectors``:
+        #   "plain"     — one unnamed VectorParams (what we create, and the usual answer)
+        #   "one_named" — a single-entry mapping: still one unambiguous width (#944)
+        #   "multi"     — several named vectors: no single width to compare, hands off
+        self.vectors_shape = "plain"
+        self.get_collection_calls = 0
+        # Make query_points fail the way the real server fails a width mismatch.
+        self.reject_queries = False
 
     async def collection_exists(self, name: str) -> bool:
         return name in self.dims
 
     async def get_collection(self, name: str) -> Any:
-        vectors: Any = (
-            {"text": VectorParams(size=self.dims[name], distance=Distance.COSINE)}
-            if self.named_vectors
-            else VectorParams(size=self.dims[name], distance=Distance.COSINE)
-        )
+        self.get_collection_calls += 1
+        params = VectorParams(size=self.dims[name], distance=Distance.COSINE)
+        vectors: Any = params
+        if self.vectors_shape == "one_named":
+            vectors = {"text": params}
+        elif self.vectors_shape == "multi":
+            vectors = {"text": params, "title": VectorParams(size=8, distance=Distance.COSINE)}
         return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(vectors=vectors)))
 
     async def create_collection(self, name: str, *, vectors_config: VectorParams) -> None:
@@ -74,6 +86,13 @@ class _FakeQdrant:
             del held[point_id]
 
     async def query_points(self, **_: Any) -> Any:
+        if self.reject_queries:
+            # What the real server answers a width mismatch with: opaque, and unfixable by
+            # any retry. Search must translate it, not forward it (#879).
+            raise RuntimeError(
+                "Unexpected Response: 400 (Bad Request) Raw response content: "
+                "Vector dimension error: expected dim: 4, got 8"
+            )
         return SimpleNamespace(points=[])
 
     def widths(self, collection: str) -> set[int]:
@@ -160,17 +179,53 @@ async def _record(sink: list[str], name: str) -> None:
 
 
 async def test_guard_leaves_an_unrecognised_vector_config_alone() -> None:
-    # A named-vector collection reports a mapping, not one VectorParams. We never create those,
-    # so the guard must not guess a width and drop somebody else's data on the guess.
+    # Several named vectors: there is no single width to compare, so the guard must not guess
+    # one and drop somebody else's data on the guess.
     qdrant = _FakeQdrant()
     guard = CollectionDimensionGuard(qdrant, "test__docs")  # type: ignore[arg-type]
     await guard.ensure(768)
-    qdrant.named_vectors = True
+    qdrant.vectors_shape = "multi"
     guard.forget()
 
     await guard.ensure(1536)  # no raise
 
     assert qdrant.dropped == []
+
+
+async def test_guard_never_caches_a_width_it_could_not_read() -> None:
+    """#944's mechanism, in the knowledge twin: unconfirmed must not read as confirmed.
+
+    Caching the *requested* width after failing to read the *actual* one claims a check that
+    never happened, so every later pass skips it for the process's lifetime while every write
+    keeps failing. The guard must re-read instead.
+    """
+    qdrant = _FakeQdrant()
+    guard = CollectionDimensionGuard(qdrant, "test__docs")  # type: ignore[arg-type]
+    await guard.ensure(768)
+    qdrant.vectors_shape = "multi"
+    guard.forget()
+
+    await guard.ensure(1536)
+    first = qdrant.get_collection_calls
+    await guard.ensure(1536)
+
+    assert qdrant.get_collection_calls == first + 1  # re-read, not served from a false cache
+    assert qdrant.dropped == []
+
+
+async def test_guard_reads_a_single_named_vector_as_one_width() -> None:
+    """A one-entry mapping is still one unambiguous width — reading it as "unknown" is the
+    shape that let the core's twin skip its reconcile in silence (#944)."""
+    qdrant = _FakeQdrant()
+    guard = CollectionDimensionGuard(qdrant, "test__docs")  # type: ignore[arg-type]
+    await guard.ensure(768)
+    qdrant.vectors_shape = "one_named"
+    guard.forget()
+
+    with pytest.raises(EmbeddingDimensionChanged):
+        await guard.ensure(1536)
+
+    assert qdrant.dims["test__docs"] == 1536
 
 
 # ── The vault / bundled-docs indexer ──────────────────────────────────────────
@@ -386,3 +441,51 @@ async def test_healing_the_shared_docs_collection_clears_both_ledgers(
     await bundled.run()
     assert await doc_index.count(tenant=TENANT) == 1
     assert qdrant.widths(f"{TENANT}__docs") == {1536}
+
+
+# ── Search: name the change, never rebuild (#879) ─────────────────────────────
+
+
+async def test_search_names_a_width_change_instead_of_forwarding_qdrants_error(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    """A query embedded at the new width must answer with the cause and the cure.
+
+    Search is where a switched embedding model is noticed first, and Qdrant's own answer is an
+    opaque ``Vector dimension error`` that reads like a backend fault. The agent sees the tool's
+    error text, so that text has to be the one the operator can act on.
+    """
+    qdrant, platform = _FakeQdrant(), _FakePlatform(dim=4)
+    indexer = _indexer(note_index, qdrant, platform, vault)
+    await indexer.run()
+    assert qdrant.dims[indexer._collection] == 4
+
+    platform.dim = 8  # the operator switched the embedding model; the index is still 4-d
+    qdrant.reject_queries = True
+
+    with pytest.raises(EmbeddingDimensionMismatch) as raised:
+        await indexer.search("anything")
+
+    message = str(raised.value)
+    assert "4-d" in message and "8-d" in message
+    assert "Re-embed everything" in message
+    assert "Unexpected Response" not in message  # never the provider's raw text
+    # Search never rebuilds — that is the indexer's job, and a rebuild here would silently
+    # drop every vector the operator is still searching.
+    assert qdrant.dropped == []
+    assert qdrant.dims[indexer._collection] == 4
+
+
+async def test_search_forwards_an_unrelated_backend_failure_unchanged(
+    note_index: NoteIndex, vault: Path
+) -> None:
+    """Only a genuine width mismatch is renamed — Qdrant being down stays Qdrant being down."""
+    qdrant, platform = _FakeQdrant(), _FakePlatform(dim=4)
+    indexer = _indexer(note_index, qdrant, platform, vault)
+    await indexer.run()
+    qdrant.reject_queries = True  # the widths still agree (4 == 4)
+
+    with pytest.raises(RuntimeError) as raised:
+        await indexer.search("anything")
+
+    assert not isinstance(raised.value, EmbeddingDimensionMismatch)

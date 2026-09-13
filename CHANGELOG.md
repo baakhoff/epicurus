@@ -12,6 +12,26 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A dimension change is healed or named, never silently degraded** (#944 part 2, #879, #860) —
+  switch the embedding model to one with a different output size and every vector already stored
+  becomes unqueryable. Cross-chat memory was supposed to repair itself when that happened; on the
+  owner's install it did not, and said nothing: the reconcile met a vector configuration it did
+  not recognise, resolved no width, repaired nothing — and still cached the collection as
+  repaired, so every later recall repeated the same rejected query while the assistant quietly
+  answered with no memory at all. The cache now records a width that was actually **confirmed**,
+  a configuration it cannot read is raised instead of shrugged off, and the rebuild is shielded
+  from the recall time-box, so a corpus too large to re-embed inside that budget finishes healing
+  instead of being restarted and cancelled on every turn. What cannot be healed is now *said*:
+  recall logs the two widths and the cure, `knowledge` search answers "the embedding model
+  changed — run Re-embed everything" instead of forwarding Qdrant's raw dimension error, and the
+  Models page shows the stuck state on the embedding card and names the cure — which, for
+  recall memory, is the **Memory facts re-embed** maintenance job rather than "Re-embed
+  everything" (that one fans out to the modules only). The
+  same card stops calling a **refused** re-embed a failure: a module that declines to rebuild
+  from a source reading empty is protecting your data, and now says so, with its reason, in its
+  own third state. `core-app` 0.125.0→0.126.0 (MINOR) · `web` 0.147.0→0.148.0 (MINOR) ·
+  `knowledge` 0.31.0→0.31.2 (PATCH) · `notes` 0.15.0→0.15.2 (PATCH) — the wave's ladder
+  reserved a patch each for a lane that turned out not to touch them.
 - **A model's capabilities are known, not assumed — and a turn that cannot work says so before
   it starts** (#944, #947, #879; ADR-0140). Two dogfood failures with one cause: the core knew
   nothing about a model beyond "is it hosted". An embedding model starred as the chat default

@@ -28,6 +28,7 @@ from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
 from epicurus_core_app.automations.store import AutomationSessionStore, SessionMeta
 from epicurus_core_app.llm.models import ChatMessage
+from epicurus_core_app.memory.facts import RecallDimensionState
 from epicurus_core_app.memory.memory import Memory, MemoryItem
 from epicurus_core_app.memory.profile import SOURCE_EDITED, StandingProfile, StandingProfileStore
 from epicurus_core_app.memory.store import (
@@ -755,8 +756,27 @@ def create_agent_router(
             items, total = await memory.memories(tenant=tenant, limit=limit)
         return MemoryListing(items=items, total=total)
 
-    # NOTE: /memory/profile is declared BEFORE /memory/{memory_id} so a DELETE to it isn't
-    # captured as "forget the fact with id 'profile'" (FastAPI matches in declaration order).
+    # NOTE: /memory/dimension and /memory/profile are declared BEFORE /memory/{memory_id} so a
+    # request to either isn't captured as "the fact with id 'dimension'" (FastAPI matches in
+    # declaration order).
+    @router.get("/memory/dimension", response_model=RecallDimensionState)
+    async def memory_dimension() -> RecallDimensionState:
+        """What the recall store last observed about its vector width (#944, ADR-0141).
+
+        An embedding model with a different output size makes every stored vector unqueryable.
+        The fact store heals that in place on the next save or recall, but a heal that cannot
+        run (an unreadable vector configuration) or that failed must not stay invisible — the
+        Models page reads this beside "Re-embed everything" and names the cure in ``detail``.
+        That cure is *not* that button: the fan-out behind it reaches the modules' ``/reindex``
+        only, and recall is rebuilt by the ``facts-reembed`` maintenance job.
+
+        Observation-based and process-local: it reports what a save/recall actually saw, so it
+        costs no embed call and is ``{"status": "ok"}`` on a healthy installation. Identical on
+        Docker and Kubernetes — the check is lazy, driven by request handling rather than
+        container start-up (ADR-0134).
+        """
+        return memory.recall_dimension(tenant=tenant)
+
     @router.get("/memory/profile", response_model=ProfileView)
     async def get_profile() -> ProfileView:
         """The standing profile the agent injects each turn (#527, ADR-0094), plus its history.

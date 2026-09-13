@@ -848,7 +848,11 @@ every fact is preserved regardless of how large the corpus has grown (#450, ADR-
 same reconcile also runs **lazily and automatically**: `UserFactStore._ensure` compares a
 collection's actual vector size against the current embedder's on first use each process
 lifetime, and self-heals a mismatch on the spot — so recall/save survive a model swap even
-before anyone clicks "Re-embed everything".
+before anyone clicks "Re-embed everything". The collection is cached as reconciled **only when
+a width was actually confirmed**, and the rebuild is shielded from the caller's recall budget,
+so a reconcile that is skipped, fails, or overruns retries or finishes rather than pretending
+it happened (#944, ADR-0141 — see *Healed or named, never silent* below). What it could not
+heal is readable at `GET /platform/v1/agent/memory/dimension` and rendered on the Models page.
 
 ##### The dimension-change contract (#865)
 
@@ -875,6 +879,63 @@ and would otherwise sail past a switch that has already broken search. The mass 
 (#848) is untouched by all of this: it is weighed first, so a stale mount is still refused
 before anything is embedded, and a recreate is not a de-index the fuse weighs (it clears the
 ledger itself, and a cleared ledger has nothing to protect).
+
+##### Healed or named, never silent (#944, ADR-0141)
+
+A self-heal that quietly does nothing is worse than no self-heal, because the operator stops
+looking. Three rules hold across every store above:
+
+* **A width is cached only when it was *confirmed*.** A collection whose vector configuration
+  cannot be read as one width is left uncached, so the next call checks again. The original
+  fact-store reconcile marked a collection "ensured" even on the path where it had resolved no
+  width and reconciled nothing — so one unreadable response poisoned the cache for the whole
+  process lifetime and every later recall repeated the same fast Qdrant 400 forever. A
+  single-entry named mapping *is* one unambiguous width and is read as such; only a genuinely
+  multi-named configuration counts as unreadable, and that one is never healed on a guess.
+* **The heal outlives the caller's time-box.** Recall is bounded by `MEMORY_RECALL_TIMEOUT_S`,
+  and re-embedding a real fact corpus through a hosted model can take longer than that budget.
+  The fact-store reconcile therefore runs shielded from the caller's cancellation: recall still
+  gives up on its budget, and the rebuild still finishes — instead of every turn restarting a
+  heal that is cancelled again, and instead of a cancellation landing between the collection's
+  drop and its refill.
+* **What cannot be healed is named, in the operator's words.** Recall logs
+  `recall skipped: embedding dimension changed` with both widths and the cure, rather than a
+  generic backend error carrying Qdrant's raw rejection; `knowledge` search answers "the
+  embedding model changed — this index holds 768-d vectors and the current model produces
+  4096-d … run “Re-embed everything” on the Models page" instead of forwarding the raw
+  `Vector dimension error` (#879); and `GET /platform/v1/agent/memory/dimension` reports the
+  state the Models page renders beside the **Re-embed everything** button. The state is scoped
+  to the caller's tenant, like every other `/memory` route — a width observed while serving one
+  tenant says nothing about another's collection (constraint #1).
+
+**The two cures are not the same button, and each surface names its own.** "Re-embed
+everything" fans out to the *modules*' `/reindex` and never touches the fact collection, so a
+module's message names it while recall's names **Settings → Maintenance**, whose
+`facts-reembed` job (*Memory facts re-embed*) is what rebuilds recall. Folding both into one
+action is a follow-up (#944); until then the fact collection is deliberately outside
+"Re-embed everything", and saying otherwise would be the exact failure this section exists to
+remove.
+
+A **module** search never rebuilds — that stays the indexer's job, and a rebuild triggered by a
+read would drop the vectors the operator is still searching; it only names what it found. Core
+recall is the deliberate exception: its `_ensure` heals in place on the way to the query,
+because a fact is hand-distilled and has no source to re-derive it from (ADR-0074). What recall
+never does is rebuild from the *error* path — that only names the mismatch.
+
+The `/memory/dimension` state is *observation-based and process-local*: it reports what a real
+save or recall saw, so reading it costs no embed call, and it resets when `reembed_all` runs.
+`status` is `ok` (nothing observed), `healed` (found and rebuilt — reported, not warned about),
+`changed` (found, rebuild not yet successful), or `unreadable`.
+
+The **Models page** renders `changed` and `unreadable` as a warning on the embedding card, with
+the cure; `healed` and `ok` render nothing. That card also distinguishes the three outcomes of a
+re-embed fan-out — `started`, `refused` (with the module's reason and the note that its vectors
+are untouched), and `error` — rather than reading every non-`started` result as "failed to
+start" (#848, #860).
+
+**Kubernetes parity.** Every check here is lazy — triggered by request handling, never by
+container start-up — so both `CONTAINER_RUNTIME` arms (ADR-0134) behave identically. Nothing in
+this contract is Docker-specific.
 
 #### Per-model settings (ADR-0044)
 
@@ -2023,7 +2084,12 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   size, preserving each fact's id and metadata — rather than silently 400ing on every
   recall/save the way it did before #436. The reconcile pages through the collection (via
   Qdrant's scroll offset) until every point has been visited, so it never drops facts beyond
-  a bounded scan window regardless of corpus size (#450, ADR-0076).
+  a bounded scan window regardless of corpus size (#450, ADR-0076). Since #944 (ADR-0141) the
+  collection is marked reconciled **only when its width was confirmed** — an unreadable vector
+  configuration is raised, not cached — and the rebuild is shielded from the recall time-box,
+  so a corpus that takes longer to re-embed than `MEMORY_RECALL_TIMEOUT_S` still heals instead
+  of being restarted and re-cancelled every turn. The last observation is readable at
+  `GET /platform/v1/agent/memory/dimension`.
 - **Postgres `memory_extraction_queue`** — finished exchanges awaiting background fact
   extraction (ADR-0051): `id`, `tenant`, `user_text`, `assistant_text`, `created_at`, and a
   nullable `session_id` (#771) stamping each exchange with the conversation it came from — the

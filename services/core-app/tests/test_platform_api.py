@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core_app import platform_api
+from epicurus_core_app.llm.errors import ModelCapabilityError
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.power import GatewayPausedError
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -32,6 +33,7 @@ class _FakeGateway:
         embed_result: list[list[float]] | None = None,
         chat_result: ChatResult | None = None,
         raise_on_chat: Exception | None = None,
+        raise_on_embed: Exception | None = None,
         vision: bool = True,
         default_model: str = "test/default",
         raise_on_default: Exception | None = None,
@@ -39,6 +41,7 @@ class _FakeGateway:
         self._embed_result = embed_result or [[0.1, 0.2]]
         self._chat_result = chat_result or ChatResult(model="test/m", content="ok")
         self._raise_on_chat = raise_on_chat
+        self._raise_on_embed = raise_on_embed
         self._vision = vision
         self._default_model = default_model
         self._raise_on_default = raise_on_default
@@ -59,6 +62,8 @@ class _FakeGateway:
         self, texts: list[str], *, model: str | None = None, tenant_id: str | None = None
     ) -> list[list[float]]:
         self.embed_calls.append({"texts": texts, "model": model, "tenant_id": tenant_id})
+        if self._raise_on_embed is not None:
+            raise self._raise_on_embed
         return self._embed_result
 
     async def chat(
@@ -549,3 +554,50 @@ async def test_an_image_anywhere_in_the_history_triggers_the_gate() -> None:
             },
         )
     assert resp.status_code == 400
+
+
+# ── The role gate on the module-facing paths (#944, ADR-0140) ─────────────────
+
+
+def _capability_error() -> ModelCapabilityError:
+    return ModelCapabilityError(
+        model="openrouter/qwen/qwen3-embedding-8b",
+        capability="chat",
+        message="openrouter/qwen/qwen3-embedding-8b is an embedding model, "
+        "so it can't answer a chat turn.",
+        hint="Pick a chat model on the Models page and star it as the default.",
+    )
+
+
+async def test_chat_reports_a_capability_refusal_as_a_structured_400() -> None:
+    """A module gets a sentence it can relay, not a 500 carrying a provider's rejection."""
+    gw = _FakeGateway(raise_on_chat=_capability_error())
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gw)), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/chat", json={"messages": [{"role": "user", "content": "hi"}]}
+        )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["error"] == "wrong_model_role"
+    assert detail["capability"] == "chat"
+    assert "embedding model" in detail["message"]
+    assert detail["hint"]
+
+
+async def test_embed_reports_a_capability_refusal_as_a_structured_400() -> None:
+    error = ModelCapabilityError(
+        model="claude/claude-sonnet-4-6",
+        capability="embedding",
+        message="claude/claude-sonnet-4-6 is a chat model, so it can't produce embeddings.",
+        hint="Pick an embedding model under Models → Embedding model.",
+    )
+    gw = _FakeGateway(raise_on_embed=error)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(gw)), base_url="http://test"
+    ) as client:
+        resp = await client.post("/platform/v1/embed", json={"texts": ["hello"]})
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "wrong_model_role"
+    assert resp.json()["detail"]["capability"] == "embedding"

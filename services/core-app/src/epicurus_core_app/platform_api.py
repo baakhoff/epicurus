@@ -25,6 +25,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from epicurus_core import CONTRACT_VERSION, __version__
+from epicurus_core_app.llm.errors import ModelCapabilityError
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -44,6 +45,26 @@ VISION_UNSUPPORTED_MESSAGE = (
 # ``_attach_images`` emits); ``image`` is the Anthropic-native spelling. Both are recognised so
 # the gate cannot be sidestepped by picking the other shape.
 _IMAGE_PART_TYPES = frozenset({"image_url", "image"})
+
+WRONG_MODEL_ROLE = "wrong_model_role"
+"""``detail.error`` for a module call routed to a model that cannot serve it (#944).
+
+Same shape as the vision gate above and for the same reason: a module that asked for an
+embedding and got a chat model (or the reverse) can say *why* it produced nothing, instead of
+relaying a provider's 400 — or, worse, a 500 from the core. The gateway raises
+:class:`~epicurus_core_app.llm.errors.ModelCapabilityError`; this turns it into the 400 it is.
+"""
+
+
+def _capability_detail(exc: ModelCapabilityError) -> dict[str, str]:
+    """The structured 400 body for a capability refusal — operator-readable, no payloads."""
+    return {
+        "error": WRONG_MODEL_ROLE,
+        "message": exc.message,
+        "hint": exc.hint,
+        "model": exc.model,
+        "capability": exc.capability,
+    }
 
 
 RELEASE_TRACK_ENV = "EPICURUS_VERSION"
@@ -174,11 +195,19 @@ def create_platform_router(
         Resolution order: per-module override (request.model) → global embedding
         default pref → env default (memory_embed_model).  Keys never leave the
         core; usage is metered via NATS.
+
+        **400** when the resolved model is known to be a chat model (#944), with the same
+        structured detail the vision gate uses — a module can then say why it indexed nothing.
         """
         tenant = request.tenant_id or default_tenant
         global_embed = await prefs.get_embed_default(tenant) if prefs is not None else None
         model = request.model or global_embed or settings.memory_embed_model
-        embeddings = await gateway.embed(request.texts, model=model, tenant_id=request.tenant_id)
+        try:
+            embeddings = await gateway.embed(
+                request.texts, model=model, tenant_id=request.tenant_id
+            )
+        except ModelCapabilityError as exc:
+            raise HTTPException(status_code=400, detail=_capability_detail(exc)) from exc
         return EmbedResponse(embeddings=embeddings)
 
     @router.post("/chat", response_model=ChatResult)
@@ -202,6 +231,11 @@ def create_platform_router(
         so a module can degrade honestly (return what it *did* extract, plus a note
         saying the caption was skipped and why) rather than guess from a provider
         error string. A text-only request is untouched.
+
+        **Role gate (#944).** The same shape, with ``error: "wrong_model_role"``, when the
+        resolved model is known to be an embedding model — raised by the gateway before any
+        provider call, so a mis-set default fails with a sentence naming the fix instead of a
+        500 carrying a provider's rejection.
         """
         if _carries_image(request.messages) and not await gateway.supports_vision(
             request.model, request.tenant_id
@@ -214,11 +248,14 @@ def create_platform_router(
                     "model": await _named_model(gateway, request.model, request.tenant_id),
                 },
             )
-        return await gateway.chat(
-            request.messages,
-            model=request.model,
-            tools=request.tools,
-            tenant_id=request.tenant_id,
-        )
+        try:
+            return await gateway.chat(
+                request.messages,
+                model=request.model,
+                tools=request.tools,
+                tenant_id=request.tenant_id,
+            )
+        except ModelCapabilityError as exc:
+            raise HTTPException(status_code=400, detail=_capability_detail(exc)) from exc
 
     return router

@@ -570,12 +570,36 @@ async def _assert_no_drift(service: Service, url: str) -> None:
         await engine.dispose()
 
 
-async def _build_pre_alembic(service: Service, url: str, *, drop_reconciled: bool) -> bool:
-    """Build the schema the way the pre-Alembic path did, optionally re-creating its drift.
+def _upgrade_to_baseline(sync_conn: Connection, service: Service) -> None:
+    """Run this service's baseline revision, then forget Alembic was ever here."""
+    config = alembic_config(
+        script_location=service.script_location,
+        metadatas=service.metadatas,
+        version_table=version_table_name(service.name),
+        connection=sync_conn,
+    )
+    command.upgrade(config, "0001")
+    sync_conn.exec_driver_sql(f'DROP TABLE "{version_table_name(service.name)}"')
 
-    `Base.metadata.create_all` is what every existing deployment's database was built by. (The
-    additive reconcile that ran beside it is a no-op on a database `create_all` just built, so
-    there is nothing to replay here — its *effect* is what the drift arm strips out below.)
+
+async def _build_pre_alembic(service: Service, url: str, *, drop_reconciled: bool) -> bool:
+    """Build the schema as it stood the day this service adopted Alembic, drift optional.
+
+    The **baseline revision** is that schema — it was generated from the models of that day —
+    so it is what builds it here, with the version table dropped afterwards to leave exactly
+    the state a pre-Alembic deployment is in: this service's tables present, nothing recording
+    a revision. (The additive reconcile that ran beside `create_all` is a no-op on a database
+    just built, so there is nothing to replay — its *effect* is what the drift arm strips out
+    below.)
+
+    `Base.metadata.create_all` used to build it, and was right for exactly as long as the
+    baseline was also head. The moment a revision after the baseline adds a column,
+    `create_all` builds the schema at **head** instead, and this arm stops testing adoption —
+    it asserts that `op.add_column` is idempotent, which ADR-0138 explicitly says a
+    post-baseline revision need not be, since after adoption the database's state is known
+    exactly. `saved_models`' three capability columns (#944, #947) were the first, and the first
+    to fail here.
+
     With *drop_reconciled*, the columns the reconcile was responsible for are dropped again,
     leaving the database in the state a deployment is in when it last booted before those
     columns existed — the #214 / #218 state. Returns whether anything was dropped, so the
@@ -585,8 +609,7 @@ async def _build_pre_alembic(service: Service, url: str, *, drop_reconciled: boo
     dropped: list[str] = []
     try:
         async with engine.begin() as conn:
-            for metadata in service.metadatas:
-                await conn.run_sync(metadata.create_all)
+            await conn.run_sync(_upgrade_to_baseline, service)
             if drop_reconciled:
                 for metadata in service.metadatas:
                     for table in metadata.sorted_tables:

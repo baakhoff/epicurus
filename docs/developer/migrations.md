@@ -160,7 +160,17 @@ anywhere and no revision ever skipped.
 
 **Only the baseline is written this way.** Every revision after it is ordinary Alembic —
 `op.add_column`, `op.alter_column`, an `UPDATE` for a backfill — because after adoption the
-database's state is known exactly.
+database's state is known exactly. In particular a later revision need **not** be idempotent, and
+should not pretend to be: a guard around `op.add_column` hides a real disagreement between the
+revisions and the database rather than surfacing it.
+
+That has one consequence for the **adoption arms** of the gates. "A pre-Alembic database" is the
+schema as it stood *the day the service adopted Alembic* — which is what the baseline describes,
+and what both the `migrations` job and the per-service unit tests build by running `upgrade 0001`
+and then dropping the version table. `Base.metadata.create_all` used to build it, and was correct
+for exactly as long as the baseline was also head; the first revision that adds a column makes
+`create_all` build the schema at **head**, and an adoption arm over that asserts only that
+`op.add_column` is idempotent. `saved_models`' capability columns (#944, #947) were the first.
 
 What the reconcile arm deliberately does *not* do: add a constraint, or alter a column that is
 already present. A table that exists but carries no unique constraint is beyond an additive
@@ -321,6 +331,27 @@ never went through the reconcile at all. Several stores list every non-key colum
 it. core-app's audit went from 55 candidates to 2 that way, and writing 53 no-op revisions would
 have been 53 chances to get a value wrong.
 
+## Adding a column after adoption
+
+The first column added to an already-migrated service is **ordinary Alembic** — a bare
+`op.add_column`, no guard. After adoption the database's state is known exactly, so a revision
+that tolerates the column already being there hides a real disagreement between the revisions and
+the database rather than surfacing it.
+
+```python
+def upgrade() -> None:
+    op.add_column("saved_models", sa.Column("tools_override", sa.String(length=8), nullable=True))
+```
+
+The baseline is **not** touched: it describes the schema as it stood the day the service adopted
+Alembic, and a fresh install reaches the new column by running the revision like every other
+state does. `core-app`'s revision 0005 (ADR-0140) is the worked example.
+
+What this does change is how the gates build a "pre-Alembic" database for their **adoption** arms
+— see the adoption-arm note under *How a baseline is written*: they run `upgrade 0001` and drop
+the version table, because `Base.metadata.create_all` builds the models as they stand *today*,
+which from the first post-baseline column onwards is the schema at head, not at adoption.
+
 ## SQLite, Postgres, and what each gate proves
 
 Production is Postgres. The unit tests are SQLite, and there are two places that matters:
@@ -339,7 +370,7 @@ Production is Postgres. The unit tests are SQLite, and there are two places that
 | Gate | What it proves |
 | --- | --- |
 | `task migrate:check -- <service>` (local, ~1s) | Upgrade from empty on SQLite, then `alembic check`: the models and the revisions agree. |
-| **`migrations`** (CI, Postgres 17, ~2 min) | The same on real Postgres, plus: a second run is a no-op; a `create_all`-built database is adopted and still matches its models; and a *drifted* pre-Alembic database — the columns the reconcile was responsible for stripped out first, the #214 / #218 state — is repaired by the baseline. Each arm runs on a throwaway database of its own. |
+| **`migrations`** (CI, Postgres 17, ~2 min) | The same on real Postgres, plus: a second run is a no-op; a database built at the **baseline** (the pre-Alembic state) is adopted, reaches head and still matches its models; and a *drifted* pre-Alembic database — the columns the reconcile was responsible for stripped out first, the #214 / #218 state — is repaired by the baseline. Each arm runs on a throwaway database of its own. |
 | `runtime-smoke` / `k8s-smoke` (CI) | The fresh-install path for real: both boot the stack from an empty Postgres, so a baseline that does not apply fails them. |
 
 The `migrations` job discovers services by glob (`services/*/src/*/migrations/env.py`) inside

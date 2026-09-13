@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -32,6 +33,7 @@ from epicurus_core_app.llm.compaction import (
     estimate_tools_tokens,
     reply_reserve,
 )
+from epicurus_core_app.llm.errors import ModelCapabilityError
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import (
     ChatMessage,
@@ -39,6 +41,7 @@ from epicurus_core_app.llm.models import (
     KeyState,
     ModelDetails,
     ModelInfo,
+    ModelRole,
     ProviderInfo,
     StreamEvent,
     ToolCallFragment,
@@ -75,6 +78,98 @@ _CONNECT_TIMEOUT_S = 30.0
 # litellm 1.89.3 (#453, #466). So "disable the bound" is expressed as a read that never
 # realistically elapses rather than as no timeout at all.
 _UNBOUNDED_READ_S = 365 * 24 * 60 * 60.0  # 1 year
+
+# LiteLLM's ``mode`` values that mean "this model answers chat turns" (#944). Its map also
+# carries ``embedding``, ``rerank``, ``image_generation``, ``audio_transcription`` and more;
+# anything outside these two sets resolves to ``unknown`` and is refused nothing.
+_CHAT_MODES = frozenset({"chat", "completion", "responses"})
+
+# How a provider says "I will not take a tool list" (#947). Lower-cased substrings, matched
+# against a 400's text only — a deliberately small, readable list rather than a per-provider
+# table, because *the deployment* decides: the same model id behind a vLLM server started with
+# ``--enable-auto-tool-choice`` is fully tool-capable. Nothing here is provider-specific beyond
+# the phrasing; the rest of the rule (learn it, retry without tools) is generic.
+_TOOL_REJECTION_MARKERS = (
+    "tool choice requires",
+    "tool_choice",
+    "tools is not supported",
+    "tools are not supported",
+    "does not support tools",
+    "tool use is not supported",
+    "function calling is not supported",
+    "does not support function calling",
+)
+
+# The upstream provider an aggregator names in its error body (OpenRouter's ``provider_name``,
+# e.g. "NextBit"). A readable name, never an id: the character class is narrow on purpose so a
+# token or account identifier in a malformed payload cannot ride into a log line. Used for the
+# WARNING only — never rendered to a user.
+_UPSTREAM_PROVIDER = re.compile(r'"provider_name"\s*:\s*"([A-Za-z0-9 ._-]{1,40})"')
+
+# Appended to the system prefix of a turn that is offered no tools (#947). Without it the base
+# prompt's "act through the tools you are given" is an invitation to narrate tool use that never
+# happened. Lives here, beside the capability resolution that decides a turn is tool-less, so
+# both the streamed path and the automation loop reach it through one call.
+NO_TOOLS_SYSTEM_NOTE = (
+    "This conversation has no tools available: the model answering it cannot call them. "
+    "Answer from what you already know, say plainly when something would need a tool you do "
+    "not have, and never claim to have read, created, changed or scheduled anything."
+)
+
+
+def with_no_tools_note(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """``messages`` plus :data:`NO_TOOLS_SYSTEM_NOTE`, inside the leading system prefix (#947).
+
+    Inserted after the existing system messages rather than appended at the end, because that
+    prefix is the block :func:`compaction.compact_messages` keeps whole — a note at the tail
+    would be the first thing a long conversation drops, which is precisely the turn where a
+    model is most likely to start inventing tool calls.
+    """
+    prefix = 0
+    while prefix < len(messages) and messages[prefix].role == "system":
+        prefix += 1
+    note = ChatMessage(role="system", content=NO_TOOLS_SYSTEM_NOTE)
+    return [*messages[:prefix], note, *messages[prefix:]]
+
+
+def _role_from_mode(mode: object) -> ModelRole:
+    """Map LiteLLM's catalogue ``mode`` to the gateway's :data:`ModelRole` (#944)."""
+    if mode == "embedding":
+        return "embedding"
+    if isinstance(mode, str) and mode in _CHAT_MODES:
+        return "chat"
+    return "unknown"
+
+
+def _is_bad_request(exc: Exception) -> bool:
+    """Whether ``exc`` is a provider **400** — a deterministic refusal, not a transient fault.
+
+    Read off ``status_code`` rather than by class: ``litellm.BadRequestError`` carries one (it
+    subclasses openai's ``APIStatusError``), and so does anything else that reaches here from a
+    provider SDK, so the duck-typed check covers the class without pinning this module to
+    LiteLLM's export surface.
+    """
+    return getattr(exc, "status_code", None) == 400
+
+
+def _tool_rejection_phrase(exc: Exception) -> str | None:
+    """The :data:`_TOOL_REJECTION_MARKERS` phrase ``exc`` matched, or ``None`` (#947).
+
+    Restricted to a 400 on purpose: a 500 mentioning tools is the provider falling over, not the
+    model declaring a limitation, and learning "no tool support" from an outage would disable
+    every module until the operator noticed. A non-tool 400 — #944's "is an embedding model and
+    cannot be used with the chat/completions endpoint" — matches nothing here and is re-raised.
+    """
+    if not _is_bad_request(exc):
+        return None
+    text = str(exc).lower()
+    return next((marker for marker in _TOOL_REJECTION_MARKERS if marker in text), None)
+
+
+def _upstream_provider_name(text: str) -> str | None:
+    """The upstream provider an aggregator named in its error body, if it named one (#947)."""
+    match = _UPSTREAM_PROVIDER.search(text)
+    return match.group(1) if match else None
 
 
 def _build_stream_timeout(read_timeout_s: float) -> httpx.Timeout:
@@ -193,6 +288,14 @@ class LlmGateway:
         # cost-map miss this is *not* expected, and it disables every override at once, so it
         # warns the first time rather than only at debug.
         self._override_store_failed = False
+        # Local models whose role (chat vs embedding) the runtime has already answered (#944).
+        # The role gate runs on *every* call, including each embed batch during a bulk re-index,
+        # and for a local model the answer costs an ``/api/show`` round trip — so a definite
+        # answer is remembered. A model's role is a property of its weights, and the two ways it
+        # could change under us (a re-pull, a delete) both clear this. An ``unknown`` is never
+        # cached: that is usually an unreachable runtime, and pinning it would keep the gate
+        # blind for the rest of the process. Bounded, like ``_unmapped_models``.
+        self._local_roles: dict[str, ModelRole] = {}
 
     async def effective_default(self, tenant_id: str | None = None) -> str:
         """The active default model: the stored pref if set, else the env default."""
@@ -308,6 +411,75 @@ class LlmGateway:
         _, provider = registry.resolve(model)
         return not (self._power.paused and provider.is_local)
 
+    async def _ensure_can_serve(
+        self,
+        model: str,
+        *,
+        want: ModelRole,
+        tenant_id: str | None,
+        check_pause: bool = True,
+    ) -> None:
+        """The one gate every inference entry point passes through (ADR-0140).
+
+        Two rules today, and the place the third goes — the system-level Local AI / Hosted AI
+        switches (#945) add a clause *here*, not a fourth copy scattered across the call sites:
+
+        * **Paused** (ADR-0005): a local model cannot run while the runtime is paused.
+        * **Role** (#944): a model whose role is *known* and is not ``want`` is refused before
+          any provider call, with a :class:`ModelCapabilityError` naming the one action that
+          fixes it. ``unknown`` is refused nothing — a catalogue miss must never lock the
+          operator out of a model that works.
+
+        ``check_pause=False`` is what the chat paths pass, and it is not a weakening: they
+        express the pause as a *fallback filter* (:meth:`_is_available` over
+        :meth:`_candidates`), so a paused local default falls through to a hosted fallback
+        instead of failing, and the candidate this is called about has already passed it.
+        :meth:`embed` has no fallback chain, so it takes the whole gate — which is what retires
+        the inline copy of the pause rule that used to live there.
+        """
+        if check_pause and not self._is_available(model):
+            raise GatewayPausedError("LLM gateway is paused; resume to run inference")
+        role = await self.model_role(model, tenant_id)
+        if role == "unknown" or role == want:
+            return
+        if want == "chat":
+            raise ModelCapabilityError(
+                model=model,
+                capability="chat",
+                message=f"{model} is an embedding model, so it can't answer a chat turn.",
+                hint="Pick a chat model on the Models page and star it as the default.",
+            )
+        raise ModelCapabilityError(
+            model=model,
+            capability="embedding",
+            message=f"{model} is a chat model, so it can't produce embeddings.",
+            hint="Pick an embedding model under Models → Embedding model.",
+        )
+
+    async def model_role(self, model: str | None = None, tenant_id: str | None = None) -> ModelRole:
+        """What ``model`` is *for* — ``chat``, ``embedding``, or ``unknown`` (#944).
+
+        Resolved by :meth:`show` (operator override → catalogue), so there is one place that
+        answers a capability question. A **local** answer is memoised per process: this runs on
+        every call, and for a local model the catalogue is the runtime — one ``/api/show`` per
+        embed batch during a bulk re-index is a cost worth paying once. Hosted resolution is a
+        static map lookup plus the tenant's stored override, so it is not cached: an override
+        edited on the Models page takes effect on the next turn.
+        """
+        resolved = model or await self.effective_default(tenant_id)
+        _, provider = registry.resolve(resolved)
+        if not provider.is_local:
+            return (await self.show(resolved, tenant_id)).role
+        cached = self._local_roles.get(resolved)
+        if cached is not None:
+            return cached
+        role = (await self.show(resolved, tenant_id)).role
+        if role != "unknown":
+            if len(self._local_roles) >= 512:  # bounded: ``model`` can arrive as a query param
+                self._local_roles.clear()
+            self._local_roles[resolved] = role
+        return role
+
     async def _call_config(self, model: str, tenant_id: str | None) -> dict[str, Any]:
         """The LiteLLM call kwargs (model, endpoint, key, tuning) for ``model``.
 
@@ -414,6 +586,78 @@ class LlmGateway:
         budget = window - reply_reserve(window) - estimate_tools_tokens(tools)
         return compact_messages(messages, budget=budget, note=_TRIM_NOTE)
 
+    async def _acompletion(
+        self,
+        *,
+        model: str,
+        config: dict[str, Any],
+        messages: list[ChatMessage],
+        tools: list[dict[str, Any]] | None,
+        tenant_id: str | None,
+        stream: bool = False,
+    ) -> Any:
+        """Call LiteLLM, and learn from a provider that refuses the tool list (#947).
+
+        A tool list is a *request* to the model, and whether it can be honoured is a property of
+        the model **as served** — the same id behind a vLLM server started without
+        ``--enable-auto-tool-choice`` rejects every request that carries one, while the same id
+        elsewhere calls tools happily. No static table can answer that, so the gateway learns it
+        from the only authority there is: the refusal itself. On a 400 whose text matches
+        :func:`_tool_rejection_phrase`, it records ``tools=off`` on the caller's saved row (for
+        the **calling** tenant — a provider's deployment is a per-tenant fact, since the key is),
+        says why at WARNING, and **retries the same call once with ``tools`` omitted**, so the
+        turn answers instead of dying. Once only: the retry carries no tools, so a second
+        rejection is a real failure and propagates.
+
+        Anything else — including #944's "is an embedding model" 400 — is re-raised untouched.
+        """
+        kwargs: dict[str, Any] = {
+            "messages": [m.provider_dump() for m in messages],
+            "num_retries": self._num_retries,
+            "timeout": self._timeout,
+            **config,
+        }
+        if stream:
+            kwargs["stream"] = True
+        try:
+            return await litellm.acompletion(tools=tools, **kwargs)
+        except Exception as exc:
+            phrase = _tool_rejection_phrase(exc) if tools else None
+            if phrase is None:
+                raise
+            await self._learn_tools_unsupported(model, tenant_id, phrase=phrase, detail=str(exc))
+            return await litellm.acompletion(tools=None, **kwargs)
+
+    async def _learn_tools_unsupported(
+        self, model: str, tenant_id: str | None, *, phrase: str, detail: str
+    ) -> None:
+        """Record (and explain) a provider's refusal of a tool list (#947).
+
+        The WARNING names the model, the provider alias, the upstream the aggregator named, and
+        the phrase that matched — enough to tell "this deployment has tool calling switched off"
+        from a genuine outage without reading the raw body, and nothing that could be an account
+        id or a key. Persisting is best-effort: the retry-without-tools is what rescues *this*
+        turn, and a store hiccup must not turn a recoverable turn into a failed one. Nothing is
+        recorded for a model the tenant has not saved (a local id, or one used but not persisted)
+        — there is no row to carry the fact, and a local runtime answers for itself.
+        """
+        alias = model.partition("/")[0] if registry.is_hosted(model) else "local"
+        log.warning(
+            "model rejected the tool list; retrying without tools",
+            model=model,
+            provider=alias,
+            upstream=_upstream_provider_name(detail),
+            matched=phrase,
+        )
+        if self._saved_models is None:
+            return
+        try:
+            await self._saved_models.learn_tools_unsupported(
+                tenant_id or self._default_tenant, model
+            )
+        except Exception as exc:  # the turn is already rescued; remembering is a bonus
+            log.warning("could not record the learned tool capability", model=model, error=str(exc))
+
     async def _complete(
         self,
         model: str,
@@ -425,12 +669,12 @@ class LlmGateway:
         config = await self._call_config(model, tenant_id)
         messages = await self._fit_to_context(model, messages, tools, tenant_id)
         start = time.monotonic()
-        response = await litellm.acompletion(
-            messages=[m.provider_dump() for m in messages],
+        response = await self._acompletion(
+            model=model,
+            config=config,
+            messages=messages,
             tools=tools,
-            num_retries=self._num_retries,
-            timeout=self._timeout,
-            **config,
+            tenant_id=tenant_id,
         )
         latency_ms = (time.monotonic() - start) * 1000
         self._power.mark_active()
@@ -469,8 +713,15 @@ class LlmGateway:
         tenant_id: str | None = None,
         automation_id: str | None = None,
     ) -> ChatResult:
-        """Return a completion, walking the fallback chain on failure."""
+        """Return a completion, walking the fallback chain on failure.
+
+        A model whose role is known *not* to be chat is refused here, before the chain is
+        walked (#944): the fallback chain exists for a provider that is failing, not for a
+        default that is wrong, and quietly answering from a fallback would hide exactly the
+        misconfiguration the operator needs to see.
+        """
         resolved = model or await self.effective_default(tenant_id)
+        await self._ensure_can_serve(resolved, want="chat", tenant_id=tenant_id, check_pause=False)
         last_error: Exception | None = None
         for candidate in self._candidates(resolved):
             if not self._is_available(candidate):
@@ -493,18 +744,20 @@ class LlmGateway:
     ) -> AsyncIterator[str]:
         """Yield content deltas from the first available candidate."""
         resolved = model or await self.effective_default(tenant_id)
+        await self._ensure_can_serve(resolved, want="chat", tenant_id=tenant_id, check_pause=False)
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
         config = await self._call_config(candidate, tenant_id)
         messages = await self._fit_to_context(candidate, messages, None, tenant_id)
         start = time.monotonic()
-        response = await litellm.acompletion(
-            messages=[m.provider_dump() for m in messages],
+        response = await self._acompletion(
+            model=candidate,
+            config=config,
+            messages=messages,
+            tools=None,
+            tenant_id=tenant_id,
             stream=True,
-            num_retries=self._num_retries,
-            timeout=self._timeout,
-            **config,
         )
         self._power.mark_active()
         async for chunk in response:
@@ -537,19 +790,20 @@ class LlmGateway:
         exactly. Uses the first available candidate (no mid-stream fallback).
         """
         resolved = model or await self.effective_default(tenant_id)
+        await self._ensure_can_serve(resolved, want="chat", tenant_id=tenant_id, check_pause=False)
         candidate = next((c for c in self._candidates(resolved) if self._is_available(c)), None)
         if candidate is None:
             raise GatewayPausedError("LLM gateway is paused; no non-local model is available")
         config = await self._call_config(candidate, tenant_id)
         messages = await self._fit_to_context(candidate, messages, tools, tenant_id)
         start = time.monotonic()
-        response = await litellm.acompletion(
-            messages=[m.provider_dump() for m in messages],
+        response = await self._acompletion(
+            model=candidate,
+            config=config,
+            messages=messages,
             tools=tools,
+            tenant_id=tenant_id,
             stream=True,
-            num_retries=self._num_retries,
-            timeout=self._timeout,
-            **config,
         )
         self._power.mark_active()
         content_parts: list[str] = []
@@ -733,11 +987,15 @@ class LlmGateway:
         to that provider through LiteLLM with the tenant's key from OpenBao. See
         :meth:`_embed_config` for what each class sends.
 
-        **Pause (ADR-0005) applies to local models only**, mirroring :meth:`_is_available` for
-        chat: a paused runtime refuses a local embed (running one would wake the GPU) while a
-        hosted embed still serves, so memory recall and module indexing keep working on a
-        paused box. ``mark_active`` is called either way — as the chat path does for a hosted
-        completion — and is a no-op while paused, so it can never wake anything.
+        Both the pause rule and the role rule are asked of :meth:`_ensure_can_serve`, the one
+        gate every entry point shares (ADR-0140) — this path used to carry its own copy of the
+        pause check, which is how the two could drift. **Pause (ADR-0005) applies to local
+        models only**: a paused runtime refuses a local embed (running one would wake the GPU)
+        while a hosted embed still serves, so memory recall and module indexing keep working on
+        a paused box. ``mark_active`` is called either way — as the chat path does for a hosted
+        completion — and is a no-op while paused, so it can never wake anything. A model known
+        to be a *chat* model is refused outright (#944), the mirror of the chat path's refusal
+        of an embedding model.
 
         Either way the call emits the same tenant-scoped usage event (constraint #1), naming
         the model actually called.
@@ -754,9 +1012,7 @@ class LlmGateway:
         that had no bound at all (#466).
         """
         resolved = model or await self.effective_embed_default(tenant_id)
-        _, provider = registry.resolve(resolved)
-        if provider.is_local and self._power.paused:
-            raise GatewayPausedError("LLM gateway is paused; resume to run inference")
+        await self._ensure_can_serve(resolved, want="embedding", tenant_id=tenant_id)
         config = await self._embed_config(resolved, tenant_id)
         start = time.monotonic()
         response = await asyncio.wait_for(
@@ -893,18 +1149,21 @@ class LlmGateway:
     async def supports_tools(self, model: str | None = None, tenant_id: str | None = None) -> bool:
         """Whether ``model`` can use tools — so the agent offers them only when they'll work.
 
-        Passing tools to a local model that doesn't support them makes the runtime error, so
-        the agent gates on this and falls back to a plain text answer. Hosted providers are
-        assumed tool-capable (we can't probe them, and the mainstream ones are). A local model
-        is judged by its ``/api/show`` capabilities; if the runtime reports none (older Ollama),
-        we don't restrict — only an explicit capability list *without* ``tools`` disables them.
+        Passing tools to a model that cannot take them ends the turn: a local runtime errors,
+        and a hosted provider whose server was started without tool-calling support returns a
+        400 (#947). So the agent gates on this and falls back to a plain text answer, which the
+        shell flags in the composer.
+
+        Resolved by :meth:`show` — operator override, then what the gateway *learned* from the
+        provider, then the catalogue (``/api/show`` for a local model, LiteLLM's map for a
+        hosted one). Hosted is no longer assumed capable unconditionally, but an id the map has
+        never heard of still answers **yes**: see :meth:`_hosted_details` for why that asymmetry
+        with :meth:`supports_vision` is deliberate. ``None`` (the local runtime could not be
+        asked at all) reads as yes, which is the pre-#711 behaviour for an unreported model.
         """
         resolved = model or await self.effective_default(tenant_id)
-        _, provider = registry.resolve(resolved)
-        if not provider.is_local:
-            return True
-        caps = await self._capabilities(resolved, tenant_id)
-        return "tools" in caps if caps else True
+        answer = (await self.show(resolved, tenant_id)).supports_tools
+        return True if answer is None else answer
 
     def _note_unmapped(self, litellm_model: str, message: str) -> None:
         """Report a LiteLLM cost-map miss once per model id per process, debug after (#711).
@@ -1020,12 +1279,27 @@ class LlmGateway:
         capabilities = (
             [c for c in raw_caps if isinstance(c, str)] if isinstance(raw_caps, list) else []
         )
+        # The runtime names what the weights are for: an embedding model reports ``embedding``,
+        # a chat model ``completion`` (plus ``tools``/``vision``/``thinking`` as it has them).
+        # Anything else — including an older runtime that reports nothing — is ``unknown``, and
+        # ``unknown`` is refused nothing (#944).
+        role: ModelRole = (
+            "embedding"
+            if "embedding" in capabilities
+            else "chat"
+            if "completion" in capabilities
+            else "unknown"
+        )
         return ModelDetails(
             quantization=details.get("quantization_level") or None,
             parameter_size=details.get("parameter_size") or None,
             context_length=context_length,
             family=family if isinstance(family, str) else None,
             capabilities=capabilities,
+            role=role,
+            # An explicit list *without* ``tools`` is the only thing that disables them; an
+            # empty list is an older runtime saying nothing, not saying no (#317).
+            supports_tools=("tools" in capabilities) if capabilities else True,
         )
 
     async def _hosted_details(self, model: str, tenant_id: str | None = None) -> ModelDetails:
@@ -1033,22 +1307,35 @@ class LlmGateway:
 
         No network call — this is a static lookup LiteLLM ships and updates independently.
         Empty/``None`` (never a fake default) when the model isn't in that map, e.g. a fresh
-        or unlisted hosted id — the caller (Models page, capability gating) treats that the
-        same as "unknown" it already does for a local model the runtime can't describe.
-        Hosted providers are assumed tool-capable (:meth:`supports_tools`); vision is not
-        assumed — it is exactly what LiteLLM's map reports.
+        or unlisted hosted id; ``in_catalogue`` now *says* so, instead of the miss being known
+        only to a log line (#879).
 
-        The operator's per-saved-model **override** wins over the map on both vision and
-        context length (#711), and applies even when the lookup fails outright — an id absent
-        from the map is precisely the case the override exists for, so it must not be a path
-        that skips it.
+        **Capability resolution (ADR-0140), in order, for each of the three questions:**
+
+        1. the operator's per-saved-model **override** (#711) — authoritative, and it applies
+           even when the map lookup fails outright, since an id absent from the map is exactly
+           the case the override exists for;
+        2. what the gateway **learned** from the provider — only ``tools``, only ever a "no",
+           and only from a real rejection (#947);
+        3. the **catalogue** (LiteLLM's map): ``mode`` for the role, ``supports_vision``,
+           ``supports_function_calling``.
+
+        The defaults for a model the map has never heard of are deliberately **asymmetric**.
+        Vision answers *no*: sending an image to a model that cannot see it is silently ignored
+        or draws a 400, which is what the gate exists to prevent, and an unlisted id is a poor
+        reason to try. Tools answer *yes*: the map is thin, most hosted models do call tools,
+        and a wrong yes now self-heals — the provider's refusal is learned and the same turn
+        retries without tools — whereas a wrong no would quietly strip every module from the
+        assistant. Both wrong answers are visible in the shell and one click from being fixed.
         """
         override = await self._capability_override(model, tenant_id)
         litellm_model, _ = registry.resolve(model)
         info: Any = {}
+        in_catalogue = True
         try:
             info = litellm.get_model_info(model=litellm_model)
         except Exception:  # litellm raises a bare Exception for a model outside its cost map
+            in_catalogue = False
             self._note_unmapped(litellm_model, "litellm get_model_info lookup failed")
         mapped_context = info.get("max_input_tokens") or info.get("max_tokens")
         context_length = override.context_length or (
@@ -1059,13 +1346,38 @@ class LlmGateway:
             if override.vision == "auto"
             else override.vision == "on"
         )
+        role: ModelRole = (
+            _role_from_mode(info.get("mode")) if override.role == "auto" else override.role
+        )
+        if override.tools != "auto":
+            has_tools = override.tools == "on"
+        elif override.tools_learned == "off":
+            has_tools = False
+        else:
+            has_tools = bool(info.get("supports_function_calling")) if in_catalogue else True
+        # An embedding model's badges are about embedding: it has neither tools nor vision, and
+        # saying so is what lets the Models page show the operator why a chat with it failed.
+        capabilities = ["embedding"] if role == "embedding" else []
+        if role != "embedding":
+            if has_tools:
+                capabilities.append("tools")
+            if has_vision:
+                capabilities.append("vision")
         return ModelDetails(
             context_length=context_length,
-            capabilities=["tools", "vision"] if has_vision else ["tools"],
+            capabilities=capabilities,
+            role=role,
+            supports_tools=False if role == "embedding" else has_tools,
+            in_catalogue=in_catalogue,
         )
+
+    def _forget_local_role(self, model: str) -> None:
+        """Drop a memoised local role — the weights behind the name may have changed (#944)."""
+        self._local_roles.pop(model, None)
 
     async def pull(self, model: str) -> None:
         """Pull a model into the local runtime (blocks until complete)."""
+        self._forget_local_role(model)
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=None) as client:
             response = await client.post("/api/pull", json={"model": model, "stream": False})
             response.raise_for_status()
@@ -1076,6 +1388,7 @@ class LlmGateway:
         Each item is Ollama's progress shape (``status``, and ``total``/``completed``
         while a layer downloads) — the model-manager UI renders these directly.
         """
+        self._forget_local_role(model)
         async with (
             httpx.AsyncClient(base_url=self._ollama_url, timeout=None) as client,
             client.stream("POST", "/api/pull", json={"model": model, "stream": True}) as response,
@@ -1088,6 +1401,7 @@ class LlmGateway:
 
     async def delete_model(self, model: str) -> None:
         """Remove a model from the local runtime."""
+        self._forget_local_role(model)
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=30) as client:
             response = await client.request("DELETE", "/api/delete", json={"model": model})
             response.raise_for_status()

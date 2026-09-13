@@ -62,10 +62,16 @@ Modules never hold model keys — all AI goes through here (ADR-0010). See
 | `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions` | The agent's editable **base system prompt** (#497, ADR-0083). `GET` → `{instructions, is_default}` (the effective prompt — stored value else the shipped default — and whether it's the default). `PUT {instructions}` sets it; a `null`/blank body **resets** to the default. Optional `tenant_id`. Resolved per turn (no restart) and injected as the **first** message of every turn (chat + headless), ahead of recalled memory and attached context, so the compaction prefix rule protects it. Persisted in `agent_instructions`; edited in **Settings → Assistant instructions**. These routes read and write the **base prompt alone** — the enabled playbooks composed onto it for the turn (ADR-0093 §4, see *Governed playbooks* below) are not part of this editable document. Each `PUT` snapshots the prompt it replaced, so an edit is undoable (ADR-0046). |
 
 Tools are offered to the model **only when it can use them**: the loop checks the resolved
-model's capabilities (`gateway.supports_tools` → `/api/show`; hosted providers are assumed
-capable) and, for a tool-less local model, calls without tools so the turn falls back to a
-plain text answer instead of the runtime erroring. The web shell surfaces the same fact as a
-"can't use tools" hint in the composer.
+model's capabilities (`gateway.supports_tools` — see *Capability resolution* below; hosted
+models are no longer assumed capable, they are resolved and, where a provider refuses a tool
+list, learned) and, for a tool-less model of either kind, calls without tools so the turn falls
+back to a plain text answer instead of the provider erroring. Such a turn also carries one extra
+system line (`gateway.NO_TOOLS_SYSTEM_NOTE`, inserted inside the protected system prefix) saying
+there are no tools and not to claim otherwise — the base prompt's "act through the tools you are
+given" would otherwise stand unretracted and invite narrated tool use (#947). The note is
+conditioned on the *model*, not on an empty registry: a deployment with no modules wired has
+nothing to retract. The web shell surfaces the same fact as a "can't use tools" hint in the
+composer and beside the model picker, for a hosted model as well as a local one.
 
 **Image attachments are gated on vision support the same way — but stricter (#633).** An
 uploaded `image/*` file never goes through the text-attachment expander (decoding it as UTF-8
@@ -496,7 +502,7 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) and trained `context_length` (#618) from `/api/show` — opt-in (one call per model), so the Models page can badge them and show a context-window chip while the chat picker stays light. `context_length` is `null` when the runtime doesn't report it — never a fake default. |
-| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a model: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported — never a fake default). Local models read the runtime's `/api/show`; **hosted** models (#633/#618) read LiteLLM's own model-cost/context map instead (no provider call) — `quantization`/`parameter_size`/`family` stay `null` there (Ollama-only concepts), `capabilities` always includes `tools` (hosted providers are assumed tool-capable) plus `vision` when LiteLLM's map says so. Backs the model-settings sheet, the Models page's context-window chip, and the chat "can't use tools" / "can't see images" hints. `model` is a query param (names carry `:`/`/`). |
+| `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a model: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported — never a fake default). Local models read the runtime's `/api/show`; **hosted** models (#633/#618) read LiteLLM's own model-cost/context map instead (no provider call) — `quantization`/`parameter_size`/`family` stay `null` there (Ollama-only concepts), `capabilities` is what the resolution actually decided — `tools` only when the model is resolved tool-capable (no longer hard-coded), `vision` when the map or an override says so, `embedding` for an embedding model. Three resolved fields ride beside it (ADR-0140): `role` (`chat`|`embedding`|`unknown`), `supports_tools` (`true`/`false`, `null` when the local runtime could not be asked at all) and `in_catalogue` (`false` for a hosted id LiteLLM's map has never heard of — `null` for a local model). They exist because `capabilities` cannot express *unknown*: an empty list means both "nothing to badge" and "no idea", and a shell guessing between them shows the wrong hint. Backs the model-settings sheet, the Models page's context-window chip and **unlisted** badge, and the chat "can't use tools" / "can't see images" hints. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; each entry's `size_gb` is the **real on-disk size** backfilled from its family's tags page (#571; `null` until the size fill or a variant lookup reaches the family, and always `null` for `cloud` rows). `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
 | `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the model's public library **tags page** (the catalog index lists *sizes*, not quants). Returns `{model, variants:[{tag, quant, size_gb}]}` — `size_gb` is the tag row's real on-disk size (#571; `null` when upstream shows none, e.g. a cloud alias). Best-effort — an empty list (offline, or a model not in the public library) makes the UI fall back to a manual tag box. A successful lookup also piggybacks its sizes onto the catalog snapshot. `model` is a query param. See **Model catalog** below. |
 | `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
@@ -504,13 +510,13 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 | `GET /platform/v1/llm/providers` | Providers and what the secret store knows about each one's key. Each row is `{alias, local, configured, needs_base_url, key_state, key_error}`. `key_state` is `not_required` (the local runtime holds no key) / `present` / `missing` (OpenBao answered and has nothing there) / `unavailable` (OpenBao could not be asked — an expired app token, the service down), with `key_error` naming the reason for the last one. `configured` is unchanged (`true` for `not_required` and `present`) — it was one bit over three facts, and collapsing "we could not ask" into "there is no key" is how #728's expired token read as a fleet of unconfigured providers, sending the operator to re-enter keys that were already set. The core reports the distinction; rendering it is the shell's job (ADR-0018) — the Models page's "Add a hosted model" row (#922) is the first place that reads `key_state`, hinting inline when it is `missing`/`unavailable`. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
 | `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `kv_cache_type` (Ollama KV-cache), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
-| `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). |
-| `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). Modules with no per-module override use this; per-module selections win (#214). |
+| `PUT /platform/v1/llm/prefs/default` | Set or clear the global default chat model (`{model: str|null}`). **400** for a model whose role is known to be `embedding` (#944) — this used to write any string at all, which is how an embedding id became the chat default and every turn died on an opaque provider 400. A role of `unknown` is allowed: a thin catalogue must not make a working model unselectable. Clearing is never checked. |
+| `PUT /platform/v1/llm/prefs/embed-default` | Set or clear the global default embedding model (`{model: str|null}`). **400** for a model known to be a `chat` model — the mirror rule (#944). Modules with no per-module override use this; per-module selections win (#214). |
 | `PUT /platform/v1/llm/prefs/context-window` | Set or clear the **global** Ollama context window (`{value: int|null}`); the default for models without their own setting. |
 | `PUT /platform/v1/llm/prefs/kv-cache-type` | Set or clear the operator's preferred Ollama **KV-cache type** (`{value: "q8_0"\|"q4_0"\|null}`, `null` = the f16 default). Server-wide; persisted, then **applied**: the core writes Ollama's start-up env file (enabling flash attention for the quantized types) and restarts the container (#307, amends ADR-0046). Returns `{value, applied, staged}` (#709) — **two** flags because there are two degraded modes. `applied` = the running server has the new value. `staged` = the env file holds it and only a container restart is missing (the usual case without Docker access: the entrypoint re-sources the file on every start, so `docker compose restart ollama` applies it and **no environment editing is needed**). `applied` implies `staged`. Only `staged: false` — the file could not be written at all — calls for setting `OLLAMA_KV_CACHE_TYPE`/`OLLAMA_FLASH_ATTENTION` by hand, which is what the UI used to say in every degraded case. Clearing back to the default stages identically (a successful unlink is the choice on disk). |
 | `PUT /platform/v1/llm/prefs/agent-max-steps` | Set or clear the agent loop bound — tool-calling rounds per turn (`{value: int|null}`, clamped 1-12; `null` = the `AGENT_MAX_STEPS` env default). Resolved per turn, no restart (#297). |
 | `PUT /platform/v1/llm/prefs/hidden` | Toggle a model's hidden state (`{name, hidden}`). |
-| `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` · `PUT …/capabilities` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities, override}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (add / remove / set-as-default / edit capabilities — #922 added the add form, which reads `GET …/llm/providers` for the hosted alias list and renders its `key_state`), and module model slots; persisted in `saved_models`. `PUT …/capabilities {model, vision, context_length}` sets the **capability override** (#711) — see *Capability resolution* below; **404** for an id the tenant hasn't saved. Mutations **503** without the store. |
+| `GET /platform/v1/llm/saved-models` · `POST` · `DELETE ?model=…` · `PUT …/capabilities` | The tenant's **saved hosted-model ids** (#496). `GET` → `{models:[{model, provider, context_length, capabilities, role, in_catalogue, override}]}` (most-recent-first) — `context_length`/`capabilities` (#618) come from the same LiteLLM model-cost lookup as `/models/details`, always included (a static lookup, not a network call, so unlike the local list this isn't gated behind an opt-in query param); `null`/empty when the model isn't in LiteLLM's map. `POST {model}` persists one, idempotent — an atomic upsert (**400** if it isn't a hosted `<provider>/<model>` id, so a local `hf.co/…` **or** a provider-only `claude/` with no model can't land). It deliberately accepts an **embedding** model: since #865 this one list serves both roles, and the role is enforced where it matters — setting a default, and running a turn. `DELETE ?model=…` forgets one (removing the id that is the current global default leaves `llm_prefs.global_default` pointing at it — still valid for inference, just unlisted). Backs the chat picker (auto-saved on use), the Models page (add / remove / set-as-default / edit capabilities — #922 added the add form, which reads `GET …/llm/providers` for the hosted alias list and renders its `key_state`), and module model slots; persisted in `saved_models`. `PUT …/capabilities {model, vision, tools, role, context_length}` sets the **capability override** (#711, extended by ADR-0140) — see *Capability resolution* below. Any write also clears `override.tools_learned`, the gateway's own learned answer, so returning a control to Auto genuinely starts over. **404** for an id the tenant hasn't saved. Mutations **503** without the store. |
 | `GET /platform/v1/llm/model-settings?model=…` · `PUT /platform/v1/llm/model-settings` | Per-model tuning (context window, keep-alive, device) for one model, chat **or** embedding. `GET` returns `{context_window, keep_alive, device}` (each `null` = inherit; `device` is `"gpu"`/`"cpu"`/`null`=auto); `PUT` body `{model, context_window, keep_alive, device}` (an all-`null` body clears the override). Works for a **hosted** `<provider>/<model>` id too — there `context_window` is a **compaction budget** (`keep_alive`/`device` are local-only Ollama options). Persisted in Postgres (`model_settings`). See **Per-model settings** below. |
 | `POST /platform/v1/llm/model-settings/suggest-context` | Compute **and persist** a recommended per-model context window for a freshly pulled model (#386), so it opens sized to itself instead of the global default. Body `{model}`. Reuses the `system/info` heuristic (VRAM-or-RAM + the named model's on-disk size + KV-cache type, capped at its trained length) but for *that* model rather than the active one. **Non-destructive** — an existing per-model context override is left untouched. Returns `{model, context_window, applied}` (`applied` is `false` when one was already set, or none could be computed — e.g. a hosted model with no local size). The web calls it when **any** pull finishes (catalog, variant, or manual tag). |
 | `GET /platform/v1/system/info` | Host spec + the context-window suggestion behind the Models page. Returns `{gpu, cpu, ram_total_mb, model:{name, size_mb, context_length, quantization}, suggested_context:{min, suggested, max}, kv_cache_type}`. The suggestion estimates how big a context the box can hold from VRAM (or RAM, no GPU), the active model's on-disk size, and the **KV-cache type** (a quantized cache `q8_0`/`q4_0` costs fewer bytes/token, so the same memory buys more context). Its ceiling is the model's **trained** `context_length` when known — no longer a flat 32k — so a long-context model on a roomy GPU is no longer clipped; 32768 remains only the fallback when the trained length is unknown. Best-effort: every probe degrades to `null`. |
@@ -571,23 +577,32 @@ embeddings dispatch silently drops it (#466).
 > still holds either way (modules never see the key, and never call a provider directly).
 
 The Models page's **Embedding model** select lists local models and the tenant's saved hosted
-ids in separate groups. The saved-models store holds *any* hosted id and cannot tell a chat
-model from an embedding one, so the help text says plainly that a chat model chosen there will
-fail at embed time. A hosted embedding id opens the **hosted** settings sheet — no `keep_alive`,
-no device — exactly as a hosted chat model does.
+ids in separate groups. The saved-models store holds *any* hosted id, chat or embedding — which
+is deliberate, since #865 made one list serve both roles — but each row now carries its resolved
+**role**, so a saved id the catalogue knows to be a chat model is not offered here at all, and a
+stored one that predates the rule is named in place rather than silently failing at embed time
+(#944). A hosted embedding id opens the **hosted** settings sheet — no `keep_alive`, no device —
+exactly as a hosted chat model does.
 
 Switching between models of different vector sizes is the *dimension-change contract* below.
 
-#### Capability resolution (#633, #618, #711)
+#### Capability resolution (#633, #618, #711, #944, #947 — ADR-0140)
 
-Two questions get asked about every model: **can it see images** (`supports_vision`, which gates
-an image attachment) and **how much context does it have** (a badge, and the ceiling on the
-context-window suggestion). They resolve in this order:
+Four questions get asked about every model:
+
+| Question | Method | What it gates |
+| --- | --- | --- |
+| What is it **for**? | `model_role` → `chat` \| `embedding` \| `unknown` | Which surfaces offer it, and whether a turn runs at all |
+| Can it call **tools**? | `supports_tools` | Whether the agent offers the tool list |
+| Can it see **images**? | `supports_vision` | Whether an image attachment is accepted (#633) |
+| How much **context**? | `ModelDetails.context_length` | A badge, and the ceiling on the context-window suggestion |
+
+They resolve in this order, and `gateway.show()` is the single place that does it:
 
 1. **The operator's per-saved-model override**, when one is set (#711).
-2. **The local runtime's `/api/show`** for a local model — an explicit `vision` capability says
-   yes, anything else (including an unreported list on an older Ollama) says no.
-3. **LiteLLM's static model-cost map** for a hosted model.
+2. **What the gateway learned from the provider** — `tools` only, and only ever a "no" (below).
+3. **The catalogue**: the local runtime's `/api/show` for a local model, LiteLLM's static
+   model-cost map for a hosted one.
 
 Step 1 exists because step 3 is a *curated static list* while model ids are the operator's choice
 (ADR-0010) — the two are guaranteed to drift. The map omits ids entirely (`grok/grok-latest`
@@ -596,23 +611,78 @@ resolves to an unmapped `xai/grok-latest`) and mislabels others, and the failure
 would have handled them. Renaming the saved model to a mapped id was the only workaround, which
 is not the operator's job.
 
-The override is `{vision: "auto"|"on"|"off", context_length: int|null}`, stored in two nullable
-columns on the model's `saved_models` row and edited in the Models page's hosted-model sheet.
-`auto` with no context length is the pre-override behaviour exactly, so an absent or cleared
-override changes nothing. It applies **even when the map lookup raises** — an unmapped id is
-precisely the case it exists for, so that path must not be the one that skips it.
+The record is `{vision, tools, role, context_length, tools_learned}` — `vision` and `tools` take
+`auto|on|off`, `role` takes `auto|chat|embedding` — stored in five nullable columns on the
+model's `saved_models` row and edited in the Models page's hosted-model sheet (*Image input*,
+*Tool calling*, *Model role*, *Context length*). All-`auto` with no context length is the
+pre-override behaviour exactly, so an absent or cleared record changes nothing. It applies **even
+when the map lookup raises** — an unmapped id is precisely the case it exists for, so that path
+must not be the one that skips it.
 
-Two boundaries worth keeping straight:
+**The defaults for an unlisted hosted id are asymmetric, on purpose.** Vision answers *no*:
+sending an image to a model that cannot see it is either silently ignored or a provider 400,
+which is what the gate exists to prevent. Tools answer *yes*: the map is thin, most hosted models
+do call tools, and a wrong yes self-heals (below), whereas a wrong no would quietly strip every
+module from the assistant. Role answers *unknown*, and `unknown` is refused nothing. A model the
+map *does* describe is taken at its word in all three cases — including a catalogued "no tools",
+which shows in the shell as a missing badge and a composer notice, one click from an override.
+
+**Tool support is learned, not guessed.** Whether a hosted model accepts a tool list is a
+property of the model *as served*: the same id behind a vLLM server started without
+`--enable-auto-tool-choice` rejects every request carrying one, while the same id elsewhere calls
+tools happily (#947). No shipped table can answer that, so on a **400** whose text matches a
+small phrase list (`tool choice requires`, `tool_choice`, `tools is not supported`, `does not
+support tools`, `tool use is not supported`, `function calling is not supported`, …) the gateway:
+
+1. logs at WARNING naming the model, the provider alias, the upstream the aggregator named, and
+   the phrase that matched — never the raw body, which carries an account identifier;
+2. writes `tools_learned = "off"` on that model's saved row **for the calling tenant** (the key
+   is per tenant, so the deployment behind it is too — constraint #1). It is its own column, not
+   `tools_override`, so "Auto, and we learned it can't" stays distinguishable from the operator's
+   explicit "Not supported", and **any** operator save clears it — returning the control to Auto
+   genuinely starts over;
+3. **retries the same call once with `tools` omitted**, so the turn answers instead of dying.
+   Once only: the retry carries no tools, so a second rejection is a real failure.
+
+The matcher is restricted to a 400. A 500 that mentions tools is a provider falling over, not a
+model declaring a limitation, and learning "no tool support" from an outage would disable every
+module until someone noticed. #944's sibling rejection — *"is an embedding model and cannot be
+used with the chat/completions endpoint"* — matches nothing here and propagates.
+
+**The refusal itself lives in one function**, `LlmGateway._ensure_can_serve`, reached by `chat`,
+`stream`, `stream_chat` **and** `embed`. It carries the pause rule (ADR-0005) and the role rule,
+and it is where a future system-level Local AI / Hosted AI switch (#945) adds its clause rather
+than a fifth copy. A model whose role is known and wrong raises `ModelCapabilityError`
+(`llm/errors.py`) before any provider call, carrying an operator-readable message and the one
+action that fixes it. The chat paths ask for the role clause only, because they express the pause
+as a *fallback filter* — a paused local default still falls through to a hosted fallback.
+
+Role resolution for a local model asks the runtime (`/api/show`: `embedding` → embedding,
+`completion` → chat), and the answer is memoised per process because the gate runs on every call,
+including each embed batch of a bulk re-index. A model's role is a property of its weights; a
+pull or a delete clears the memo, and an `unknown` is never cached.
+
+A **write-time** guard mirrors it: `PUT /llm/prefs/default` refuses an embedding model with 400
+and `PUT /llm/prefs/embed-default` refuses a chat model. Both are needed — the write guard stops
+the state being created, the read guard repairs a deployment that already has it.
+
+Three boundaries worth keeping straight:
 
 - **The override's `context_length` is not `ModelSettings.context_window`.** The first is *what
   the model has* (metadata, a badge); the second is *how much of it we choose to send* (a
   compaction budget, #570). Same word, different layer — both appear in the same sheet.
+- **`role` is not LiteLLM's `mode`.** `mode` is the catalogue's field, which the resolution
+  reads; `role` is the answer after the override and the catalogue have both had their say.
 - **Gating and display only.** Routing, provider keys, and usage metering never consult the
-  override; every model concern still lives in the core (constraint #8).
+  record; every model concern still lives in the core (constraint #8).
 
 A miss against the map logs **once per model id per process**, then at debug: a saved alias
-outside a curated list is expected, not anomalous, but the first sighting still explains a model
-that shows no badges.
+outside a curated list is expected, not anomalous. Since #879 the miss is also *reported* rather
+than only logged — `ModelDetails.in_catalogue` is `false`, which the Models page draws as an
+**unlisted** badge where the context chip would be, so a row with no badges explains itself.
+
+Kubernetes parity: none of this is runtime-specific — database columns, gateway logic and web
+rendering behave identically on Compose and on Kubernetes (ADR-0134).
 
 #### First-boot model bootstrap (#773, ADR-0118, amended #923)
 
@@ -1791,10 +1861,15 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   settings**). A missing row means the model inherits the global pref / env defaults.
 - **Postgres `saved_models`** — per-`(tenant, model)` saved **hosted**-model ids (#496):
   `tenant`, `model`, `added_at` (epoch-ms, `BigInteger`, drives most-recent-first ordering), plus
-  the capability override (#711) in `vision_override` (`"on"`/`"off"`/NULL = auto) and
-  `context_length_override` (NULL = take LiteLLM's map) — both nullable and post-release (the
-  baseline revision carries them, #834), so NULL on both is the pre-override behaviour and forgetting a model forgets its
-  override with it. Only hosted ids land here — a known `<provider>/` prefix; the route rejects
+  the capability record (#711, extended by ADR-0140) in `vision_override` / `tools_override`
+  (`"on"`/`"off"`/NULL = auto), `role_override` (`"chat"`/`"embedding"`/NULL = auto),
+  `context_length_override` (NULL = take LiteLLM's map) and `tools_learned` (`"off"` when a
+  provider refused a tool list, NULL otherwise) — all nullable and post-release (the baseline
+  revision carries them; the three ADR-0140 columns are added by revision 0005), so NULL
+  throughout is the pre-override behaviour and forgetting a model forgets its record with it.
+  `tools_learned` is the gateway's own answer rather than the operator's, which is why it has a
+  column of its own: "Auto, and we learned it can't" and an explicit "Not supported" are
+  different facts, and the sheet has to be able to tell them apart. Only hosted ids land here — a known `<provider>/` prefix; the route rejects
   locals so an `hf.co/…` model can't masquerade as hosted. A durable, cross-device home for the
   strings entered in the chat picker or the Models page's own add form (#922) — the browser's
   `recentModels` is only a warm cache.

@@ -35,6 +35,7 @@ from epicurus_core_app.agent.instructions import (
     AgentInstructionsStore,
 )
 from epicurus_core_app.agent.mcp_host import ToolCallError
+from epicurus_core_app.llm.gateway import NO_TOOLS_SYSTEM_NOTE
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.memory.profile import StandingProfile
@@ -414,6 +415,39 @@ async def test_agent_skips_tools_when_the_model_cannot_use_them() -> None:
     assert turn.content == "just chatting"
     assert turn.tools_used == []
     assert gw.tools_seen == [None]  # tools never offered, despite specs existing
+
+
+async def test_a_tool_less_turn_is_told_it_has_no_tools() -> None:
+    """Without this the base prompt's "act through the tools you are given" stands, and a
+    tool-less model narrates tool use it never made (#947)."""
+    gw = _FakeGateway([ChatResult(model="m", content="just chatting")], supports_tools=False)
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"}, outputs={"echo": "x"})
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
+    assert any(m.role == "system" and m.content == NO_TOOLS_SYSTEM_NOTE for m in gw.calls[0])
+
+
+async def test_a_turn_with_tools_carries_no_such_note() -> None:
+    gw = _FakeGateway([ChatResult(model="m", content="hi")], supports_tools=True)
+    mcp = _FakeMcp(specs=[_echo_spec()], route={"echo": "u"})
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=mcp,  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
+    assert all(m.content != NO_TOOLS_SYSTEM_NOTE for m in gw.calls[0])
+
+
+async def test_a_deployment_with_no_modules_is_not_told_about_tools() -> None:
+    """The note is about the *model*, not about an empty tool registry — a bare core would
+    otherwise carry it on every single turn."""
+    gw = _FakeGateway([ChatResult(model="m", content="hi")], supports_tools=True)
+    await Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    ).run([ChatMessage(role="user", content="hi")])
+    assert all(m.content != NO_TOOLS_SYSTEM_NOTE for m in gw.calls[0])
 
 
 async def test_agent_offers_tools_when_the_model_supports_them() -> None:

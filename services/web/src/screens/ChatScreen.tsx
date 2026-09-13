@@ -617,6 +617,20 @@ function ModelPicker() {
   // older core with no saved-models endpoint.
   const savedIds = saved.data?.map((s) => s.model) ?? [];
   const hostedIds = [...savedIds, ...recents.filter((r) => !savedIds.includes(r))];
+  // A model the catalogue (or the operator) says is an embedding model cannot answer a chat
+  // turn — the core refuses it now (#944), so the picker must not offer it as if it could. Only
+  // a *known* embedding role disables a row; "unknown" stays pickable.
+  const embeddingIds = new Set(
+    (saved.data ?? []).filter((s) => s.role === "embedding").map((s) => s.model),
+  );
+  // Whether the model this chat will actually use can call tools. Same query key the screen
+  // uses, so this reads the cache rather than fetching again (ADR-0140).
+  const effectiveDetails = useQuery({
+    queryKey: ["modelDetails", effectiveModel],
+    queryFn: () => api.modelDetails(effectiveModel!),
+    enabled: Boolean(effectiveModel),
+  });
+  const toolless = effectiveDetails.data?.supports_tools === false;
 
   // Auto-save a hosted id on use, so it's offered on every device next time (#496). Idempotent
   // (a re-use just bumps recency); guarded by isHostedModelId so a bare/local free-text entry is
@@ -650,11 +664,24 @@ function ModelPicker() {
         onClick={() => setOpen(true)}
         className="flex max-w-44 items-center gap-1 rounded-full border border-edge px-2.5 py-1 text-xs text-ink-dim transition-colors hover:border-accent hover:text-accent-strong"
       >
+        {/* The capability, beside the picker that changes it (#947) — so "why can't it read my
+            calendar?" is answered where the answer is actionable, not only at the composer. */}
+        {toolless && <Wrench size={11} className="shrink-0 text-warn" aria-label="No tool support" />}
         <span className="truncate">{effectiveModel ?? "default model"}</span>
         <ChevronDown size={12} className="shrink-0" />
       </button>
       <Sheet open={open} onClose={() => setOpen(false)} title="Model for this chat">
         <div className="flex flex-col gap-4">
+          {toolless && (
+            <p className="flex items-start gap-1.5 rounded-(--radius-field) border border-edge bg-surface-2 px-3 py-2 text-xs leading-relaxed text-ink-dim">
+              <Wrench size={13} className="mt-0.5 shrink-0 text-ink-faint" aria-hidden="true" />
+              <span>
+                <span className="font-medium text-ink">{effectiveModel}</span> can&apos;t use
+                tools — it can only chat. Memory still works; calendar, tasks, notes, mail,
+                files, knowledge search and web search need a tool-capable model.
+              </span>
+            </p>
+          )}
           <div>
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Local</p>
             <div className="flex flex-col gap-1">
@@ -691,7 +718,14 @@ function ModelPicker() {
             {hostedIds.length > 0 && (
               <div className="mb-2 flex flex-col gap-1">
                 {hostedIds.map((id) => (
-                  <PickRow key={id} label={id} active={effectiveModel === id} onPick={() => chooseHosted(id)} />
+                  <PickRow
+                    key={id}
+                    label={id}
+                    active={effectiveModel === id}
+                    note={embeddingIds.has(id) ? "embedding — can't chat" : null}
+                    disabled={embeddingIds.has(id)}
+                    onPick={() => chooseHosted(id)}
+                  />
                 ))}
               </div>
             )}
@@ -727,24 +761,34 @@ function PickRow({
   active,
   loaded = false,
   size = null,
+  note = null,
+  disabled = false,
   onPick,
 }: {
   label: string;
   active: boolean;
   loaded?: boolean;
   size?: number | null;
+  /** Why this row reads the way it does — e.g. an embedding model, which cannot chat (#944). */
+  note?: string | null;
+  disabled?: boolean;
   onPick: () => void;
 }) {
   return (
     <button
       onClick={onPick}
+      disabled={disabled}
       className={cn(
         "flex items-center justify-between rounded-(--radius-field) px-3 py-2 text-left text-sm",
         active ? "bg-accent-dim text-accent-strong" : "text-ink hover:bg-surface-2",
+        // Shown, not hidden: an id the operator saved and can no longer pick has to explain
+        // itself, or it just looks like the list lost it.
+        disabled && "cursor-not-allowed text-ink-faint hover:bg-transparent",
       )}
     >
       <span className="truncate">{label}</span>
       <span className="flex shrink-0 items-center gap-2">
+        {note != null && <span className="text-xs text-ink-faint">{note}</span>}
         {size != null && <span className="text-xs text-ink-faint">{formatBytes(size)}</span>}
         {loaded && <Badge tone="ok">loaded</Badge>}
         {active && <Check size={14} />}
@@ -1044,11 +1088,10 @@ export function ChatScreen() {
   // by set_chat_model) before the device default. The server resolves the same way at turn time
   // and is the authority — this is here so the capability warnings below describe the model that
   // will really answer, rather than whichever one this device happens to default to.
-  // Check its capabilities so we can warn when it can't use tools (local only) or can't see
-  // images (local or hosted — #633: the gateway reports hosted capabilities too, via LiteLLM).
+  // Check its capabilities so we can warn when it can't use tools or can't see images (local
+  // or hosted — #633: the gateway reports hosted capabilities too, via LiteLLM).
   const sessionModel = sessions.data?.find((s) => s.id === chat.sessionId)?.model ?? null;
   const effectiveModel = sessionModel ?? model ?? llmPrefs.data?.global_default ?? null;
-  const effectiveIsLocal = Boolean(effectiveModel) && !isHostedModelId(effectiveModel!);
   const modelDetails = useQuery({
     queryKey: ["modelDetails", effectiveModel],
     queryFn: () => api.modelDetails(effectiveModel!),
@@ -1058,7 +1101,11 @@ export function ChatScreen() {
   // Only warn when the runtime/gateway actually reported capabilities and the one we're
   // checking isn't among them — an empty list means "unknown", not "unsupported".
   const capsKnown = caps.length > 0;
-  const toolless = effectiveIsLocal && capsKnown && !caps.includes("tools");
+  // Tool support is read from the core's *resolved* answer, not inferred from the badge list
+  // (ADR-0140). The old rule — a non-empty list without "tools" — could only ever fire for a
+  // local model, because a hosted id always reported ["tools"]; and now that a hosted model can
+  // honestly report nothing at all, list-emptiness would mean both "unknown" and "no" (#947).
+  const toolless = modelDetails.data?.supports_tools === false;
   const hasImageAttachment = attachments.some((a) => a.kind.startsWith("image/"));
   const visionUnsupported = hasImageAttachment && capsKnown && !caps.includes("vision");
 
@@ -1694,7 +1741,8 @@ export function ChatScreen() {
             <Wrench size={12} className="shrink-0 text-ink-faint" />
             <span>
               <span className="font-medium text-ink">{effectiveModel}</span> can't use tools — it
-              can only chat (no calendar, files, or other actions).
+              can only chat. Memory still works; calendar, files and other actions need a
+              tool-capable model.
             </span>
           </div>
         )}

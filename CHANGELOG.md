@@ -12,6 +12,27 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A model's capabilities are known, not assumed — and a turn that cannot work says so before
+  it starts** (#944, #947, #879; ADR-0140). Two dogfood failures with one cause: the core knew
+  nothing about a model beyond "is it hosted". An embedding model starred as the chat default
+  took every turn straight to an opaque provider 400, and a hosted model served without tool
+  calling ended a "hi" in a red card holding the provider's raw JSON — account identifier and
+  all. A saved hosted model now carries a **role** (chat / embedding / unknown) and a **tool
+  capability**, each resolved as *operator override → what the gateway learned from the provider
+  → the shipped catalogue*, and the Models page's Capabilities block gained the two controls
+  beside Image input. A model whose role is known and wrong is refused **before any provider
+  call**, by one gate every entry point shares — chat, stream and embed alike — with a sentence
+  naming the single action that fixes it, and the same rule guards the write, so the bad default
+  cannot be set from the star in the first place. Tool support is **learned rather than guessed**:
+  whether a model accepts a tool list is a property of the deployment serving it, so on a
+  provider's refusal the core records it for that tenant, says why at WARNING without quoting the
+  payload, and **retries the same turn once without tools** — the turn answers, and the shell says
+  the model can only chat, for a hosted model as well as a local one. The tool-less turn is also
+  told it has no tools, so it stops narrating actions it never took. Two long-standing Models-page
+  nits go with it: a provider-only `claude/` no longer reads as a hosted id in the browser when
+  the core says otherwise, and an id the shipped catalogue has never heard of now says
+  **unlisted** instead of showing an empty chip. `core-app` 0.124.3→0.125.0 (MINOR), `web`
+  0.146.0→0.147.0 (MINOR).
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
   startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own

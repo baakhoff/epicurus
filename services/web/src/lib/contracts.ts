@@ -40,8 +40,18 @@ export const ModelDetails = z.object({
   // The model's trained maximum context (a ceiling for the operator's choice).
   context_length: z.number().nullish(),
   family: z.string().nullish(),
-  // Reported capabilities (e.g. "tools", "vision"); drives the chat "can't use tools" hint.
+  // Reported capabilities (e.g. "tools", "vision") — the badge list.
   capabilities: z.array(z.string()).default([]),
+  // The *resolved* answers `capabilities` cannot express, because an empty list has to mean
+  // both "nothing to badge" and "we don't know" (ADR-0140). `supports_tools === false` is the
+  // only thing that draws the composer's "can't use tools" hint — never list-emptiness, which
+  // is what made the hint local-only (#947). `role === "embedding"` keeps a model that cannot
+  // chat out of the chat surfaces (#944). `in_catalogue === false` is a hosted id LiteLLM's
+  // map has never heard of, which is why it shows no context chip (#879). All nullish so an
+  // older core (which sends none) behaves exactly as it did.
+  role: z.enum(["chat", "embedding", "unknown"]).default("unknown"),
+  supports_tools: z.boolean().nullish(),
+  in_catalogue: z.boolean().nullish(),
 });
 export type ModelDetails = z.infer<typeof ModelDetails>;
 
@@ -175,9 +185,31 @@ export type EventSubscription = z.infer<typeof EventSubscription>;
  */
 export const SavedModelOverride = z.object({
   vision: z.enum(["auto", "on", "off"]).default("auto"),
+  // Tool calling (#947) and the model's role (#944) — the same `auto`/explicit vocabulary.
+  tools: z.enum(["auto", "on", "off"]).default("auto"),
+  role: z.enum(["auto", "chat", "embedding"]).default("auto"),
   context_length: z.number().nullish(),
+  // Read-only: what the *gateway* learned when a provider refused a tool list. Its own field
+  // so "Auto (learned: no tool support)" stays distinguishable from an explicit "Not
+  // supported"; any save clears it, so returning the control to Auto starts over (ADR-0140).
+  tools_learned: z.enum(["off"]).nullish(),
 });
 export type SavedModelOverride = z.infer<typeof SavedModelOverride>;
+
+/** What the editor can actually set — the read-only learned field is not the operator's. */
+export type SavedModelOverrideInput = Pick<
+  SavedModelOverride,
+  "vision" | "tools" | "role" | "context_length"
+>;
+
+/** The all-default capability record, for an older core that sends none. */
+export const DEFAULT_MODEL_OVERRIDE: SavedModelOverride = {
+  vision: "auto",
+  tools: "auto",
+  role: "auto",
+  context_length: null,
+  tools_learned: null,
+};
 
 /** One saved hosted-model id plus its provider alias (the id's `<provider>/` prefix) (#496). */
 export const SavedHostedModel = z.object({
@@ -187,8 +219,11 @@ export const SavedHostedModel = z.object({
   // override-resolved by the core (#711) — render badges from these, never merge them yourself.
   context_length: z.number().nullish(),
   capabilities: z.array(z.string()).default([]),
+  // Resolved, like `capabilities` — see `ModelDetails` for why these exist beside it.
+  role: z.enum(["chat", "embedding", "unknown"]).default("unknown"),
+  in_catalogue: z.boolean().nullish(),
   // What the operator set, so the editor round-trips. Defaulted for an older core.
-  override: SavedModelOverride.default({ vision: "auto", context_length: null }),
+  override: SavedModelOverride.default(DEFAULT_MODEL_OVERRIDE),
 });
 export type SavedHostedModel = z.infer<typeof SavedHostedModel>;
 

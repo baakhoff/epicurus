@@ -31,6 +31,13 @@ describe("isHostedModelId", () => {
     expect(isHostedModelId("")).toBe(false);
     expect(isHostedModelId("/leading")).toBe(false);
   });
+
+  it("rejects a provider-only id, like the core does (#879)", () => {
+    // The core's `is_hosted` has required a non-empty model part since #537; this side said
+    // yes, so a half-typed id read as savable right up to the server's 400.
+    expect(isHostedModelId("claude/")).toBe(false);
+    expect(isHostedModelId("openrouter/  ")).toBe(false);
+  });
 });
 
 describe("usePrefs.setModel recents classification", () => {

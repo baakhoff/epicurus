@@ -669,6 +669,9 @@ def upgrade() -> None:
         sa.Column("added_at", sa.BigInteger(), server_default=sa.text("0"), nullable=False),
         sa.Column("vision_override", sa.String(length=8), nullable=True),
         sa.Column("context_length_override", sa.Integer(), nullable=True),
+        sa.Column("tools_override", sa.String(length=8), nullable=True),
+        sa.Column("role_override", sa.String(length=16), nullable=True),
+        sa.Column("tools_learned", sa.String(length=8), nullable=True),
         sa.PrimaryKeyConstraint("tenant", "model"),
     )
     ep.create_table(

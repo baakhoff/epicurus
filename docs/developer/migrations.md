@@ -321,6 +321,38 @@ never went through the reconcile at all. Several stores list every non-key colum
 it. core-app's audit went from 55 candidates to 2 that way, and writing 53 no-op revisions would
 have been 53 chances to get a value wrong.
 
+## Adding a column after adoption
+
+The first column added to an already-migrated service exposes a wrinkle in "every revision after
+the baseline is ordinary Alembic": **the gate's adoption arm builds its database with
+`create_all` from the *current* models**, which already carry the new column, and then runs
+`upgrade head` over it. A bare `op.add_column` is correct on a real deployment (whose table
+predates the PR) and a duplicate-column failure on that arm.
+
+So a column-adding revision adds only what is absent:
+
+```python
+def upgrade() -> None:
+    present = {c["name"] for c in sa.inspect(op.get_bind()).get_columns("saved_models")}
+    if "tools_override" not in present:
+        op.add_column(
+            "saved_models", sa.Column("tools_override", sa.String(length=8), nullable=True)
+        )
+```
+
+and the baseline is **regenerated** in the same PR so a fresh install creates the column outright
+(see the regeneration note in the backfill rule above — it applies to every model edit, not only a
+`server_default` one). The three states then line up: *fresh* → the baseline creates it and the
+revision finds nothing to do; *adopted* → `create_all` made it and the revision finds nothing to
+do; *managed* → the revision adds it, which is the whole point. `core-app`'s revision 0005
+(ADR-0140) is the worked example.
+
+The generator writes a baseline **once** and refuses to overwrite a populated `versions/`, so
+regenerating means moving the later revisions aside, deleting `0001_baseline.py`, running
+`scripts/migrate.py baseline <service>`, putting them back — and then **reading the diff**, which
+should be exactly the columns you added. Anything else in it is a model change nobody wrote a
+revision for.
+
 ## SQLite, Postgres, and what each gate proves
 
 Production is Postgres. The unit tests are SQLite, and there are two places that matters:

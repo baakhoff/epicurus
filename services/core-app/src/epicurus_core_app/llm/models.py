@@ -21,6 +21,7 @@ __all__ = [
     "KeyState",
     "ModelDetails",
     "ModelInfo",
+    "ModelRole",
     "PowerState",
     "ProviderInfo",
     "Role",
@@ -28,6 +29,15 @@ __all__ = [
     "ToolCallFragment",
     "UsageEvent",
 ]
+
+ModelRole = Literal["chat", "embedding", "unknown"]
+"""What a model is *for*, as the gateway resolved it (#944, ADR-0140).
+
+``unknown`` is a first-class answer and the safe one: an id the catalogue has never heard of
+is refused nothing, because a wrong "this is an embedding model" would lock the operator out
+of a model that works. Only a *known* mismatch — a model the catalogue (or the operator) says
+is an embedding model, asked to answer a chat turn — is refused.
+"""
 
 
 class ToolCallFragment(BaseModel):
@@ -102,13 +112,25 @@ class ModelDetails(BaseModel):
     *not* a runtime knob. ``context_length`` is the model's trained maximum (a ceiling for the
     operator's per-model context-window choice). ``capabilities`` is what the runtime says the
     model can do (e.g. ``tools``, ``vision``) — drives tool gating + the chat capability hint.
-    Any field is ``None``/empty when the runtime did not report it (or the model isn't local)."""
+    Any field is ``None``/empty when the runtime did not report it (or the model isn't local).
+
+    ``role``, ``supports_tools`` and ``in_catalogue`` are the **resolved** capability answers
+    (ADR-0140) — the operator's override, what the gateway learned from the provider, and the
+    catalogue, already merged. They exist because ``capabilities`` cannot express "unknown":
+    an empty list has to mean both "this model can do nothing we badge" and "we have no idea",
+    and a shell that guesses between them shows the wrong hint. ``supports_tools is None`` is
+    the honest "we do not know"; ``in_catalogue`` is ``False`` for a hosted id LiteLLM's map has
+    never heard of (``None`` for a local model, which has no such map) — the fact
+    ``_note_unmapped`` has always logged and never surfaced (#879)."""
 
     quantization: str | None = None
     parameter_size: str | None = None
     context_length: int | None = None
     family: str | None = None
     capabilities: list[str] = []
+    role: ModelRole = "unknown"
+    supports_tools: bool | None = None
+    in_catalogue: bool | None = None
 
 
 KeyState = Literal["not_required", "present", "missing", "unavailable"]

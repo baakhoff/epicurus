@@ -71,7 +71,7 @@ import {
   TimezonePrefs,
   type ChannelPrefs,
   type PowerState,
-  type SavedModelOverride,
+  type SavedModelOverrideInput,
 } from "@/lib/contracts";
 import { epFetch } from "@/lib/http";
 import { parseFrame, sseRequest } from "@/lib/sse";
@@ -541,17 +541,21 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ model }),
     }),
-  // Correct what the core believes a saved hosted model can do (#711) — LiteLLM's static cost
-  // map omits some ids and mislabels others, which makes the image gate refuse a vision-capable
-  // model. `vision: "auto"` with a null context_length clears the override back to the map's
-  // answers. 404s for an id that isn't saved: an override is a property of a saved row, never a
-  // way to create one.
-  setSavedModelOverride: (model: string, override: SavedModelOverride) =>
+  // Correct what the core believes a saved hosted model can do (#711, extended by ADR-0140 to
+  // tool calling and the model's role) — the shipped catalogue omits some ids and mislabels
+  // others, which makes the image gate refuse a vision-capable model, hides tool support, or
+  // leaves a chat-vs-embedding mix-up undetectable until a turn dies. All-`auto` with a null
+  // context_length clears the record back to the catalogue's answers *and* clears whatever the
+  // gateway learned from the provider. 404s for an id that isn't saved: an override is a
+  // property of a saved row, never a way to create one.
+  setSavedModelOverride: (model: string, override: SavedModelOverrideInput) =>
     request(z.object({ status: z.string() }), "/platform/v1/llm/saved-models/capabilities", {
       method: "PUT",
       body: JSON.stringify({
         model,
         vision: override.vision,
+        tools: override.tools,
+        role: override.role,
         context_length: override.context_length ?? null,
       }),
     }),

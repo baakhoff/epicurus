@@ -13,11 +13,15 @@ from sqlalchemy.pool import StaticPool
 from structlog.testing import capture_logs
 
 from epicurus_core import EventBus, SecretError, SecretNotFoundError, SecretStore
+from epicurus_core_app.llm.errors import ModelCapabilityError
 from epicurus_core_app.llm.gateway import (
     _CONNECT_TIMEOUT_S,
     _UNBOUNDED_READ_S,
+    NO_TOOLS_SYSTEM_NOTE,
     LlmGateway,
     _normalize_tool_calls,
+    _tool_rejection_phrase,
+    with_no_tools_note,
 )
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import ChatMessage, ModelInfo, PowerState
@@ -1707,8 +1711,8 @@ async def test_supports_tools_reads_local_capabilities(monkeypatch: pytest.Monke
 
 
 async def test_supports_tools_assumes_hosted_models_can() -> None:
-    # Hosted providers can't be probed via Ollama and the mainstream ones support tools, so
-    # they're assumed capable — note no runtime client is mocked: /api/show is never called.
+    # A mainstream hosted model the shipped catalogue lists as tool-capable answers yes from
+    # the catalogue itself (#947) — no runtime client is mocked: /api/show is never called.
     assert await _gateway().supports_tools("claude/claude-3-5-sonnet-latest") is True
 
 
@@ -1759,25 +1763,40 @@ async def test_show_hosted_reports_capabilities_and_context_length_from_litellm(
 ) -> None:
     def fake_get_model_info(model: str) -> dict[str, Any]:
         assert model == "anthropic/claude-3-7-sonnet-20250219"
-        return {"max_input_tokens": 200000, "supports_vision": True}
+        return {
+            "max_input_tokens": 200000,
+            "supports_vision": True,
+            "supports_function_calling": True,
+            "mode": "chat",
+        }
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
     details = await _gateway().show("claude/claude-3-7-sonnet-20250219")
     assert details.context_length == 200000
     assert details.capabilities == ["tools", "vision"]
+    assert details.role == "chat"
+    assert details.supports_tools is True
+    assert details.in_catalogue is True
     # No /api/show call was made for a hosted model — no runtime client is mocked here.
 
 
 async def test_show_hosted_omits_vision_and_context_when_litellm_reports_neither(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A model the catalogue *does* list, and lists as tool-less, is reported tool-less (#947).
+
+    The "assume yes" default is for an id the map has never heard of, not for one it answers
+    about — see the next test. Either way the operator sees the missing badge and can override.
+    """
+
     def fake_get_model_info(model: str) -> dict[str, Any]:
         return {"supports_vision": False}
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
     details = await _gateway().show("gpt/some-text-only-model")
     assert details.context_length is None
-    assert details.capabilities == ["tools"]  # hosted is still assumed tool-capable
+    assert details.capabilities == []
+    assert details.supports_tools is False
 
 
 async def test_show_hosted_degrades_to_tools_only_when_model_is_unmapped(
@@ -1789,7 +1808,10 @@ async def test_show_hosted_degrades_to_tools_only_when_model_is_unmapped(
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", boom)
     details = await _gateway().show("custom/some-unlisted-model")
     assert details.context_length is None  # never a fake default
-    assert details.capabilities == ["tools"]
+    assert details.capabilities == ["tools"]  # unknown means yes, for tools only (#947)
+    assert details.supports_tools is True
+    assert details.in_catalogue is False  # and the miss is now *reported*, not only logged (#879)
+    assert details.role == "unknown"
 
 
 async def test_models_with_capabilities_enriches_each(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1991,7 +2013,11 @@ async def test_a_broken_store_degrades_to_the_map(monkeypatch: pytest.MonkeyPatc
 
 async def test_show_applies_the_override_over_the_map(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_get_model_info(model: str) -> dict[str, Any]:
-        return {"max_input_tokens": 8_000, "supports_vision": False}
+        return {
+            "max_input_tokens": 8_000,
+            "supports_vision": False,
+            "supports_function_calling": True,
+        }
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
     store = await _saved_store(
@@ -2022,7 +2048,11 @@ async def test_show_applies_the_override_even_when_the_lookup_fails(
 
 async def test_show_without_an_override_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_get_model_info(model: str) -> dict[str, Any]:
-        return {"max_input_tokens": 200_000, "supports_vision": True}
+        return {
+            "max_input_tokens": 200_000,
+            "supports_vision": True,
+            "supports_function_calling": True,
+        }
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
     store = await _saved_store({"grok/grok-latest": SavedModelOverride(vision="off")})
@@ -2085,3 +2115,382 @@ async def test_the_unmapped_model_memo_is_bounded(monkeypatch: pytest.MonkeyPatc
     for i in range(600):
         await gateway.show(f"custom/unlisted-{i}")
     assert len(gateway._unmapped_models) <= 512
+
+
+# ── Model role: chat is not embedding (#944, ADR-0140) ────────────────────────
+
+
+def _hosted_map(monkeypatch: pytest.MonkeyPatch, entries: dict[str, dict[str, Any]]) -> None:
+    """Stand in for LiteLLM's static cost map, raising its bare Exception for a miss."""
+
+    def fake_get_model_info(model: str) -> dict[str, Any]:
+        if model not in entries:
+            raise Exception("This model isn't mapped yet.")
+        return entries[model]
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.get_model_info", fake_get_model_info)
+
+
+async def test_model_role_reads_the_catalogue_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    _hosted_map(
+        monkeypatch,
+        {
+            "openrouter/qwen/qwen3-embedding-8b": {"mode": "embedding"},
+            "anthropic/claude-sonnet-4-6": {"mode": "chat"},
+        },
+    )
+    gw = _gateway()
+    assert await gw.model_role("openrouter/qwen/qwen3-embedding-8b") == "embedding"
+    assert await gw.model_role("claude/claude-sonnet-4-6") == "chat"
+    # An id the map has never heard of stays "unknown" — and is therefore refused nothing.
+    assert await gw.model_role("custom/never-listed") == "unknown"
+
+
+async def test_role_override_beats_the_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
+    _hosted_map(monkeypatch, {"xai/grok-latest": {"mode": "embedding"}})
+    store = await _saved_store({"grok/grok-latest": SavedModelOverride(role="chat")})
+    assert await _gateway(saved_models=store).model_role("grok/grok-latest") == "chat"
+
+
+async def test_chat_refuses_an_embedding_model_before_any_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#944's incident: the chat default was an embedding id and only OpenRouter said so."""
+    called = False
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        nonlocal called
+        called = True
+        return _Response({"choices": [{"message": {"content": "hi"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {"openrouter/qwen/qwen3-embedding-8b": {"mode": "embedding"}})
+    with pytest.raises(ModelCapabilityError) as caught:
+        await _gateway().chat(
+            [ChatMessage(role="user", content="hi")],
+            model="openrouter/qwen/qwen3-embedding-8b",
+        )
+    assert called is False
+    assert caught.value.capability == "chat"
+    assert "embedding model" in str(caught.value)
+    assert "Models page" in caught.value.hint
+
+
+async def test_chat_refusal_is_not_papered_over_by_the_fallback_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wrong default is a misconfiguration to surface, not a provider fault to route around."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        raise AssertionError("no provider call should happen")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {"openrouter/an-embedder": {"mode": "embedding"}})
+    gw = _gateway(fallbacks=["claude/claude-sonnet-4-6"])
+    with pytest.raises(ModelCapabilityError):
+        await gw.chat([ChatMessage(role="user", content="hi")], model="openrouter/an-embedder")
+
+
+async def test_stream_chat_refuses_an_embedding_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[Any]:
+        raise AssertionError("no provider call should happen")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {"openrouter/an-embedder": {"mode": "embedding"}})
+    with pytest.raises(ModelCapabilityError):
+        async for _ in _gateway().stream_chat(
+            [ChatMessage(role="user", content="hi")], model="openrouter/an-embedder"
+        ):
+            pass
+
+
+async def test_stream_refuses_an_embedding_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_acompletion(**kwargs: Any) -> AsyncIterator[Any]:
+        raise AssertionError("no provider call should happen")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {"openrouter/an-embedder": {"mode": "embedding"}})
+    with pytest.raises(ModelCapabilityError):
+        async for _ in _gateway().stream(
+            [ChatMessage(role="user", content="hi")], model="openrouter/an-embedder"
+        ):
+            pass
+
+
+async def test_embed_refuses_a_chat_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mirror rule: the Embedding-model card's old warning is now enforced (#944)."""
+
+    async def fake_aembedding(**kwargs: Any) -> Any:
+        raise AssertionError("no provider call should happen")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    _hosted_map(monkeypatch, {"anthropic/claude-sonnet-4-6": {"mode": "chat"}})
+    with pytest.raises(ModelCapabilityError) as caught:
+        await _gateway().embed(["hello"], model="claude/claude-sonnet-4-6")
+    assert caught.value.capability == "embedding"
+
+
+async def test_an_unknown_role_is_refused_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A catalogue miss must never lock the operator out of a model that works."""
+    seen: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        seen.update(kwargs)
+        return _Response({"choices": [{"message": {"content": "hi"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {})
+    result = await _gateway(secrets=_FakeSecrets({"llm/openrouter": {"api_key": "k"}})).chat(
+        [ChatMessage(role="user", content="hi")], model="openrouter/brand/new-model"
+    )
+    assert result.content == "hi"
+    assert seen["model"] == "openrouter/brand/new-model"
+
+
+async def test_embed_still_refuses_a_local_model_while_paused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pause rule moved into the shared gate; it must behave exactly as it did (ADR-0005)."""
+
+    async def fake_aembedding(**kwargs: Any) -> Any:
+        raise AssertionError("no provider call should happen")
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    power = PowerController()
+    power.pause()
+    with pytest.raises(GatewayPausedError):
+        await _gateway(power=power).embed(["hello"], model="nomic-embed-text")
+
+
+async def test_a_paused_local_chat_default_still_falls_back_to_hosted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The chat paths keep expressing the pause as a *filter*, not as a refusal (#944 guard)."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        assert kwargs["model"] == "anthropic/claude-sonnet-4-6"
+        return _Response({"choices": [{"message": {"content": "from the cloud"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {})
+    power = PowerController()
+    power.pause()
+    gw = _gateway(
+        power=power,
+        secrets=_FakeSecrets({"llm/anthropic": {"api_key": "k"}}),
+        fallbacks=["claude/claude-sonnet-4-6"],
+    )
+    result = await gw.chat([ChatMessage(role="user", content="hi")])
+    assert result.content == "from the cloud"
+
+
+# ── Tool support: learned from the provider, not guessed (#947, ADR-0140) ─────
+
+# The owner's real payload, unescaped from #947's report. The account identifier is a
+# placeholder; everything else is verbatim, including the triple nesting an aggregator
+# produces when it wraps its upstream's wrapped error.
+TOOL_REJECTION_PAYLOAD = (
+    'litellm.BadRequestError: OpenrouterException - {"error":{"message":"Provider returned '
+    'error","code":400,"metadata":{"raw":"{\\"error\\": {\\"message\\": '
+    '\\"{\\\\\\"error\\\\\\":{\\\\\\"message\\\\\\":\\\\\\"\\\\\\"auto\\\\\\" tool choice '
+    "requires --enable-auto-tool-choice and --tool-call-parser to be "
+    'set\\\\\\",\\\\\\"type\\\\\\":\\\\\\"BadRequestError\\\\\\",\\\\\\"param\\\\\\":null,'
+    '\\\\\\"code\\\\\\":400}}\\", \\"type\\": \\"invalid_request_error\\", \\"param\\": null, '
+    '\\"code\\": 400}}","provider_name":"NextBit","is_byok":false,'
+    '"provider_error_code":"400"}},"user_id":"user_2abcDEF"}\nLiteLLM Retried: 2 times'
+)
+
+# #944's sibling failure — also a 400, also from OpenRouter, and emphatically *not* about tools.
+EMBEDDING_REJECTION_PAYLOAD = (
+    'litellm.BadRequestError: OpenrouterException - {"error":{"message":'
+    '"qwen/qwen3-embedding-8b is an embedding model and cannot be used with the '
+    'chat/completions endpoint. Use the /embeddings endpoint instead.","code":400}}'
+)
+
+
+class _BadRequest(Exception):
+    """A stand-in for ``litellm.BadRequestError``: the text plus the status code."""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_the_matcher_recognises_the_real_payload() -> None:
+    assert _tool_rejection_phrase(_BadRequest(TOOL_REJECTION_PAYLOAD)) == "tool choice requires"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Error: tools is not supported by this model",
+        "this deployment does not support tools",
+        "function calling is not supported for the selected model",
+        "tool use is not supported here",
+        "unknown parameter: tool_choice",
+    ],
+)
+def test_the_matcher_recognises_the_other_known_shapes(text: str) -> None:
+    assert _tool_rejection_phrase(_BadRequest(text)) is not None
+
+
+def test_the_matcher_ignores_a_non_tool_400() -> None:
+    """#944's rejection is the one that must *not* be learned as "no tool support"."""
+    assert _tool_rejection_phrase(_BadRequest(EMBEDDING_REJECTION_PAYLOAD)) is None
+
+
+def test_the_matcher_ignores_a_server_error_that_mentions_tools() -> None:
+    """An outage is not a capability. Learning from one would disable every module."""
+    assert _tool_rejection_phrase(_BadRequest("tool_choice handler crashed", 503)) is None
+
+
+async def test_a_tool_rejection_is_retried_once_without_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Any] = []
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        calls.append(kwargs.get("tools"))
+        if kwargs.get("tools"):
+            raise _BadRequest(TOOL_REJECTION_PAYLOAD)
+        return _Response({"choices": [{"message": {"content": "hi there"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {})
+    store = await _saved_store({"openrouter/some/model": SavedModelOverride()})
+    gw = _gateway(secrets=_FakeSecrets({"llm/openrouter": {"api_key": "k"}}), saved_models=store)
+    result = await gw.chat(
+        [ChatMessage(role="user", content="hi")],
+        model="openrouter/some/model",
+        tools=[{"type": "function", "function": {"name": "now"}}],
+    )
+    assert result.content == "hi there"
+    # Exactly two calls: the one that carried tools, then the one that did not.
+    assert len(calls) == 2
+    assert calls[1] is None
+    # And the answer is remembered, for this tenant, in its own column.
+    override = await store.get_override("local", "openrouter/some/model")
+    assert override.tools_learned == "off"
+    assert override.tools == "auto"  # the operator has still said nothing
+
+
+async def test_a_second_tool_rejection_is_a_real_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The retry carries no tools, so a rejection of *that* is not about tools — it propagates."""
+    calls = 0
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        nonlocal calls
+        calls += 1
+        raise _BadRequest(TOOL_REJECTION_PAYLOAD)
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {})
+    store = await _saved_store({"openrouter/some/model": SavedModelOverride()})
+    gw = _gateway(secrets=_FakeSecrets({"llm/openrouter": {"api_key": "k"}}), saved_models=store)
+    with pytest.raises(_BadRequest):
+        await gw.chat(
+            [ChatMessage(role="user", content="hi")],
+            model="openrouter/some/model",
+            tools=[{"type": "function", "function": {"name": "now"}}],
+        )
+    assert calls == 2  # the tool call, then the tool-less retry — never a third
+
+
+async def test_the_learned_answer_is_written_for_the_calling_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Constraint #1: a provider's deployment is a per-tenant fact, because the key is."""
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        if kwargs.get("tools"):
+            raise _BadRequest(TOOL_REJECTION_PAYLOAD)
+        return _Response({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {})
+    store = await _saved_store({})
+    await store.add("tenant-b", "openrouter/some/model")
+    gw = _gateway(secrets=_FakeSecrets({"llm/openrouter": {"api_key": "k"}}), saved_models=store)
+    await gw.chat(
+        [ChatMessage(role="user", content="hi")],
+        model="openrouter/some/model",
+        tenant_id="tenant-b",
+        tools=[{"type": "function", "function": {"name": "now"}}],
+    )
+    assert (await store.get_override("tenant-b", "openrouter/some/model")).tools_learned == "off"
+    assert (await store.get_override("local", "openrouter/some/model")).tools_learned is None
+
+
+async def test_the_learn_warning_names_the_cause_and_no_account_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        if kwargs.get("tools"):
+            raise _BadRequest(TOOL_REJECTION_PAYLOAD)
+        return _Response({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {})
+    store = await _saved_store({"openrouter/some/model": SavedModelOverride()})
+    gw = _gateway(secrets=_FakeSecrets({"llm/openrouter": {"api_key": "k"}}), saved_models=store)
+    with capture_logs() as logs:
+        await gw.chat(
+            [ChatMessage(role="user", content="hi")],
+            model="openrouter/some/model",
+            tools=[{"type": "function", "function": {"name": "now"}}],
+        )
+    learned = next(e for e in logs if e["event"].startswith("model rejected the tool list"))
+    assert learned["log_level"] == "warning"
+    assert learned["provider"] == "openrouter"
+    assert learned["upstream"] == "NextBit"  # the aggregator's readable provider name
+    assert learned["matched"] == "tool choice requires"
+    # The raw body — and the account identifier riding in it — never reaches the log line.
+    assert "user_2abcDEF" not in json.dumps(learned, default=str)
+
+
+async def test_a_learned_no_disables_tools_on_the_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _hosted_map(monkeypatch, {"openrouter/some/model": {"supports_function_calling": True}})
+    store = await _saved_store({"openrouter/some/model": SavedModelOverride()})
+    gw = _gateway(saved_models=store)
+    assert await gw.supports_tools("openrouter/some/model") is True
+    await store.learn_tools_unsupported("local", "openrouter/some/model")
+    assert await gw.supports_tools("openrouter/some/model") is False
+
+
+async def test_the_operator_override_beats_the_learned_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`on` is authoritative — a mis-learn is one click to undo, and the click clears it."""
+    _hosted_map(monkeypatch, {})
+    store = await _saved_store({})
+    await store.add("local", "openrouter/some/model")
+    await store.learn_tools_unsupported("local", "openrouter/some/model")
+    gw = _gateway(saved_models=store)
+    assert await gw.supports_tools("openrouter/some/model") is False
+    await store.set_override("local", "openrouter/some/model", SavedModelOverride(tools="on"))
+    assert await gw.supports_tools("openrouter/some/model") is True
+    assert (await store.get_override("local", "openrouter/some/model")).tools_learned is None
+
+
+async def test_an_embedding_model_reports_no_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    _hosted_map(
+        monkeypatch,
+        {"openrouter/qwen/qwen3-embedding-8b": {"mode": "embedding"}},
+    )
+    details = await _gateway().show("openrouter/qwen/qwen3-embedding-8b")
+    assert details.capabilities == ["embedding"]
+    assert details.supports_tools is False
+
+
+def test_the_no_tools_note_lands_inside_the_protected_system_prefix() -> None:
+    convo = [
+        ChatMessage(role="system", content="base prompt"),
+        ChatMessage(role="system", content="recalled facts"),
+        ChatMessage(role="user", content="hi"),
+    ]
+    noted = with_no_tools_note(convo)
+    assert [m.role for m in noted] == ["system", "system", "system", "user"]
+    assert noted[2].content == NO_TOOLS_SYSTEM_NOTE
+    assert convo[0].content == "base prompt"  # the input list is not mutated

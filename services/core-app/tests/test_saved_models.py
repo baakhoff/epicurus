@@ -226,3 +226,62 @@ async def test_the_migration_heals_a_table_without_the_override_columns() -> Non
         await store.set_override("t1", "xai/grok-latest", SavedModelOverride(vision="on")) is True
     )
     assert (await store.get_override("t1", "xai/grok-latest")).vision == "on"
+
+
+# ── The extended capability record (#944, #947, ADR-0140) ─────────────────────
+
+
+async def test_tools_and_role_overrides_round_trip() -> None:
+    store, _ = await _fresh()
+    await store.add("t1", "openrouter/some/model")
+    assert (
+        await store.set_override(
+            "t1",
+            "openrouter/some/model",
+            SavedModelOverride(vision="off", tools="off", role="chat", context_length=8192),
+        )
+        is True
+    )
+    override = await store.get_override("t1", "openrouter/some/model")
+    assert (override.vision, override.tools, override.role) == ("off", "off", "chat")
+    assert override.context_length == 8192
+    assert (await store.overrides("t1"))["openrouter/some/model"].tools == "off"
+
+
+async def test_a_learned_answer_is_its_own_field() -> None:
+    """ "Auto, and we learned it can't" must stay distinguishable from an explicit "off"."""
+    store, _ = await _fresh()
+    await store.add("t1", "openrouter/some/model")
+    assert await store.learn_tools_unsupported("t1", "openrouter/some/model") is True
+    override = await store.get_override("t1", "openrouter/some/model")
+    assert override.tools_learned == "off"
+    assert override.tools == "auto"
+    # And a row carrying only a learned answer still appears in the list.
+    assert "openrouter/some/model" in await store.overrides("t1")
+
+
+async def test_an_operator_write_clears_the_learned_answer() -> None:
+    store, _ = await _fresh()
+    await store.add("t1", "openrouter/some/model")
+    await store.learn_tools_unsupported("t1", "openrouter/some/model")
+    await store.set_override("t1", "openrouter/some/model", SavedModelOverride())
+    assert (await store.get_override("t1", "openrouter/some/model")).is_empty()
+
+
+async def test_nothing_is_learned_for_an_unsaved_model() -> None:
+    store, _ = await _fresh()
+    assert await store.learn_tools_unsupported("t1", "gpt/never-saved") is False
+    assert await store.list("t1") == []
+
+
+async def test_an_unknown_stored_value_degrades_to_auto() -> None:
+    """A capability *hint* must never break the model list it decorates."""
+    store, engine = await _fresh()
+    await store.add("t1", "gpt/some-model")
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql(
+            "UPDATE saved_models SET tools_override='perhaps', role_override='reranker', "
+            "tools_learned='on' WHERE model='gpt/some-model'"
+        )
+    override = await store.get_override("t1", "gpt/some-model")
+    assert (override.tools, override.role, override.tools_learned) == ("auto", "auto", None)

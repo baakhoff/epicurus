@@ -12,6 +12,28 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The backup archives your files, and the gates stop grading themselves on a curve**
+  (#919, #895, #864) — three quiet failures of the same kind: something reported success while
+  doing less than it said. `infra/backups/backup.sh` looped over two volumes that had not
+  existed since the file space moved to `epicurus-files`, and it never archived
+  `epicurus-files` itself — the core's `/data`, and the bytes behind every knowledge document
+  and note. A backup taken before this holds no user files at all, and it exited 0. The loop
+  is now correct, the file space is archived whether it lives in the named volume or in the
+  host directory `EPICURUS_FILES_ROOT` points at, a restore puts it back wherever *this*
+  machine keeps it, the `valkey` cache is no longer archived (nothing in the codebase reads
+  it), and a repo test holds both scripts to the volumes the compose files really declare — so
+  the next stale name fails CI instead of silently shrinking a backup. **Take a fresh backup.**
+  On the CI side the two smoke gates now assert the same things on both runtimes: the Compose
+  gate was never starting the web shell (so nginx's runtime-derived resolver was gated on
+  Kubernetes only), neither gate checked that the MinIO bucket seed succeeded, the Kubernetes
+  gate had no Ollama workload so the restart arm of the container-runtime seam — and the chart
+  Role's `statefulsets` verb — never ran, nothing proved a file write reaches the cluster's
+  RWO volume, and every cluster boot was a *fresh* install, the one shape that cannot show an
+  upgrade defect. All five are closed, the gate-parity test no longer passes on needles that
+  match a comment, Helm's download is checksummed like every other pinned tool, and the
+  JetStream integration suite is isolated by per-test stream and subject names instead of by
+  wiping a shared stream — which is what it had actually been failing on in three CI runs.
+  Version bumps: none — no shipped component changed.
 - **The core's schema is migration-managed, and #903's `NULL` is fixed at the source** (#834,
   #927) — core-app owns 40 tables, by far the biggest schema here, and built them at every
   startup with 29 separate `create_all` + additive-reconcile calls, each wrapped in its own

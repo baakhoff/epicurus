@@ -15,6 +15,11 @@
 # the services through a curl pod in the namespace (the symmetric twin of the
 # Compose gate's throwaway curl container), restart workloads, and diagnose.
 #
+# #919 closed the parity holes the #894 review left: the Ollama stand-in
+# (infra/ci/ollama-stub.yaml) so the seam's restart arm and the chart Role's
+# `statefulsets` verb actually run, the minio-init Job asserted, and an
+# install -> `helm upgrade` step so the boot is no longer only ever a fresh one.
+#
 #   sh infra/ci/k8s-smoke.sh                      # create a cluster, boot, assert, delete
 #   KEEP_UP=1 sh infra/ci/k8s-smoke.sh            # leave the cluster up to poke at
 #   SMOKE_SKIP_BUILD=1 sh infra/ci/k8s-smoke.sh   # images already built and loaded
@@ -87,6 +92,10 @@ restart_openbao() { # delete the vault pod; the chart's unseal loop brings it ba
 restart_core_app() {
   kc rollout restart deployment/core-app >/dev/null
   kc rollout status deployment/core-app --timeout=300s >/dev/null
+}
+
+settle_llm_runtime() { # the shared KV-cache assertion rolls it; wait for the new pod
+  kc rollout status statefulset/ollama --timeout=180s >/dev/null
 }
 
 dump_diagnostics() {
@@ -189,6 +198,22 @@ kc run "$CURL_POD" --image="$CURL_IMG" --restart=Never --command -- sleep 3600 >
 kc wait --for=condition=Ready "pod/$CURL_POD" --timeout=180s >/dev/null
 ok "curl pod ready"
 
+# The bucket seed (#919): asserted by neither gate until now, so a failed seed was
+# invisible on both. `helm --wait` does not wait for Jobs, and the storage module
+# creates its bucket lazily on first write — nothing would go red until an upload.
+kc wait --for=condition=complete job \
+  -l app.kubernetes.io/component=minio-init --timeout=300s >/dev/null
+ok "the minio-init Job completed — the default bucket is seeded (#919)"
+
+# The Ollama stand-in (#919). values-ci.yaml turns the chart's Ollama off, which left
+# `KubernetesController.restart_service` and the chart Role's `statefulsets` verb with
+# nothing to act on — the second ADR-0134 arm was mock-only while Compose exercised its
+# counterpart on every push. See infra/ci/ollama-stub.yaml for why a stub and not an image.
+log "Applying the Ollama stand-in workload"
+kc apply -f infra/ci/ollama-stub.yaml >/dev/null
+kc rollout status statefulset/ollama --timeout=180s >/dev/null
+ok "the Ollama stand-in StatefulSet is up, labelled as the seam looks for it"
+
 # ── Kubernetes-only assertions ────────────────────────────────────────────────
 log "Asserting the Kubernetes-specific last mile"
 
@@ -206,18 +231,52 @@ case "$token_period" in
 esac
 ok "app token is periodic (${token_period}s), so renewal can keep it alive indefinitely"
 
-# The web shell derives nginx's resolver from the pod's own /etc/resolv.conf
-# (#891): the hardcoded 127.0.0.11 it used before is Docker's embedded DNS and
-# does not exist in a pod, so every proxied request would fail at name resolution
-# while both probes stayed green. Only a real cluster can prove this.
-http -f "http://web:8080/healthz" >/dev/null || die "web /healthz unreachable or non-200"
-winfo="$(http "http://web:8080/platform/v1/info" || true)"
-printf '%s' "$winfo" | grep -q '"core_app_version"' \
-  || die "web did not proxy /platform/ to the core (nginx resolver wrong for a pod?): $winfo"
-ok "the web shell proxies /platform/ to the core through the pod's own DNS (#891)"
+# NOTE: the web shell's nginx-resolver assertion (#891) used to live here. It moved
+# into smoke-assert.sh with #919 — the resolver is derived from the container's own
+# /etc/resolv.conf on *every* runtime, and the Compose gate was not even starting
+# `web`, so the Docker half of that same code path was ungated.
 
 # ── the runtime-neutral last mile, shared with the Compose gate ────────────────
 smoke_assert
+
+# ── the upgrade path (#919) ───────────────────────────────────────────────────
+# Every boot before this was a fresh `helm install`. Operators upgrade, and the chart
+# defects found so far (OpenBao's DAC_OVERRIDE) were of exactly that class: a thing
+# that is only wrong the second time a workload starts. `helm upgrade` also re-renders
+# the two revision-named Jobs, so this is the first check that the OpenBao bootstrap's
+# "idempotent, safe to re-run on every release" claim is true against a live vault
+# rather than the API stub tests/test_chart_services.py drives it with.
+#
+# Deviation from #919's wording, deliberately: the issue says "same chart, bumped image
+# tag". A second tag means re-exporting every first-party image into the kind node, and
+# this job already runs ~10 of its 20 minutes with 11 uncached builds inside. A changed
+# `core.extraEnv` value forces the same thing the tag would — a real pod-template change,
+# so core-app genuinely rolls — for the cost of one API call.
+log "Upgrading the release in place (helm upgrade over a running install)"
+helm upgrade "$RELEASE" "$CHART" \
+  --namespace "$NS" \
+  --values "$VALUES" \
+  --set "image.tag=$IMAGE_TAG" \
+  --set-string "core.extraEnv.EPICURUS_SMOKE_UPGRADE=$(date -u +%s)" \
+  --wait --timeout 8m
+kc rollout status deployment/core-app --timeout=300s >/dev/null
+kc wait --for=condition=complete job \
+  -l app.kubernetes.io/component=openbao-bootstrap --timeout=300s >/dev/null
+kc wait --for=condition=complete job \
+  -l app.kubernetes.io/component=minio-init --timeout=300s >/dev/null
+ok "helm upgrade rolled the release and both revision Jobs re-ran cleanly"
+
+http -f "http://core-app:8080/health" >/dev/null || die "core-app is not healthy after a helm upgrade"
+for m in $EXPECT_MODULES; do
+  avail="$(kc get "deployment/$m" -o jsonpath='{.status.availableReplicas}' 2>/dev/null || true)"
+  [ "${avail:-0}" -ge 1 ] || die "module '$m' has ${avail:-0} available replicas after the upgrade"
+done
+# The secret smoke_assert stored has to still be there: an upgrade must not re-init the
+# vault, orphan the app token, or lose the PVC behind it.
+prov="$(http "http://core-app:8080/platform/v1/llm/providers" || true)"
+printf '%s' "$prov" | grep -oE '"alias":"claude"[^}]*' | grep -q '"configured":true' \
+  || die "the provider key did not survive a helm upgrade (vault re-initialised, or a new app token?)"
+ok "state survived the upgrade: every module still registered, the stored secret still readable"
 
 # ── the Kubernetes arm of the container-runtime seam (#891, ADR-0134) ──────────
 # Everything above is true of any deployment. This is the part that was mock-only

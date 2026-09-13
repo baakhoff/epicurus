@@ -12,7 +12,11 @@ The travelling tables are read and written **generically**, over SQLAlchemy's ow
 metadata rather than each store's Python API. That is a deliberate trade: a bespoke
 serializer per store would be forty hand-written round-trips to keep in step with forty
 evolving models, and the first one to drift would lose data silently. Reading the columns
-means a column added tomorrow travels tomorrow, with no edit here.
+means a column added tomorrow travels tomorrow, with no edit here. The encode/decode/
+normalize machinery that buys that is
+:class:`~epicurus_core.portability_columns.PortableTable` (promoted out of here and
+``calendar``'s own copy in #918 — see its docstring for the shared rule); this module
+supplies only the table specs below and the set-level upsert loop around them.
 
 Two rules make that safe:
 
@@ -30,35 +34,22 @@ Two rules make that safe:
   and its row-reader coerces that to the Python-side default on every read. A fresh target
   never went through that reconcile: ``create_all`` made the column ``NOT NULL``, and an
   explicit ``None`` in an ``insert()`` bypasses the ORM default and violates the constraint.
-  Both ends therefore normalise here — :meth:`TableSpec.encode` on the way out and
-  :meth:`TableSpec.normalize` on the way in — so an archive is portable regardless of which
-  reconcile its source went through, and a null that *cannot* be defaulted costs one row
-  rather than the whole set.
+  Both ends therefore normalise here —
+  :meth:`~epicurus_core.portability_columns.PortableTable.encode` on the way out and
+  :meth:`~epicurus_core.portability_columns.PortableTable.normalize` on the way in — so an
+  archive is portable regardless of which reconcile its source went through, and a null
+  that *cannot* be defaulted costs one row rather than the whole set.
 """
 
 from __future__ import annotations
 
-import base64
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any, cast
+from collections.abc import AsyncIterator
 
-from sqlalchemy import (
-    Boolean,
-    Column,
-    ColumnDefault,
-    DateTime,
-    LargeBinary,
-    Table,
-    UniqueConstraint,
-    insert,
-    select,
-    update,
-)
+from sqlalchemy import UniqueConstraint, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from epicurus_core import ImportOutcome, ImportReport, PortabilityRecord
+from epicurus_core.portability_columns import PortableTable, table_of
 from epicurus_core_app.agent.instructions import (
     _AgentInstructionsRow,
     _AgentInstructionsVersionRow,
@@ -88,7 +79,6 @@ __all__ = [
     "CORE_SETS",
     "EXCLUSIONS",
     "MEMORY_SET",
-    "TableSpec",
     "export_set",
     "import_set",
 ]
@@ -102,87 +92,17 @@ generic reader above buys. Reserved for a change that would make an old archive 
 """
 
 
-@dataclass(frozen=True, slots=True)
-class TableSpec:
-    """One travelling table: its record ``kind`` and the natural key the upsert matches on.
-
-    *key* names columns that identify the row **across installations**; an empty key means
-    the table holds exactly one row per tenant (every prefs table), so the tenant *is* the
-    key. *skip* names columns that must not travel — always the surrogate primary key, since
-    its value is an artefact of the source database's insert order and nothing else.
-    """
-
-    kind: str
-    table: Table
-    key: tuple[str, ...] = ()
-    skip: tuple[str, ...] = ()
-
-    @property
-    def columns(self) -> list[Column[Any]]:
-        """The columns that travel: everything but ``tenant`` and the skipped surrogates."""
-        return [c for c in self.table.columns if c.name != "tenant" and c.name not in self.skip]
-
-    def identity(self, data: Mapping[str, Any]) -> str:
-        """The record's stable id — the natural key's values, or the kind for a singleton."""
-        if not self.key:
-            return self.kind
-        return "|".join(str(data.get(name)) for name in self.key)
-
-    def encode(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        """A JSON-safe mapping of the travelling columns of *row*, nulls defaulted (#903)."""
-        return {
-            c.name: _encode_value(c, _defaulted(c, row[c.name]))
-            for c in self.columns
-            if c.name in row
-        }
-
-    def decode(self, data: Mapping[str, Any]) -> dict[str, Any]:
-        """Python values for the travelling columns present in *data* (unknown keys dropped)."""
-        by_name = {c.name: c for c in self.columns}
-        return {
-            name: _decode_value(by_name[name], value)
-            for name, value in data.items()
-            if name in by_name
-        }
-
-    def normalize(self, data: Mapping[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
-        """*data* with every fillable ``NULL`` replaced, plus the ones that could not be.
-
-        The import-side twin of :meth:`encode`, and the reason an archive written *before*
-        this rule existed still applies cleanly: the normalisation is what the reader does,
-        not only what the writer did. Returns the JSON-side mapping (unknown keys kept — the
-        caller still has to notice them) and the names of columns the model marks ``NOT NULL``
-        that carry a ``NULL`` with no default to fill it. That second list is what turns a
-        set-level ``IntegrityError`` into one skipped row with the column named.
-        """
-        by_name = {c.name: c for c in self.columns}
-        normalized: dict[str, Any] = {}
-        undefaultable: list[str] = []
-        for name, value in data.items():
-            column = by_name.get(name)
-            if column is None:
-                normalized[name] = value
-                continue
-            filled = _defaulted(column, value)
-            if filled is None and not column.nullable:
-                undefaultable.append(name)
-            normalized[name] = filled
-        return normalized, tuple(sorted(undefaultable))
-
-
-def _table(model: Any) -> Table:
-    """A mapped class's ``__table__``, narrowed (it is typed ``FromClause``, always a Table)."""
-    return cast("Table", model.__table__)
-
-
 # ── What travels ──────────────────────────────────────────────────────────────
 #
 # Grouped into the archive's ``core/<set>.ndjson`` members. The grouping is for the
 # operator's benefit (an import preview that says "conversations: 4,812 records" reads;
 # one that says "agent_messages, agent_attachments, session_models…" does not) — the
-# records inside carry their own ``kind``, so a set is only ever a filename.
+# records inside carry their own ``kind``, so a set is only ever a filename. Each table is
+# read and written through :class:`~epicurus_core.portability_columns.PortableTable`
+# (#918) — the encode/decode/normalize machinery lives there now, shared with
+# ``calendar``'s identical copy.
 
-CORE_SETS: dict[str, tuple[TableSpec, ...]] = {
+CORE_SETS: dict[str, tuple[PortableTable, ...]] = {
     # Chat: the messages themselves, the attachments they reference, and the per-session
     # model choice that makes reopening one behave the way it did.
     "conversations": (
@@ -190,73 +110,77 @@ CORE_SETS: dict[str, tuple[TableSpec, ...]] = {
         # its session, its instant, and its role. Two messages in one session sharing a
         # microsecond *and* a role is not a state the writer can produce (a turn appends
         # user then assistant), so this is an identity, not a heuristic.
-        TableSpec(
+        PortableTable(
             kind="agent_messages",
-            table=_table(StoredMessage),
+            table=table_of(StoredMessage),
             key=("session_id", "created_at", "role"),
             skip=("id",),
         ),
-        TableSpec(kind="agent_attachments", table=_table(StoredAttachment), key=("att_id",)),
-        TableSpec(kind="session_models", table=_table(_StoredSessionModel), key=("session_id",)),
+        PortableTable(kind="agent_attachments", table=table_of(StoredAttachment), key=("att_id",)),
+        PortableTable(
+            kind="session_models", table=table_of(_StoredSessionModel), key=("session_id",)
+        ),
         # Which chat belongs to which automation (#672) — the chat list's grouping. Source of
         # truth, not operational: without it an imported automation's chats read as loose
         # user conversations.
-        TableSpec(
+        PortableTable(
             kind="automation_sessions",
-            table=_table(_StoredAutomationSession),
+            table=table_of(_StoredAutomationSession),
             key=("session_id",),
         ),
     ),
     # How the assistant was taught to behave: the base prompt, the playbooks beside it, the
     # staged edits and the resolved decision trail the reflection pass reads back (ADR-0090).
     "agent": (
-        TableSpec(kind="agent_instructions", table=_table(_AgentInstructionsRow)),
-        TableSpec(
+        PortableTable(kind="agent_instructions", table=table_of(_AgentInstructionsRow)),
+        PortableTable(
             kind="agent_instructions_versions",
-            table=_table(_AgentInstructionsVersionRow),
+            table=table_of(_AgentInstructionsVersionRow),
             key=("vid",),
             skip=("id",),
         ),
-        TableSpec(kind="agent_playbooks", table=_table(_AgentPlaybookRow), key=("id",)),
-        TableSpec(
+        PortableTable(kind="agent_playbooks", table=table_of(_AgentPlaybookRow), key=("id",)),
+        PortableTable(
             kind="agent_playbook_versions",
-            table=_table(_AgentPlaybookVersionRow),
+            table=table_of(_AgentPlaybookVersionRow),
             key=("vid",),
             skip=("id",),
         ),
-        TableSpec(
+        PortableTable(
             kind="agent_playbook_proposals",
-            table=_table(_PlaybookProposalRow),
+            table=table_of(_PlaybookProposalRow),
             key=("sid",),
             skip=("id",),
         ),
-        TableSpec(
+        PortableTable(
             kind="agent_playbook_decisions",
-            table=_table(_PlaybookDecisionRow),
+            table=table_of(_PlaybookDecisionRow),
             key=("sid",),
             skip=("id",),
         ),
         # The standing profile is versioned per tenant with a surrogate id; its instant is
         # what distinguishes one synthesis from the next.
-        TableSpec(
+        PortableTable(
             kind="standing_profiles",
-            table=_table(StoredProfile),
+            table=table_of(StoredProfile),
             key=("created_at",),
             skip=("id",),
         ),
     ),
     # What the assistant does unattended, and what it is subscribed to.
     "automations": (
-        TableSpec(kind="automations", table=_table(_StoredAutomation), key=("id",), skip=("pk",)),
-        TableSpec(
+        PortableTable(
+            kind="automations", table=table_of(_StoredAutomation), key=("id",), skip=("pk",)
+        ),
+        PortableTable(
             kind="event_subscriptions",
-            table=_table(_EventSubscriptionRow),
+            table=table_of(_EventSubscriptionRow),
             key=("module", "event_type"),
             skip=("pk",),
         ),
-        TableSpec(
+        PortableTable(
             kind="scheduled_turns",
-            table=_table(_StoredScheduledTurn),
+            table=table_of(_StoredScheduledTurn),
             key=("id",),
             skip=("pk",),
         ),
@@ -264,19 +188,21 @@ CORE_SETS: dict[str, tuple[TableSpec, ...]] = {
     # The notification centre's durable record (#671) — the operator's own history, not a
     # delivery queue (``push_queue``/``push_subscriptions`` are excluded below).
     "notifications": (
-        TableSpec(kind="notifications", table=_table(_NotificationRow), key=("id",), skip=("pk",)),
+        PortableTable(
+            kind="notifications", table=table_of(_NotificationRow), key=("id",), skip=("pk",)
+        ),
     ),
     # Every preference table: one row per tenant unless the preference is *about* something
     # (a model, a module), in which case that something is the key.
     "prefs": (
-        TableSpec(kind="llm_prefs", table=_table(_LlmPrefRow)),
-        TableSpec(kind="saved_models", table=_table(_SavedModelRow), key=("model",)),
-        TableSpec(kind="model_settings", table=_table(_ModelSettingsRow), key=("model",)),
-        TableSpec(kind="module_prefs", table=_table(_ModulePrefRow), key=("module",)),
-        TableSpec(kind="timezone_prefs", table=_table(_TimezonePrefRow)),
-        TableSpec(kind="page_order_prefs", table=_table(_PageOrderRow)),
-        TableSpec(kind="push_prefs", table=_table(_PushPrefsRow)),
-        TableSpec(kind="maintenance_schedule_prefs", table=_table(_MaintenanceScheduleRow)),
+        PortableTable(kind="llm_prefs", table=table_of(_LlmPrefRow)),
+        PortableTable(kind="saved_models", table=table_of(_SavedModelRow), key=("model",)),
+        PortableTable(kind="model_settings", table=table_of(_ModelSettingsRow), key=("model",)),
+        PortableTable(kind="module_prefs", table=table_of(_ModulePrefRow), key=("module",)),
+        PortableTable(kind="timezone_prefs", table=table_of(_TimezonePrefRow)),
+        PortableTable(kind="page_order_prefs", table=table_of(_PageOrderRow)),
+        PortableTable(kind="push_prefs", table=table_of(_PushPrefsRow)),
+        PortableTable(kind="maintenance_schedule_prefs", table=table_of(_MaintenanceScheduleRow)),
     ),
 }
 
@@ -337,85 +263,6 @@ Recorded rather than merely documented: an operator staring at a fresh import ne
 that an empty Files search and a cold vector store are the *design*, and that the two
 rebuilds the import runs are what fill them.
 """
-
-
-def _canonical_dt(value: datetime) -> str:
-    """A timezone-canonical ISO string, so a round trip through any dialect compares equal.
-
-    SQLite has no timezone-aware type: an aware ``datetime`` written to it reads back naive,
-    so the same row would encode differently before and after a round trip and the second
-    apply of an archive would report *updated* where it must report *skipped*. Every instant
-    the core writes is UTC, so a naive value is read as UTC and an aware one is converted to
-    it — one canonical spelling on both sides of the trip.
-    """
-    aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-    return aware.isoformat()
-
-
-_NO_DEFAULT = object()
-"""Sentinel — a column has no Python-side scalar default. ``None`` cannot say this: a
-``default=None`` and a missing default are different facts, and so are ``default=False``
-and no default at all."""
-
-
-def _scalar_default(column: Column[Any]) -> Any:
-    """*column*'s Python-side scalar default, or :data:`_NO_DEFAULT`.
-
-    Only a plain value counts. A callable (``default=uuid4``) or a SQL expression
-    (``server_default=func.now()``) is evaluated by the ``insert`` itself, which already
-    happens for a column the record omits entirely — there is no value to write into a
-    *record* here, and inventing one at export time would freeze one installation's clock
-    into the archive.
-    """
-    default = column.default
-    # ``is_scalar`` is what does the work, not the ``isinstance``: ``CallableColumnDefault``
-    # and ``ColumnElementColumnDefault`` are both ``ColumnDefault`` subclasses and both carry
-    # an ``arg`` (the callable, the SQL element) — it is just not a value that may be frozen
-    # into a record, which is the same answer as having no default at all. A ``Sequence`` is
-    # not a ``ColumnDefault``, so the ``isinstance`` catches that one.
-    if not isinstance(default, ColumnDefault) or not default.is_scalar:
-        return _NO_DEFAULT
-    return default.arg
-
-
-def _defaulted(column: Column[Any], value: Any) -> Any:
-    """*value*, with a ``NULL`` in a ``NOT NULL`` column replaced by the column's default.
-
-    A **nullable** column is left alone: its ``NULL`` is data (``recurrence`` on a plain
-    event, ``lead_minutes`` meaning "use the fallback"), and defaulting it would rewrite the
-    operator's rows. Only a column the model declares ``NOT NULL`` can be carrying an
-    impossible value, and only the reconcile (#249, ADR-0067) can have put it there.
-    """
-    if value is not None or column.nullable:
-        return value
-    default = _scalar_default(column)
-    return None if default is _NO_DEFAULT else default
-
-
-def _encode_value(column: Column[Any], value: Any) -> Any:
-    """One column value, JSON-safe."""
-    if value is None:
-        return None
-    if isinstance(column.type, DateTime):
-        return _canonical_dt(value) if isinstance(value, datetime) else str(value)
-    if isinstance(column.type, LargeBinary):
-        return base64.b64encode(bytes(value)).decode("ascii")
-    if isinstance(column.type, Boolean):
-        return bool(value)
-    return value
-
-
-def _decode_value(column: Column[Any], value: Any) -> Any:
-    """The inverse of :func:`_encode_value`, back to what the column wants."""
-    if value is None:
-        return None
-    if isinstance(column.type, DateTime):
-        return datetime.fromisoformat(str(value)) if isinstance(value, str) else value
-    if isinstance(column.type, LargeBinary):
-        return base64.b64decode(str(value))
-    if isinstance(column.type, Boolean):
-        return bool(value)
-    return value
 
 
 async def export_set(
@@ -483,7 +330,7 @@ async def import_set(
     return report
 
 
-def _globally_unique(spec: TableSpec) -> bool:
+def _globally_unique(spec: PortableTable) -> bool:
     """Whether *spec*'s natural key is unique across the **whole table**, not per tenant.
 
     Several core tables key on a client-minted uuid (``att_id``, ``session_id``) or a
@@ -515,7 +362,7 @@ def _globally_unique(spec: TableSpec) -> bool:
 
 async def _upsert(
     conn: AsyncConnection,
-    spec: TableSpec,
+    spec: PortableTable,
     record: PortabilityRecord,
     tenant: str,
     dry_run: bool,

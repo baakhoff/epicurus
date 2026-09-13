@@ -25,10 +25,11 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from epicurus_core import ImportReport, ModuleManifest
+from epicurus_core import EpicurusModule, ImportReport, ModuleManifest, add_portability_routes
 from epicurus_core.files import FileStore, LocalFileStore
 from epicurus_core_app.modules import ModuleSnapshot, ModuleStatus
 from epicurus_core_app.portability.archive import ArchiveReader, sanitize_member
@@ -50,6 +51,7 @@ from epicurus_core_app.portability.service import (
     FILES_COMPONENT,
     REEMBED_COMPONENT,
     RESCAN_COMPONENT,
+    JobRunning,
     PortabilityService,
     _apply_plan,
 )
@@ -886,37 +888,66 @@ async def test_a_modules_own_error_detail_reaches_the_report_line(tmp_path: Path
     assert "Server error" not in (failed.error or "")
 
 
-async def test_a_bodyless_500_leaves_the_report_line_with_nothing_to_carry(
+class _ExplodingCalendarStore:
+    """A module store whose ``import_`` blows up without turning itself into a refusal.
+
+    Stands in for a real module's own bug (an ``IntegrityError``, a coding mistake) rather
+    than a deliberate ``HTTPException`` — the shape #918 fixed at
+    ``epicurus_core.add_portability_routes``, not here.
+    """
+
+    schema = "calendar/1"
+
+    async def export(self, *, tenant_id: str) -> AsyncIterator[Any]:
+        return
+        yield  # pragma: no cover - makes this an async generator; never reached
+
+    async def import_(self, *, tenant_id: str, records: AsyncIterator[Any], dry_run: bool) -> Any:
+        async for _ in records:
+            pass
+        raise RuntimeError("disk is on fire")
+
+
+async def test_an_unhandled_module_exception_now_carries_a_detail_too(
     tmp_path: Path,
 ) -> None:
-    """The gap #903's follow-up names, pinned so the fix has something to change.
+    """The gap #903's follow-up named (#918) — fixed at the seam, not worked around here.
 
-    An unhandled exception inside a module's ``/import`` route is answered by Starlette's
-    ``ServerErrorMiddleware`` as ``text/plain`` "Internal Server Error" — no JSON, no
-    ``detail`` — so there is nothing for the core to carry and the report falls back to
-    httpx's generic text. That is exactly what the operator saw. The remedy belongs at
-    ``epicurus_core.add_portability_routes``, which is where the module's exception is still
-    an exception; when it lands, this test is the one that changes.
+    Before #918, an unhandled exception inside a module's ``/import`` route was answered by
+    Starlette's ``ServerErrorMiddleware`` as ``text/plain`` "Internal Server Error" — no
+    JSON, no ``detail`` — so there was nothing for the core to carry and the report fell back
+    to httpx's generic text. ``epicurus_core.add_portability_routes`` now catches any
+    exception the store raises and answers with a JSON ``detail`` naming it, so this exercises
+    the *real* route (a genuine ``FastAPI`` app behind an ``ASGITransport``) rather than a
+    hand-crafted response standing in for the old bug.
     """
+    module_app = FastAPI()
+    add_portability_routes(
+        module_app,
+        EpicurusModule("calendar", version="1.2.3", portable=True),
+        _ExplodingCalendarStore(),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=module_app), base_url="http://calendar:8080"
+    ) as client:
+        real_response = await client.post(
+            "/import",
+            params={"tenant_id": TENANT},
+            content=_module_stream("calendar/1", [{"kind": "event", "id": "e-1", "data": {}}]),
+        )
+    assert real_response.status_code == 500
+    assert real_response.json()["detail"] == "RuntimeError: disk is on fire"
+
     engine = await _engine(tmp_path)
     await _seed_core(engine)
     try:
-        # The body a module's unhandled exception really produces: text/plain, no JSON. It
-        # carries a sentence, and the assertion below is that none of it survives — which is
-        # the defect, not the fixture.
-        failed = await _apply_with_module_answer(
-            tmp_path / "bare",
-            engine,
-            httpx.Response(500, text="Internal Server Error"),
-        )
+        failed = await _apply_with_module_answer(tmp_path / "exploded", engine, real_response)
     finally:
         await engine.dispose()
 
     assert failed.state == "failed"
-    # Nothing the module said survives — not even the sentence it did send, because it was
-    # not JSON with a `detail`. The operator is left with a status line and a container log.
+    assert failed.error == "RuntimeError: disk is on fire"
     assert "Internal Server Error" not in (failed.error or "")
-    assert str(500) in (failed.error or "")
 
 
 async def test_a_409_carries_the_modules_own_wording_as_the_skip_reason(tmp_path: Path) -> None:
@@ -934,6 +965,73 @@ async def test_a_409_carries_the_modules_own_wording_as_the_skip_reason(tmp_path
 
     assert refused.state == "skipped"
     assert refused.reason == "calendar/1 is older than this build's /3"
+
+
+# ── the remove/apply race (#918) ────────────────────────────────────────────────
+
+
+async def test_remove_and_apply_on_the_same_job_never_both_win(tmp_path: Path) -> None:
+    """The race #918 named: a `DELETE` and a `POST .../apply` for the same job, at once.
+
+    Both `remove` and `start_apply` read the job, then act on what they read. Fired
+    concurrently at the same freshly staged job with no lock between them, either could read
+    ``staged`` before the other's write lands — `remove` deleting the row and its staging
+    directory a moment before (or after) `start_apply` flips it to ``running`` and hands that
+    same directory to a background task that is about to open it. The corrupt outcome is
+    *both* succeeding: a row deleted **and** a background apply spawned against a directory
+    that no longer exists, silently, because its own ``status="failed"`` write later lands on
+    a row that is already gone. The per-job lock makes the two serialize, so exactly one of
+    them wins and the other sees a consistent world.
+    """
+    engine = await _engine(tmp_path)
+    await _seed_core(engine)
+    service = _service(tmp_path, engine, snaps=[], bases={})
+    await service._jobs.init()
+    await service._files.ensure_tenant_root(tenant=TENANT)
+    archive = await _export_archive(
+        _service(
+            tmp_path / "src",
+            engine,
+            snaps=[_snapshot("calendar")],
+            bases={"calendar": "http://calendar:8080"},
+            streams={
+                "http://calendar:8080": _module_stream(
+                    "calendar/1", [{"kind": "event", "id": "e-1", "data": {}}]
+                )
+            },
+        )
+    )
+    job = await _upload(service, archive)
+
+    async def _try_remove() -> Exception | None:
+        try:
+            await service.remove(tenant=TENANT, job_id=job.id)
+        except Exception as exc:  # the outcome under test, not a bug to hide
+            return exc
+        return None
+
+    remove_exc, applied = await asyncio.gather(
+        _try_remove(), service.start_apply(tenant=TENANT, job_id=job.id)
+    )
+
+    if remove_exc is None:
+        # `remove` won: the row and its staging directory were gone before `start_apply`'s
+        # own lock-guarded read ran, so it correctly saw the job vanish rather than spawning
+        # a task against a directory that had just been pulled out from under it.
+        assert applied is None
+        assert await service.job(tenant=TENANT, job_id=job.id) is None
+    else:
+        # `start_apply` won: it flipped the row to `running` and spawned the applier before
+        # `remove`'s own read ran, so `remove` correctly refused instead of deleting the
+        # directory a background task still had open.
+        assert isinstance(remove_exc, JobRunning)
+        assert applied is not None
+        settled = await _settle(service, TENANT, job.id, "running")
+        # The staging directory survived long enough for the applier to read it — the bug
+        # this closes let it vanish mid-read instead.
+        assert settled.status == "done", settled.error
+
+    await engine.dispose()
 
 
 # ── apply progress (#893) ─────────────────────────────────────────────────────

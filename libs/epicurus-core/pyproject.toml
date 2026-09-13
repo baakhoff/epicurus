@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core"
-version = "0.39.0"
+version = "0.41.0"
 description = "Shared contract and runtime for epicurus services."
 requires-python = ">=3.11"
 dependencies = [
@@ -36,6 +36,14 @@ dependencies = [
 # `epicurus_core.db.ops` do, so a service that still uses only `ensure_columns` needs no
 # Alembic. A migrated service declares `epicurus-core[db]`; SQLAlchemy alone every store
 # already depends on directly.
+#
+# epicurus_core.portability_columns (#918: PortableTable, the shared null-normalisation
+# helper a table-backed PortabilityStore builds on) is the same shape: it needs SQLAlchemy,
+# so it is not imported from `epicurus_core/__init__` either — websearch has no database at
+# all, and `import epicurus_core` must not require one. A store that wants it imports the
+# submodule directly (`from epicurus_core.portability_columns import PortableTable`), the
+# same way `epicurus_core.db` is reached; every module that does already declares SQLAlchemy
+# for its own store.
 [project.optional-dependencies]
 s3 = ["aioboto3>=13.0"]
 db = ["sqlalchemy>=2.0", "alembic>=1.13"]

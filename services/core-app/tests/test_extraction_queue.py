@@ -105,7 +105,7 @@ async def test_delete_for_session_purges_only_that_chat_and_tenant() -> None:
 async def test_the_migration_adds_session_id_to_a_legacy_queue_table() -> None:
     """A pre-#771 deployment: memory_extraction_queue exists without the session_id column.
 
-    The baseline revision reconciles it in place (#834, ADR-XXXX — it absorbed the additive
+    The baseline revision reconciles it in place (#834, ADR-0138 — it absorbed the additive
     reconcile this used to prove through ``init()``), so both the stamped enqueue and the
     cascade's purge work after an upgrade; the legacy rows stay NULL and drain as before.
     """

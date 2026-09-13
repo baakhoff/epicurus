@@ -227,7 +227,7 @@ async def test_a_later_revision_applies_to_an_adopted_database(
     that already carries a second revision: the baseline reconciles what is there, then 0002
     applies on top. Had adoption worked by stamping the head revision instead, 0002 — which in
     the real #903 case is a **backfill** — would never have run, which is why the baseline is
-    idempotent rather than stamped (ADR-XXXX).
+    idempotent rather than stamped (ADR-0138).
     """
     (scripts / "versions" / "0002_add_note.py").write_text(_SECOND, encoding="utf-8")
     async with engine.begin() as conn:

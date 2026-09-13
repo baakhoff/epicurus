@@ -1,7 +1,7 @@
 """File-index schema and query helpers — tenant-scoped rows in Postgres.
 
 The table this module declares is the *model* side of the schema; the deployed shape comes
-from the revisions in :mod:`epicurus_storage.migrations` (#834, ADR-XXXX). Change a column
+from the revisions in :mod:`epicurus_storage.migrations` (#834, ADR-0138). Change a column
 here and you owe a revision — ``uv run python scripts/migrate.py check storage`` says so in a
 second, and CI's `migrations` gate fails the PR if you skip it.
 """
@@ -125,7 +125,7 @@ class FileIndex:
 
         The deployed service does not call this. Its schema comes from the migration
         environment in :mod:`epicurus_storage.migrations`, applied once at startup by
-        :func:`epicurus_core.db.migrations.run_migrations` (#834, ADR-XXXX) — which is also
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, ADR-0138) — which is also
         what retired the additive reconcile this method used to run after ``create_all``
         (ADR-0067): the baseline revision absorbed it.
 

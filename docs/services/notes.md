@@ -372,7 +372,7 @@ note. The agent's view of `notes/` through the storage file tools is hidden by s
 Everything is tenant-scoped: the Postgres rows, the suggestion queue, the Qdrant collection
 name, and the NATS subject.
 
-### Schema is migration-managed (#834, #930, ADR-XXXX)
+### Schema is migration-managed (#834, #930, ADR-0138)
 
 Notes follows the foundation storage shipped (#926). The deployed shape of all five tables
 above comes from the revisions in `src/epicurus_notes/migrations/versions/`, applied once at

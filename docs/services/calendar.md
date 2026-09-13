@@ -650,7 +650,7 @@ The **reconcile layer** (#831) owns three more, all tenant-scoped, all in the sa
 | `calendar_synced_event` | `(tenant, account, collection, event_id)` unique | What this module last observed about one event: `series_id` (kept denormalised — a tombstone has no event object left to read it from), `title`, `start_dt`/`end_dt`, `all_day`, and `change_hash` (`spine.event_change_hash` of the last observed state). This is what turns a provider's "here is a changed event" into a creation, an edit (with a real `time_changed`) or a cancellation with a printable title. |
 | `calendar_self_writes` | `(tenant, marker_key)` unique | The self-write ledger. `marker_key` is `"<event type>|<provider>:<id>"`; `expires_at_ns` is a nanosecond epoch (~1.8e18) and therefore `BigInteger`, never `Integer`. Durable rather than in-memory on purpose: a write can land seconds before a restart, and the reconcile that then notices it must still know it was already announced. Expired rows are pruned once per reconcile pass. |
 
-### Schema is migration-managed (#834, #928, ADR-XXXX)
+### Schema is migration-managed (#834, #928, ADR-0138)
 
 Calendar is the second service to adopt the Alembic foundation (#926), after `storage`. The
 deployed shape of all six tables above comes from the revisions in
@@ -681,7 +681,7 @@ module's `DeclarativeBase` — four of them (`epicurus_calendar.db`, `.lead_time
   `collection`, `title`, and `change_hash` sit inside unique constraints, which is why the fix
   matches the existing default rather than inventing a value that could collide.
 - Calendar has **no** plain-string `server_default="'…'"` columns (the defect storage's
-  adoption arm surfaced, ADR-XXXX) — every `server_default` here is `func.now()`.
+  adoption arm surfaced, ADR-0138) — every `server_default` here is `func.now()`.
 - Changing a column here means writing a revision: `task migrate:new -- calendar "<what
   changed>"`, then `task migrate:check -- calendar`. See
   **[Schema migrations](../developer/migrations.md)**.

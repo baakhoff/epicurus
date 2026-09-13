@@ -11,7 +11,7 @@ its own opinion about how migrations are configured, so each service's ``env.py`
 and everything that matters — the per-service version table, batch rendering, the type and
 server-default comparison the drift gate relies on, and the filter that keeps one service's
 autogenerate from seeing the six other services' tables in the shared database — lives here,
-in one reviewable place (ADR-XXXX).
+in one reviewable place (ADR-0138).
 
 This runs **online only**, against a live connection handed over in ``config.attributes``.
 There is no offline (``--sql``) arm: the startup path and the CI gate both have a connection,

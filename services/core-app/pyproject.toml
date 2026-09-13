@@ -5,7 +5,7 @@ description = "The epicurus core runtime: hosts the agent loop, LLM gateway, mem
 requires-python = ">=3.11"
 dependencies = [
     # The `db` extra, not bare `epicurus-core`: this service's schema is Alembic-managed
-    # (ADR-XXXX), and the migration runner lives behind that extra. SQLAlchemy was always
+    # (ADR-0138), and the migration runner lives behind that extra. SQLAlchemy was always
     # declared directly below, so the extra is what actually puts Alembic in the runtime
     # image — the Dockerfile installs `--package epicurus-core-app` with no extras of its own.
     "epicurus-core[db]",

@@ -127,7 +127,7 @@ class NoteFolderStore:
         Shares ``NotesStore``'s metadata (``_Base``). The deployed service does not call this;
         its schema comes from the migration environment (:mod:`epicurus_notes.migrations`),
         applied once at startup by :func:`epicurus_core.db.migrations.run_migrations`
-        (#834, #930, ADR-XXXX).
+        (#834, #930, ADR-0138).
 
         It survives for the tests, where a fresh SQLite file per test is cheaper to build from
         the models than to migrate. Honest only because the `migrations` CI gate proves the
@@ -209,7 +209,7 @@ class NotesStore:
 
         The deployed service does not call this; its schema comes from the migration
         environment (:mod:`epicurus_notes.migrations`), applied once at startup by
-        :func:`epicurus_core.db.migrations.run_migrations` (#834, #930, ADR-XXXX).
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #930, ADR-0138).
 
         It survives for the tests, where a fresh SQLite file per test is cheaper to build from
         the models than to migrate. Honest only because the `migrations` CI gate proves the

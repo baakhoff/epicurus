@@ -325,7 +325,7 @@ class AutomationStore:
         """Build this store's tables from the models — the **unit-test** schema path.
 
         The deployed service does not call this: its schema comes from the revisions in
-        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-0138). See that
         module's docstring for why ``create_all`` survives here, and what keeps it honest.
         """
         async with self._engine.begin() as conn:
@@ -615,7 +615,7 @@ class AutomationQueue:
         """Build this store's tables from the models — the **unit-test** schema path.
 
         The deployed service does not call this: its schema comes from the revisions in
-        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-0138). See that
         module's docstring for why ``create_all`` survives here, and what keeps it honest.
         """
         async with self._engine.begin() as conn:
@@ -712,7 +712,7 @@ class KillSwitchStore:
         """Build this store's tables from the models — the **unit-test** schema path.
 
         The deployed service does not call this: its schema comes from the revisions in
-        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-0138). See that
         module's docstring for why ``create_all`` survives here, and what keeps it honest.
         """
         async with self._engine.begin() as conn:
@@ -763,7 +763,7 @@ class AutomationSessionStore:
         """Build this store's tables from the models — the **unit-test** schema path.
 
         The deployed service does not call this: its schema comes from the revisions in
-        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-XXXX). See that
+        :mod:`epicurus_core_app.migrations`, applied at startup (#834, ADR-0138). See that
         module's docstring for why ``create_all`` survives here, and what keeps it honest.
         """
         async with self._engine.begin() as conn:

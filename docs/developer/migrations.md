@@ -1,7 +1,7 @@
 # Schema migrations
 
 How a database change ships. Schema is **Alembic-managed, one migration environment per
-service**, applied in-process when the service starts (#834, ADR-XXXX). This page is the
+service**, applied in-process when the service starts (#834, ADR-0138). This page is the
 working reference: what to do when you change a model, what happens at startup, and what the
 gates prove.
 

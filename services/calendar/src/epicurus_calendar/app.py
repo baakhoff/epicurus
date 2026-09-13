@@ -124,7 +124,7 @@ def create_app() -> FastAPI:
             # supports, and a Kubernetes-only init container would put the schema behind a
             # path Compose never runs. Concurrency — two replicas, or a restart overlapping a
             # start — is handled by the Postgres advisory lock inside run_migrations, not by
-            # assuming this process is alone (#834, #928, ADR-XXXX). The five stores above
+            # assuming this process is alone (#834, #928, ADR-0138). The five stores above
             # share this one engine/database, so one migration environment covers all of them
             # (:mod:`epicurus_calendar.migrations`); their own `init()` calls now only build
             # the unit-test SQLite schema and are not called here.

@@ -667,7 +667,7 @@ core path `knowledge/<rel>`): knowledge **reads and writes** them through the co
 `/data` mount in normal mode. The Postgres ledgers and Qdrant collections above are derived
 indexes over those files.
 
-### Schema is migration-managed (#834, #931, ADR-XXXX)
+### Schema is migration-managed (#834, #931, ADR-0138)
 
 The deployed shape of all six Postgres tables above comes from the revisions in
 `src/epicurus_knowledge/migrations/versions/`, applied once at startup: the lifespan calls

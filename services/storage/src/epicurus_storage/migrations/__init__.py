@@ -1,7 +1,7 @@
 """Storage's migration environment — the three facts the Alembic runner needs about it.
 
 The schema of every table this module owns comes from the revisions in ``versions/``, applied
-at startup by :func:`epicurus_core.db.migrations.run_migrations` (#834, ADR-XXXX). This module
+at startup by :func:`epicurus_core.db.migrations.run_migrations` (#834, ADR-0138). This module
 is what lets that runner — and ``scripts/migrate.py``, which discovers services by globbing for
 the ``env.py`` beside this file — describe the service without importing its app: no settings,
 no database URL, no object store, no event bus. Just the store modules that declare tables.

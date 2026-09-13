@@ -19,7 +19,7 @@ Everything is scoped by ``tenant_id`` (constraint #1) even though v1 is single-t
 store owns no provider specifics — the orchestrator (:mod:`epicurus_mail.cache`) drives it
 from the neutral provider seam, so an IMAP backend reuses the same schema.
 
-Schema is Alembic-managed (#834, #932, ADR-XXXX): the deployed service builds its tables from
+Schema is Alembic-managed (#834, #932, ADR-0138): the deployed service builds its tables from
 ``services/mail/src/epicurus_mail/migrations/versions/``, applied once at startup by
 :func:`epicurus_core.db.migrations.run_migrations`. :meth:`MailCache.init` survives only as the
 **unit-test** schema path — a fresh SQLite file per test is cheaper to build straight from the
@@ -238,7 +238,7 @@ class MailCache:
         """Build this store's tables straight from the models — the **unit-test** schema path.
 
         The deployed service does not call this; its schema comes from the migration
-        environment (#834, #932, ADR-XXXX). It survives for the tests, where a fresh SQLite
+        environment (#834, #932, ADR-0138). It survives for the tests, where a fresh SQLite
         file per test is cheaper to build from the models than to migrate. Honest only because
         the ``migrations`` CI gate proves the models and the revisions agree on real Postgres.
         """

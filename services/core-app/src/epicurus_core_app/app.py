@@ -935,7 +935,7 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # Schema first, before anything reads or writes a row — one call for all 40 tables the
         # core owns, replacing the 34 per-store `create_all` + additive-reconcile calls that
-        # used to stand here (#834, ADR-XXXX). In-process rather than a separate init step: a
+        # used to stand here (#834, ADR-0138). In-process rather than a separate init step: a
         # container has one entry point on both runtimes this stack supports, and a
         # Kubernetes-only init container would put the schema behind a path Compose never runs.
         # Concurrency is handled by the Postgres advisory lock inside run_migrations, not by

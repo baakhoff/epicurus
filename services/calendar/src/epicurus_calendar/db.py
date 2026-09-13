@@ -1,7 +1,7 @@
 """Postgres schema for the local calendar provider — tenant-scoped event store.
 
 The ``calendar_events`` table is owned exclusively by this module. The deployed shape comes
-from the revisions in :mod:`epicurus_calendar.migrations` (#834, #928, ADR-XXXX). Change a
+from the revisions in :mod:`epicurus_calendar.migrations` (#834, #928, ADR-0138). Change a
 column here and you owe a revision — ``uv run python scripts/migrate.py check calendar`` says
 so in a second, and CI's `migrations` gate fails the PR if you skip it. Columns are prefixed
 ``calendar_`` to avoid collisions with other modules sharing the same Postgres database.
@@ -158,7 +158,7 @@ class LocalEventStore:
 
         The deployed service does not call this; its schema comes from the migration
         environment in :mod:`epicurus_calendar.migrations`, applied once at startup by
-        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-XXXX) — which is
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #928, ADR-0138) — which is
         also what retired the additive reconcile this method used to run after ``create_all``
         (ADR-0067): the baseline revision absorbed it.
 

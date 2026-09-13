@@ -28,7 +28,7 @@ dependencies = [
 # optional extra so the shared library stays lean: the local-filesystem backend — the
 # self-host default — has no S3 dependency. Install `epicurus-core[s3]` to use the S3 backend.
 #
-# The schema layer (epicurus_core.db — the Alembic runner of ADR-XXXX, the shared `env.py`
+# The schema layer (epicurus_core.db — the Alembic runner of ADR-0138, the shared `env.py`
 # body, the idempotent baseline ops, and the legacy additive reconcile) needs SQLAlchemy and
 # Alembic. It is likewise an optional extra so a module without a database carries no ORM
 # dependency; the `db` subpackage is deliberately not imported by `epicurus_core/__init__`,

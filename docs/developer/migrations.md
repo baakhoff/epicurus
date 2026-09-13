@@ -170,7 +170,7 @@ and what both the `migrations` job and the per-service unit tests build by runni
 and then dropping the version table. `Base.metadata.create_all` used to build it, and was correct
 for exactly as long as the baseline was also head; the first revision that adds a column makes
 `create_all` build the schema at **head**, and an adoption arm over that asserts only that
-`op.add_column` is idempotent. `agent_messages.stopped` (#944) was the first such column.
+`op.add_column` is idempotent. `saved_models`' capability columns (#944, #947) were the first.
 
 What the reconcile arm deliberately does *not* do: add a constraint, or alter a column that is
 already present. A table that exists but carries no unique constraint is beyond an additive
@@ -330,6 +330,29 @@ never went through the reconcile at all. Several stores list every non-key colum
 `__tablename__ = "<t>"` with the commit that introduced the column's declaration is what settles
 it. core-app's audit went from 55 candidates to 2 that way, and writing 53 no-op revisions would
 have been 53 chances to get a value wrong.
+
+## Adding a column after adoption
+
+The first column added to an already-migrated service is **ordinary Alembic** — a bare
+`op.add_column`, no guard. After adoption the database's state is known exactly, so a revision
+that tolerates the column already being there hides a real disagreement between the revisions and
+the database rather than surfacing it.
+
+```python
+def upgrade() -> None:
+    op.add_column(
+        "saved_models", sa.Column("tools_override", sa.String(length=8), nullable=True)
+    )
+```
+
+The baseline is **not** touched: it describes the schema as it stood the day the service adopted
+Alembic, and a fresh install reaches the new column by running the revision like every other
+state does. `core-app`'s revision 0005 (ADR-0140) is the worked example.
+
+What this does change is how the gates build a "pre-Alembic" database for their **adoption** arms
+— see the adoption-arm note under *How a baseline is written*: they run `upgrade 0001` and drop
+the version table, because `Base.metadata.create_all` builds the models as they stand *today*,
+which from the first post-baseline column onwards is the schema at head, not at adoption.
 
 ## SQLite, Postgres, and what each gate proves
 

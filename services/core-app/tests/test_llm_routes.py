@@ -21,17 +21,23 @@ from epicurus_core_app.llm.variants import VariantLookup
 class _StubGateway:
     """Only needs to exist — most tests inspect routes, not call behavior.
 
-    ``show`` backs the /models/details route; ``unload`` records its calls so the unload
-    route can be asserted.
+    ``show`` backs the /models/details route; ``model_role`` backs the role gate on the two
+    default-setting routes (#944), answering ``unknown`` for anything not in ``roles`` — the
+    "catalogue says nothing" case, which the gate lets through; ``unload`` records its calls so
+    the unload route can be asserted.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, roles: dict[str, str] | None = None) -> None:
         self.unloaded: list[str | None] = []
+        self.roles = roles or {}
 
     async def show(self, model: str, tenant_id: str | None = None) -> ModelDetails:
         return ModelDetails(
             quantization="Q4_K_M", parameter_size="8.0B", context_length=131072, family="llama"
         )
+
+    async def model_role(self, model: str | None = None, tenant_id: str | None = None) -> str:
+        return self.roles.get(model or "", "unknown")
 
     async def unload(self, model: str | None = None) -> None:
         self.unloaded.append(model)
@@ -658,8 +664,16 @@ async def test_saved_models_add_persists_with_provider() -> None:
                 "provider": "claude",
                 "context_length": 131072,
                 "capabilities": [],
+                "role": "unknown",
+                "in_catalogue": None,
                 # No override set — the defaults say "trust the map" (#711).
-                "override": {"vision": "auto", "context_length": None},
+                "override": {
+                    "vision": "auto",
+                    "tools": "auto",
+                    "role": "auto",
+                    "context_length": None,
+                    "tools_learned": None,
+                },
             }
         ]
     }
@@ -764,12 +778,24 @@ async def test_capability_override_round_trips_the_editor() -> None:
         await client.post("/platform/v1/llm/saved-models", json={"model": "grok/grok-latest"})
         put = await client.put(
             "/platform/v1/llm/saved-models/capabilities",
-            json={"model": "grok/grok-latest", "vision": "on", "context_length": 256000},
+            json={
+                "model": "grok/grok-latest",
+                "vision": "on",
+                "tools": "off",
+                "role": "chat",
+                "context_length": 256000,
+            },
         )
         assert put.status_code == 200
         get = await client.get("/platform/v1/llm/saved-models")
     row = next(m for m in get.json()["models"] if m["model"] == "grok/grok-latest")
-    assert row["override"] == {"vision": "on", "context_length": 256000}
+    assert row["override"] == {
+        "vision": "on",
+        "tools": "off",
+        "role": "chat",
+        "context_length": 256000,
+        "tools_learned": None,
+    }
 
 
 async def test_capability_override_auto_clears_back_to_the_map() -> None:
@@ -789,7 +815,13 @@ async def test_capability_override_auto_clears_back_to_the_map() -> None:
         assert cleared.status_code == 200
         get = await client.get("/platform/v1/llm/saved-models")
     row = next(m for m in get.json()["models"] if m["model"] == "grok/grok-latest")
-    assert row["override"] == {"vision": "auto", "context_length": None}
+    assert row["override"] == {
+        "vision": "auto",
+        "tools": "auto",
+        "role": "auto",
+        "context_length": None,
+        "tools_learned": None,
+    }
 
 
 async def test_capability_override_404s_for_an_unsaved_model() -> None:
@@ -834,3 +866,130 @@ async def test_capability_override_503s_without_a_store() -> None:
             json={"model": "grok/grok-latest", "vision": "on"},
         )
     assert put.status_code == 503
+
+
+# ── The role gate on the two default-setting routes (#944) ────────────────────
+
+
+async def test_set_default_rejects_an_embedding_model() -> None:
+    """The write that created #944's incident: any string at all became the chat default."""
+    prefs = await _fresh_prefs()
+    gateway = _StubGateway({"openrouter/qwen/qwen3-embedding-8b": "embedding"})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs, gateway=gateway)),
+        base_url="http://test",
+    ) as client:
+        resp = await client.put(
+            "/platform/v1/llm/prefs/default",
+            json={"model": "openrouter/qwen/qwen3-embedding-8b"},
+        )
+        current = await client.get("/platform/v1/llm/prefs")
+    assert resp.status_code == 400
+    assert "embedding model" in resp.json()["detail"]
+    assert current.json()["global_default"] is None  # nothing was persisted
+
+
+async def test_set_embed_default_rejects_a_chat_model() -> None:
+    prefs = await _fresh_prefs()
+    gateway = _StubGateway({"claude/claude-sonnet-4-6": "chat"})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs, gateway=gateway)),
+        base_url="http://test",
+    ) as client:
+        resp = await client.put(
+            "/platform/v1/llm/prefs/embed-default", json={"model": "claude/claude-sonnet-4-6"}
+        )
+    assert resp.status_code == 400
+    assert "chat model" in resp.json()["detail"]
+
+
+async def test_the_role_gate_lets_an_unknown_model_through() -> None:
+    """A thin catalogue must not make a working model unselectable."""
+    prefs = await _fresh_prefs()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs, gateway=_StubGateway())),
+        base_url="http://test",
+    ) as client:
+        resp = await client.put(
+            "/platform/v1/llm/prefs/default", json={"model": "custom/never-listed"}
+        )
+        current = await client.get("/platform/v1/llm/prefs")
+    assert resp.status_code == 200
+    assert current.json()["global_default"] == "custom/never-listed"
+
+
+async def test_clearing_a_default_is_never_role_checked() -> None:
+    prefs = await _fresh_prefs()
+    gateway = _StubGateway({"claude/claude-sonnet-4-6": "chat"})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(prefs=prefs, gateway=gateway)),
+        base_url="http://test",
+    ) as client:
+        assert (
+            await client.put("/platform/v1/llm/prefs/embed-default", json={"model": None})
+        ).status_code == 200
+
+
+async def test_an_embedding_model_can_still_be_saved() -> None:
+    """Deviation from #944's fix list: one saved list serves both roles since #865."""
+    store = await _fresh_saved_models()
+    gateway = _StubGateway({"openrouter/qwen/qwen3-embedding-8b": "embedding"})
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store, gateway=gateway)),
+        base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            "/platform/v1/llm/saved-models",
+            json={"model": "openrouter/qwen/qwen3-embedding-8b"},
+        )
+    assert resp.status_code == 200
+    assert await store.list("local") == ["openrouter/qwen/qwen3-embedding-8b"]
+
+
+async def test_the_tools_override_round_trips_and_clears_the_learned_answer() -> None:
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/llm/saved-models", json={"model": "grok/grok-latest"})
+        await store.learn_tools_unsupported("local", "grok/grok-latest")
+        listed = await client.get("/platform/v1/llm/saved-models")
+        learned = next(m for m in listed.json()["models"] if m["model"] == "grok/grok-latest")
+        assert learned["override"]["tools_learned"] == "off"
+        assert learned["override"]["tools"] == "auto"  # distinguishable from an explicit off
+
+        put = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "tools": "auto"},
+        )
+        assert put.status_code == 200
+        again = await client.get("/platform/v1/llm/saved-models")
+    row = next(m for m in again.json()["models"] if m["model"] == "grok/grok-latest")
+    # Returning the control to Auto genuinely starts over (ADR-0140).
+    assert row["override"]["tools_learned"] is None
+
+
+async def test_capability_override_rejects_a_bad_tools_value() -> None:
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/llm/saved-models", json={"model": "grok/grok-latest"})
+        put = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "tools": "maybe"},
+        )
+    assert put.status_code == 422
+
+
+async def test_capability_override_rejects_a_bad_role_value() -> None:
+    store = await _fresh_saved_models()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(saved_models=store)), base_url="http://test"
+    ) as client:
+        await client.post("/platform/v1/llm/saved-models", json={"model": "grok/grok-latest"})
+        put = await client.put(
+            "/platform/v1/llm/saved-models/capabilities",
+            json={"model": "grok/grok-latest", "role": "reranker"},
+        )
+    assert put.status_code == 422

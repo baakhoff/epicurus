@@ -31,6 +31,7 @@ from epicurus_core_app.agent.mcp_host import ToolCallError
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
+from epicurus_core_app.llm.gateway import NO_TOOLS_SYSTEM_NOTE
 from epicurus_core_app.llm.models import ChatMessage, ChatResult, StreamEvent, ToolCallFragment
 from epicurus_core_app.llm.power import GatewayPausedError
 
@@ -47,11 +48,17 @@ class _FakeStreamGateway:
     """Replays scripted rounds: each round is (deltas, result)."""
 
     def __init__(
-        self, rounds: list[tuple[list[str], ChatResult]], *, supports_vision: bool = True
+        self,
+        rounds: list[tuple[list[str], ChatResult]],
+        *,
+        supports_vision: bool = True,
+        supports_tools: bool = True,
     ) -> None:
         self._rounds = list(rounds)
         self.calls: list[list[ChatMessage]] = []
+        self.tools_seen: list[Any] = []
         self._supports_vision = supports_vision
+        self._supports_tools = supports_tools
 
     async def stream_chat(
         self,
@@ -62,13 +69,14 @@ class _FakeStreamGateway:
         tenant_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         self.calls.append(list(messages))
+        self.tools_seen.append(tools)
         deltas, result = self._rounds.pop(0)
         for delta in deltas:
             yield StreamEvent(delta=delta)
         yield StreamEvent(result=result)
 
     async def supports_tools(self, *_a: Any, **_k: Any) -> bool:
-        return True
+        return self._supports_tools
 
     async def supports_vision(self, *_a: Any, **_k: Any) -> bool:
         return self._supports_vision
@@ -1617,3 +1625,18 @@ async def test_a_second_step_does_not_inherit_the_first_steps_preview_state() ->
         for t in ("one.md", "two.md")
     ]
     assert bodies == ["first body", "second body"]
+
+
+async def test_a_streamed_tool_less_turn_runs_without_tools_and_is_told_so() -> None:
+    """The owner's ask on #947: run a model with no tool support, say so, keep answering."""
+    gw = _FakeStreamGateway(
+        [(["hello"], ChatResult(model="m", content="hello"))], supports_tools=False
+    )
+    agent = Agent(
+        gateway=gw,  # type: ignore[arg-type]
+        mcp=_FakeMcp(),  # type: ignore[arg-type]
+    )
+    events = [e async for e in agent.run_stream([ChatMessage(role="user", content="hi")])]
+    assert [e.type for e in events][-1] == "done"
+    assert gw.tools_seen == [None]  # the tool list was withheld, not sent and rejected
+    assert any(m.role == "system" and m.content == NO_TOOLS_SYSTEM_NOTE for m in gw.calls[0])

@@ -51,7 +51,7 @@ from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, To
 from epicurus_core_app.agent.pending_approvals import PendingApprovalStore
 from epicurus_core_app.agent.pending_drafts import PendingDraftStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
-from epicurus_core_app.llm.gateway import LlmGateway
+from epicurus_core_app.llm.gateway import LlmGateway, with_no_tools_note
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.memory.extraction import FactExtractor
@@ -885,8 +885,17 @@ class Agent:
             specs = [*specs, ASK_APPROVAL_SPEC]
             # Offer tools only to a model that can use them; otherwise the runtime errors and
             # the turn fails. A tool-less model just answers in text (the UI flags it).
-            can_use_tools = bool(specs) and await self._gateway.supports_tools(model, tenant_id)
+            tool_capable = await self._gateway.supports_tools(model, tenant_id)
+            can_use_tools = bool(specs) and tool_capable
             offer = specs if can_use_tools else None
+            # Retract the base prompt's "act through the tools you are given" when the *model*
+            # cannot call them, so it answers instead of narrating tool use it never made
+            # (#947). Conditioned on the model, not on `offer`: a deployment with no modules
+            # wired has nothing to retract, and saying so on every turn of a bare core would be
+            # noise. The sentence lives in the gateway beside the capability resolution that
+            # decided this; both turn paths reach it through one call.
+            if specs and not tool_capable:
+                convo = with_no_tools_note(convo)
             for _ in range(max_steps):
                 result: ChatResult | None = None
                 answer_before = len(parts)
@@ -1656,8 +1665,11 @@ class Agent:
         max_steps = await self._effective_max_steps(tenant_id)
         # Offer tools only to a tool-capable model (else the runtime errors); a tool-less model
         # just answers in text.
-        offer = specs if specs and await self._gateway.supports_tools(model, tenant_id) else None
-        convo = list(messages)
+        tool_capable = await self._gateway.supports_tools(model, tenant_id)
+        offer = specs if specs and tool_capable else None
+        # A model that cannot call tools is told so, the same way the streamed path tells it,
+        # and on the same condition — tools exist, this model cannot use them (#947).
+        convo = with_no_tools_note(messages) if specs and not tool_capable else list(messages)
         tools_used: list[str] = []
         timeline: list[ActivityItem] = []
         refs = _RefCollector()

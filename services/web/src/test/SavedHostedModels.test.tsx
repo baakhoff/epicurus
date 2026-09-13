@@ -315,3 +315,88 @@ describe("SavedHostedModels — add a hosted model (#922)", () => {
     ).toBeInTheDocument();
   });
 });
+
+// ── role and catalogue state on the row (#944, #879, ADR-0140) ────────────────
+
+describe("SavedHostedModels capability state", () => {
+  const AUTO = {
+    vision: "auto",
+    tools: "auto",
+    role: "auto",
+    context_length: null,
+    tools_learned: null,
+  } as const;
+
+  it("names a starred embedding model as the reason chats fail (#944)", async () => {
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "openrouter/qwen/qwen3-embedding-8b",
+        provider: "openrouter",
+        capabilities: ["embedding"],
+        role: "embedding",
+        override: AUTO,
+      },
+    ]);
+    mockLlmPrefs.mockResolvedValue({
+      global_default: "openrouter/qwen/qwen3-embedding-8b",
+      hidden: [],
+    });
+    render(<SavedHostedModels />, { wrapper });
+    expect(await screen.findByText(/chats using it will fail/i)).toBeInTheDocument();
+  });
+
+  it("will not let an embedding model be starred as the chat default", async () => {
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "openrouter/qwen/qwen3-embedding-8b",
+        provider: "openrouter",
+        capabilities: ["embedding"],
+        role: "embedding",
+        override: AUTO,
+      },
+    ]);
+    mockLlmPrefs.mockResolvedValue({ global_default: null, hidden: [] });
+    render(<SavedHostedModels />, { wrapper });
+    const star = await screen.findByRole("button", {
+      name: /Set openrouter\/qwen\/qwen3-embedding-8b as default/i,
+    });
+    expect(star).toBeDisabled();
+  });
+
+  it("says when a hosted id is not in the shipped catalogue (#879)", async () => {
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "openrouter/brand/new-model",
+        provider: "openrouter",
+        context_length: null,
+        capabilities: ["tools"],
+        role: "unknown",
+        in_catalogue: false,
+        override: AUTO,
+      },
+    ]);
+    mockLlmPrefs.mockResolvedValue({ global_default: null, hidden: [] });
+    render(<SavedHostedModels />, { wrapper });
+    // Previously an empty context chip with no explanation — a fact the core logged and never
+    // surfaced.
+    expect(await screen.findByText("unlisted")).toBeInTheDocument();
+  });
+
+  it("shows no unlisted badge for a model the catalogue does describe", async () => {
+    mockSavedModels.mockResolvedValue([
+      {
+        model: "claude/claude-3-7-sonnet-20250219",
+        provider: "claude",
+        context_length: 200000,
+        capabilities: ["tools"],
+        role: "chat",
+        in_catalogue: true,
+        override: AUTO,
+      },
+    ]);
+    mockLlmPrefs.mockResolvedValue({ global_default: null, hidden: [] });
+    render(<SavedHostedModels />, { wrapper });
+    expect(await screen.findByText("200k")).toBeInTheDocument();
+    expect(screen.queryByText("unlisted")).toBeNull();
+  });
+});

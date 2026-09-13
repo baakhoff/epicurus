@@ -614,18 +614,37 @@ A miss against the map logs **once per model id per process**, then at debug: a 
 outside a curated list is expected, not anomalous, but the first sighting still explains a model
 that shows no badges.
 
-#### First-boot model bootstrap (#773, ADR-0118)
+#### First-boot model bootstrap (#773, ADR-0118, amended #923)
 
 A fresh install boots an **empty Ollama volume** (models are never baked into the image), so
 the first chat or embedding call would 404 until someone found the Models page — and
 background work (the knowledge indexer, memory recall) failed noisily meanwhile. On startup
-the core now ensures the deployment's default local models exist: a fire-and-forget lifespan
+the core ensures the deployment's default local models exist: a fire-and-forget lifespan
 task (`llm/bootstrap.py`) waits for the runtime, resolves the **effective** chat + embedding
 defaults (stored prefs, else `LLM_DEFAULT_MODEL` / `MEMORY_EMBED_MODEL`), and pulls the
 missing ones through the same `gateway.pull()` path the Models page uses — then applies the
 same post-pull context suggestion (#386), so a bootstrapped model opens correctly sized too.
 
-Behaviour is bounded and defensive, in keeping with what startup may cost:
+**`auto` seeds an empty runtime only (#923).** The moment `/api/tags` reports *any* installed
+model, `auto` no-ops outright — it does not resolve the effective defaults at all, let alone
+diff against them. Before #923, "first-boot" was a docstring, not a guard: the bootstrap
+diffed the effective defaults against the runtime on *every* start, so a model the operator
+deliberately deleted on the Models page was silently pulled back on the next restart —
+routine on both runtimes (a Compose `up`, an update reconcile, a Kubernetes rollout-restart,
+ADR-0134). The runtime's own tag list is the only state consulted (constraint #2: no marker
+on local disk, no extra table) — a from-scratch install still gets its defaults exactly as
+ADR-0118 intends, and the no-op is logged at INFO with the installed count so the decision is
+visible, not silent.
+
+An **explicit list** (`LLM_BOOTSTRAP_MODELS=llama3.2,nomic-embed-text`) is a different
+contract: a named pin the operator stated, ensured on every start regardless of what else is
+installed — it may re-pull a listed model that went missing, by design. The two-value split
+(`auto` = seed-once-effectively, a list = ensure-always) was chosen over adding a third
+`auto-once` value: the runtime's tag list already carries the only state the seed-once
+behaviour needs, so a third value would add a distinction without adding capability — a
+deployment that wants "ensure always" already has the list form for it.
+
+Behaviour is otherwise bounded and defensive, in keeping with what startup may cost:
 
 - **Never blocks** startup, readiness (ADR-0027), or a live turn — the pull happens in the
   background while the rest of the core serves.
@@ -634,11 +653,11 @@ Behaviour is bounded and defensive, in keeping with what startup may cost:
 - **Hosted ids are skipped** (`claude/…` cannot be pulled into the local runtime), and an
   unreachable runtime (a hosted-only deployment running no Ollama) costs one warning after a
   bounded wait, never a crash loop.
-- An already-provisioned deployment no-ops after one `/api/tags` round trip.
 
-`LLM_BOOTSTRAP_MODELS` tunes it: `auto` (default) resolves the effective defaults; blank
-disables the bootstrap (air-gapped builds — and the CI smoke gate, which must not download
-multi-GB weights); an explicit comma-separated list pulls exactly those.
+`LLM_BOOTSTRAP_MODELS` tunes it: `auto` (default) seeds an empty runtime with the effective
+defaults, then no-ops forever after; blank disables the bootstrap (air-gapped builds — and
+the CI smoke gate, which must not download multi-GB weights); an explicit comma-separated
+list ensures exactly those models exist, every start.
 
 #### Model catalog (#269)
 

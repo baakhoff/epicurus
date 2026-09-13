@@ -132,12 +132,16 @@ stack reads it) — see [Configuration](configuration.md).
 ## First-run models
 
 Model weights are never baked into the image, so a fresh Ollama volume starts empty. The
-**core** ensures its default local models exist automatically the first time it starts
-(#773, ADR-0118): a background task waits for Ollama to become reachable, resolves the
-*effective* chat and embedding defaults — the default tenant's saved preference, else
-`LLM_DEFAULT_MODEL` (`llama3.2`) and `MEMORY_EMBED_MODEL` (`nomic-embed-text`) — and pulls
-whichever of the two are missing, applying the same size-aware context-window suggestion a
-manual pull from the Models page gets.
+**core** seeds its default local models into an empty runtime automatically the first time
+it starts (#773, ADR-0118, amended #923): a background task waits for Ollama to become
+reachable, resolves the *effective* chat and embedding defaults — the default tenant's saved
+preference, else `LLM_DEFAULT_MODEL` (`llama3.2`) and `MEMORY_EMBED_MODEL`
+(`nomic-embed-text`) — and pulls whichever of the two are missing, applying the same
+size-aware context-window suggestion a manual pull from the Models page gets. Once the
+runtime reports *any* installed model, this stops checking for good: it cannot tell a model
+you never installed from one you deliberately removed on the Models page, so it treats any
+non-empty runtime as provisioned and leaves it alone — a restart (an update, a container
+recreate) never brings back a model you deleted.
 
 This never blocks startup, readiness, or a live chat turn — the pull runs in the background
 while the rest of the core serves normally, so the very first chat, or a background job
@@ -145,13 +149,12 @@ like the knowledge indexer or memory recall, may briefly error until the pull fi
 failed pull retries with backoff and resumes a partial download; if it keeps failing, the
 core logs a warning and leaves the Models page as the manual fallback. A hosted model id
 (e.g. `claude/…`) is skipped — there is nothing to pull locally — and a deployment running
-no Ollama at all costs one warning after a bounded wait, never a crash loop. A deployment
-that already has its models present no-ops after a single check.
+no Ollama at all costs one warning after a bounded wait, never a crash loop.
 
 Tune it with `LLM_BOOTSTRAP_MODELS` in your `.env`:
 
 | Value | Behavior |
 | --- | --- |
-| `auto` (default) | Pulls the effective chat + embedding defaults. |
+| `auto` (default) | Seeds an empty runtime with the effective chat + embedding defaults, once; no-ops on every later start once anything is installed. |
 | *(blank)* | Disables the bootstrap — air-gapped installs, or anywhere you'd rather pick models by hand. |
-| `model-a,model-b` | Pulls exactly this comma-separated list instead. |
+| `model-a,model-b` | A standing pin: ensures exactly this comma-separated list exists, every start, regardless of what else is installed. |

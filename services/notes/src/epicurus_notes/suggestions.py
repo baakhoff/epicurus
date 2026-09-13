@@ -101,6 +101,15 @@ class NoteSuggestionStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
+        """Build this store's table straight from the model — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (:mod:`epicurus_notes.migrations`), applied once at startup by
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #930, ADR-XXXX). It survives
+        for the tests, where a fresh SQLite file per test is cheaper to build from the model
+        than to migrate — honest only because the `migrations` CI gate proves the model and
+        the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_NoteSuggestionBase.metadata.create_all)
 
@@ -279,6 +288,15 @@ class NoteSuggestionAuditStore:
         self._session = async_sessionmaker(engine, expire_on_commit=False)
 
     async def init(self) -> None:
+        """Build this store's table straight from the model — the **unit-test** schema path.
+
+        The deployed service does not call this; its schema comes from the migration
+        environment (:mod:`epicurus_notes.migrations`), applied once at startup by
+        :func:`epicurus_core.db.migrations.run_migrations` (#834, #930, ADR-XXXX). It survives
+        for the tests, where a fresh SQLite file per test is cheaper to build from the model
+        than to migrate — honest only because the `migrations` CI gate proves the model and
+        the revisions agree on real Postgres.
+        """
         async with self._engine.begin() as conn:
             await conn.run_sync(_NoteAuditBase.metadata.create_all)
 

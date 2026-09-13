@@ -118,10 +118,34 @@ def test_a_function_server_default_renders_dialect_neutrally(migrate: ModuleType
     assert "CURRENT_TIMESTAMP" not in rendered
 
 
+def test_a_boolean_server_default_renders_dialect_neutrally(migrate: ModuleType) -> None:
+    """``false()`` / ``true()`` must survive as themselves, like ``func.now()``.
+
+    They are the repo's boolean idiom (``calendar``'s ``all_day`` and ``excluded``), and they
+    compile differently per dialect — ``false`` on Postgres, ``0`` on SQLite — so freezing
+    either into ``sa.text(...)`` against the SQLite the baseline is generated on would carry
+    SQLite's spelling into a Postgres migration.
+    """
+    assert migrate._render_server_default(_default(sa.Boolean, sa.false())) == "sa.false()"
+    assert migrate._render_server_default(_default(sa.Boolean, sa.true())) == "sa.true()"
+
+
 def test_an_unrecognised_server_default_refuses_to_render(migrate: ModuleType) -> None:
     """Guessing is the one thing this must not do — a wrong default is invisible until it runs."""
     with pytest.raises(migrate.MigrateError, match="dialect-neutrally"):
         migrate._render_server_default(_default(sa.Integer, sa.func.random()))
+
+
+def test_the_refusal_names_the_type_not_a_memory_address(migrate: ModuleType) -> None:
+    """The message is the whole remedy, so it has to say what it choked on.
+
+    A clause element's ``repr`` is ``<sqlalchemy.sql.elements.Function object at 0x…>`` — an
+    address tells the reader nothing about which form to add to the renderer.
+    """
+    with pytest.raises(migrate.MigrateError) as caught:
+        migrate._render_server_default(_default(sa.Integer, sa.func.random()))
+    assert "random" in str(caught.value), "the message must name the form it choked on"
+    assert "0x" not in str(caught.value), "a memory address is not actionable"
 
 
 def test_a_column_without_a_server_default_is_left_to_alembic(migrate: ModuleType) -> None:

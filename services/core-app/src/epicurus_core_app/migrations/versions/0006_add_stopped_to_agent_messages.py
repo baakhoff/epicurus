@@ -1,6 +1,6 @@
 """add stopped to agent_messages
 
-Revision 0005, following 0004.
+Revision 0006, following 0005.
 
 Why a turn stopped, when it did not stop by answering (#944, ADR-0142). Nullable with no
 backfill by design: NULL is the value every existing row should have — a turn that completed
@@ -16,8 +16,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0005"
-down_revision: str | None = "0004"
+revision: str = "0006"
+down_revision: str | None = "0005"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

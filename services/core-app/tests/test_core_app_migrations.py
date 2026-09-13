@@ -45,7 +45,7 @@ from epicurus_core_app.automations.store import AutomationStore
 from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
-HEAD = "0005"
+HEAD = "0006"
 PACKAGE_ROOT = Path(epicurus_core_app.__file__).resolve().parent
 
 

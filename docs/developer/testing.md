@@ -199,13 +199,17 @@ gate** (`infra/ci/smoke.sh`, run as the `runtime-smoke` CI job) closes that gap:
 boots the data plane, runs the real OpenBao bootstrap, brings up core + every
 module, and asserts the integration last mile —
 
-- every container reaches a healthy state;
+- every container reaches a healthy state — including the **web shell**, which this
+  gate did not start at all until #919, and the one-shot init containers
+  (`qdrant-init`, `ollama-init`, `minio-init`), which must each exit 0;
 - the OpenBao bootstrap succeeds and a secret set through the core survives a
   vault restart;
 - the core discovers every module (the set is derived from the compose `include:`
   list, so a new module is gated the moment it is wired in);
 - each module is reachable through the core, one MCP tool round-trips, and an
-  attachable module's chat-attachment picker round-trips through the core (ADR-0019).
+  attachable module's chat-attachment picker round-trips through the core (ADR-0019);
+- a declared external bind mount round-trips list/write/read (#731), and Docker
+  control reaches the daemon through `docker-proxy-core` with no operator setup (#708).
 
 Run it locally, exactly as CI does:
 
@@ -222,14 +226,21 @@ ports, so it is safe to run next to a dev stack and tears itself down at the end
 The integration last mile is written **once**, in `infra/ci/smoke-assert.sh`, and
 sourced by both smoke gates. That file holds everything that is true of an
 epicurus deployment whatever it is deployed on — module discovery, status through
-the core, an MCP round-trip, the attachment picker, the event spine, automations,
-and a secret surviving a vault restart. Each gate supplies the runtime-specific
-half as shell functions (`http`, `restart_openbao`, `restart_core_app`) and calls
+the core, the web shell's `/platform/` proxy, a tenant file-space round trip, a
+KV-cache change that restarts the LLM runtime, an MCP round-trip, the attachment
+picker, the event spine, automations, and a secret surviving a vault restart. Each
+gate supplies the runtime-specific half as shell functions (`http`,
+`restart_openbao`, `restart_core_app`, `settle_llm_runtime`) and calls
 `smoke_assert`.
 
 **Add a new integration assertion there**, not in a gate script, so both runtimes
 are held to it. `tests/test_smoke_gates.py` fails if a gate inlines one of them
-again, and if either gate stops sourcing or running the shared file.
+again, if either gate stops sourcing or running the shared file, if a gate stops
+deriving its module set from `smoke_modules`, or if a gate stops defining a hook
+the shared file calls. Two things genuinely cannot be shared — the `minio-init`
+bucket seed (a container exit code on one runtime, a Job condition on the other)
+and the runtime-specific halves above — so that test checks *those* for parity
+instead, name by name.
 
 ## Kubernetes smoke gate
 
@@ -244,23 +255,32 @@ cluster on the runner, builds the service images from the checkout and
 `kind load`s them, `helm install --wait`s the chart with `infra/ci/values-ci.yaml`,
 and then reaches the services through a curl pod in the namespace — the same way
 the core, the modules and the web shell reach each other — to run
-`smoke-assert.sh`. On top of the shared assertions it proves three things only a
-cluster can:
+`smoke-assert.sh`. On top of the shared assertions it proves what only a cluster
+can:
 
 - the OpenBao **bootstrap Job** completes, its app token is periodic, and the
-  unseal loop brings a deleted vault pod back unsealed;
-- the web shell proxies `/platform/` to the core through the **pod's own DNS**
-  (the resolver nginx derives at container start, #891 — the Docker address it
-  used before does not exist in a pod);
-- `CONTAINER_RUNTIME=auto` resolves to the **Kubernetes arm** inside a pod, and a
-  confirmed module removal scales that module's Deployment to zero through the
-  namespace-scoped Role the chart renders (#891, ADR-0134) — the first exercise of
-  that code against a real API server.
+  unseal loop brings a deleted vault pod back unsealed; the **`minio-init` Job**
+  completes, so the default bucket really is seeded;
+- `CONTAINER_RUNTIME=auto` resolves to the **Kubernetes arm** inside a pod, a
+  confirmed module removal scales that module's Deployment to zero, and a KV-cache
+  change rollout-restarts a StatefulSet — **both** arms of ADR-0134, through the
+  namespace-scoped Role the chart renders (#891);
+- a **`helm upgrade`** over the running release keeps its state: every module is
+  available again afterwards and the secret stored earlier is still readable. Every
+  boot before #919 was a fresh install, and the chart defects found so far (the
+  OpenBao `DAC_OVERRIDE` one) were of exactly the class a fresh install cannot show.
+  The upgrade also re-runs the two revision-named Jobs, which is the first live
+  check that the bootstrap's "safe to re-run on every release" claim holds against a
+  real vault rather than the API stub `tests/test_chart_services.py` drives it with.
 
 `infra/ci/values-ci.yaml` overrides as little as possible, so the gate boots the
 shape an operator installs: only Ollama is off (a multi-gigabyte image and a 4Gi
-request for a model nothing here uses) and the PVCs are small. `tests/test_smoke_gates.py`
-fails if it ever disables a module or a data-plane piece.
+request for a model nothing here uses) and the PVCs are small. That exception is
+**compensated**, not free: the gate applies `infra/ci/ollama-stub.yaml`, a labelled
+stand-in StatefulSet, so the seam's restart arm and the chart Role's `statefulsets`
+verb still run against a real object. `tests/test_smoke_gates.py` fails if the CI
+values ever disable a module or a data-plane piece the chart enables by default, and
+if the stub stops carrying the name, kind and labels the seam selects on.
 
 Run it locally, exactly as CI does — it needs `kind`, `kubectl`, `helm` and a lot
 of free disk:

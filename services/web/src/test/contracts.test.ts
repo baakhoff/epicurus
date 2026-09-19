@@ -10,6 +10,7 @@ import {
   CalendarEvent,
   CatalogResponse,
   LlmPrefs,
+  LocalRuntimeStatus,
   MessageRecord,
   ModelVariants,
   ModuleSnapshot,
@@ -55,6 +56,30 @@ describe("contracts", () => {
 
   it("rejects an unknown power state in a readiness snapshot", () => {
     expect(() => Readiness.parse({ ready: true, power: "asleep", components: [] })).toThrow();
+  });
+
+  // The cross-service seam of #962: every other test in this suite mocks `api.localRuntime()`
+  // and so never runs the schema. These three objects are the core's wire payload verbatim —
+  // `GET /platform/v1/llm/local-runtime` in each of its three states, the same bodies
+  // `services/core-app/tests/test_llm_routes.py` pins on the other side. If the two ever drift,
+  // the parse fails, the hook's catch reads the answer as `ok`, and a hosted-only deployment
+  // quietly renders the full local half of the Models page again.
+  it("parses the local-runtime payload the core actually sends, in all three states", () => {
+    expect(LocalRuntimeStatus.parse({ state: "absent", url_configured: false })).toEqual({
+      state: "absent",
+      url_configured: false,
+    });
+    expect(LocalRuntimeStatus.parse({ state: "unreachable", url_configured: true }).state).toBe(
+      "unreachable",
+    );
+    expect(LocalRuntimeStatus.parse({ state: "ok", url_configured: true }).state).toBe("ok");
+  });
+
+  it("rejects an unknown local-runtime state rather than guessing at it", () => {
+    // The hook turns a parse failure into `ok` on purpose (an older core 404s), so this must
+    // throw rather than widen: a state nobody has taught the shell about has to fall back to
+    // today's behaviour, not become a fourth rendering.
+    expect(() => LocalRuntimeStatus.parse({ state: "degraded", url_configured: true })).toThrow();
   });
 
   it("parses a manifest-driven module snapshot (the ADR-0007 surface)", () => {

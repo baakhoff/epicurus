@@ -43,6 +43,24 @@ images to GHCR.
   hosted-only release *and* proves the guard refuses the half-working one, and `k8s-smoke`
   upgrades a live release into the mode and asserts the core answers. `core-app`
   0.128.0→0.129.0 (MINOR), chart 0.1.2→0.2.0 (MINOR).
+- **A deployment with no local AI says so once, instead of warning forever** (#962) — the web
+  shell had two inline strings for a dead local runtime ("The local runtime is unreachable — is
+  the ollama service up?", "local runtime unreachable") and rendered every other Ollama control —
+  the pull card, the catalog, the KV-cache card, the context-window card, the `Local (Ollama)`
+  optgroup — as though a runtime existed. On a deployment that deliberately runs **none** (hosted
+  chat, hosted embeddings, `OLLAMA_URL=""`) that reads as a fault the operator is supposed to fix,
+  when in fact nothing is wrong and there is nothing to fix. The shell now reads the runtime's
+  state from `GET /platform/v1/llm/local-runtime` — never from a failing model list, which since
+  this change answers `[]` with a 200 in *both* unhappy states and so carries no information at
+  all — and when that state is `absent` the local half of the Models page collapses into one
+  line: local AI is not configured on this deployment, hosted models are unaffected. The five
+  Ollama cards are removed rather than disabled, the embedding picker drops its local group so an
+  unrunnable model cannot be chosen, the chat picker drops its `Local` heading while keeping the
+  core-default row (that default may itself be hosted), the first-run welcome stops offering a
+  pull, and a module's model slot with nothing left to offer says why instead of looking broken.
+  `unreachable` keeps today's warning, because that state *is* an error and must still look like
+  one, and an older core with no such endpoint keeps today's behaviour exactly.
+  `web` 0.150.0→0.151.0 (MINOR).
 - **The bound on a turn is the operator's; runaway is caught by behaviour** (#925) — the
   **Agent cycles** setting stopped at 12, and the route enforced it *silently*: type 40 and 12 was
   stored. A genuinely long task — search → read → read → summarize → write — ran out of rounds and

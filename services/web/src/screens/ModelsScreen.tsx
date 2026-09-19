@@ -59,6 +59,7 @@ import type {
 import { CAPABILITY_META, shownCapabilities } from "@/lib/icons";
 import { assessFit, fitFilterOf, type FitFilter } from "@/lib/modelFit";
 import { recommendKvCache } from "@/lib/kvCacheFit";
+import { useLocalRuntime } from "@/lib/useLocalRuntime";
 import {
   formatVariantSize,
   isCloudTag,
@@ -426,6 +427,11 @@ export function CatalogBrowser({ installed }: { installed: Set<string> }) {
 
 export function LocalModels() {
   const queryClient = useQueryClient();
+  // The runtime's state comes from its own endpoint (#962), not from the model list failing:
+  // since the core stopped 500-ing, `/llm/models` answers `[]` with a 200 whether the runtime is
+  // absent or unreachable, so `models.isError` can no longer tell the operator anything. It is
+  // still honoured for an older core, which does still 500 here.
+  const runtime = useLocalRuntime();
   // Ask for capabilities here so each model can be badged with what it does (tools/vision/…).
   // Keyed under ["models", …] so the mutations' `["models"]` invalidation still refreshes it.
   const models = useQuery({
@@ -490,12 +496,12 @@ export function LocalModels() {
         )}
       </div>
       {models.isLoading && <Spinner />}
-      {models.isError && (
+      {(runtime.unreachable || models.isError) && (
         <p className="text-sm text-warn">
           The local runtime is unreachable — is the ollama service up?
         </p>
       )}
-      {models.data?.length === 0 && (
+      {!runtime.unreachable && !models.isError && models.data?.length === 0 && (
         <p className="text-sm text-ink-dim">None yet. Pull one above — it stays on your disk.</p>
       )}
       <div className="flex flex-col gap-1.5">
@@ -603,6 +609,32 @@ export function LocalModels() {
           setConfirming(null);
         }}
       />
+    </Card>
+  );
+}
+
+// ── No local runtime (#962) ─────────────────────────────────────────────────────
+
+/**
+ * What the local half of this page becomes on a deployment that runs **no local runtime**
+ * (`OLLAMA_URL=""` — hosted chat, hosted embeddings, no Ollama): one calm line.
+ *
+ * It replaces — rather than disables — the catalog, the download tray, the local-model list, the
+ * context-window card and the KV-cache card, because every one of them is an Ollama control and
+ * a disabled control still reads as "something here is broken; fix it". Nothing is broken: this
+ * is a supported mode, and the cards below it (hosted providers, hosted models, the embedding
+ * default) are the whole page here. `unreachable` is the opposite case and keeps its warning.
+ */
+export function LocalRuntimeAbsent() {
+  return (
+    <Card>
+      <h3 className="mb-1 font-serif text-base text-ink">Local AI</h3>
+      <p className="text-sm leading-relaxed text-ink-dim" data-testid="local-runtime-absent">
+        Local AI is not configured on this deployment — there is no local runtime to pull models
+        into, so the catalog, the local model list and the runtime settings don&apos;t apply.
+        Hosted models are unaffected: set a provider key below and chat and embeddings run
+        through it as usual.
+      </p>
     </Card>
   );
 }
@@ -1550,6 +1582,9 @@ export function KvCache() {
 export function EmbedDefault() {
   const queryClient = useQueryClient();
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
+  // With no local runtime (#962) the local group is not merely empty, it is unofferable: a local
+  // id chosen here cannot run, and the core refuses it at call time. Better not to offer it.
+  const runtime = useLocalRuntime();
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs });
   // Saved hosted models (#865): the gateway embeds through a hosted provider the same way it
   // chats through one, so they belong in this select too. The store holds *any* hosted id and
@@ -1601,6 +1636,13 @@ export function EmbedDefault() {
         ones the catalogue knows to be chat models aren&apos;t offered here, and the core refuses
         one if it slips through. A hosted choice sends the whole notes, knowledge, and memory
         corpus to that provider.
+        {runtime.absent && (
+          <>
+            {" "}
+            This deployment runs no local runtime, so every option here is a hosted one — which
+            means the corpus leaves the machine whichever you pick.
+          </>
+        )}
       </p>
       {llmPrefs.isLoading ? (
         <Spinner />
@@ -1616,13 +1658,15 @@ export function EmbedDefault() {
             >
               <option value="">System default</option>
               {orphan && <option value={orphan}>{orphan}</option>}
-              <optgroup label="Local (Ollama)">
-                {available.map((m) => (
-                  <option key={m.name} value={m.name}>
-                    {m.name}
-                  </option>
-                ))}
-              </optgroup>
+              {!runtime.absent && (
+                <optgroup label="Local (Ollama)">
+                  {available.map((m) => (
+                    <option key={m.name} value={m.name}>
+                      {m.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
               {hosted.length > 0 && (
                 <optgroup label="Hosted (saved models)">
                   {hosted.map((m) => (
@@ -1634,7 +1678,11 @@ export function EmbedDefault() {
               )}
             </Select>
           </label>
-          {current && (
+          {/* A stale *local* id can still be the stored default on a deployment with no runtime
+              (an orphan, kept selected above so the select doesn't misreport the core). Its
+              settings sheet is all Ollama knobs — num_ctx, keep-alive, run-on — so offering it
+              would be a control that cannot do anything. A hosted id keeps its sheet. */}
+          {current && (isHostedModelId(current) || !runtime.absent) && (
             <Button
               variant="ghost"
               aria-label={`Settings for ${current}`}
@@ -2173,16 +2221,28 @@ export function SavedHostedModels() {
 export function ModelsScreen() {
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models() });
   const installed = new Set((models.data ?? []).map((m) => m.name));
+  // #962: with no local runtime the local half of this page is replaced, not disabled. The
+  // collapse waits for a settled answer so a hosted-only deployment never flashes five cards of
+  // Ollama controls on the way to hiding them — and, equally, a normal deployment never flashes
+  // "Local AI is not configured".
+  const runtime = useLocalRuntime();
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex max-w-2xl flex-col gap-4 px-4 py-5">
         <h1 className="font-serif text-xl text-ink">Models</h1>
-        <CatalogBrowser installed={installed} />
-        <DownloadTray />
-        <LocalModels />
-        <ContextWindow />
-        <KvCache />
+        {runtime.settled &&
+          (runtime.absent ? (
+            <LocalRuntimeAbsent />
+          ) : (
+            <>
+              <CatalogBrowser installed={installed} />
+              <DownloadTray />
+              <LocalModels />
+              <ContextWindow />
+              <KvCache />
+            </>
+          ))}
         <EmbedDefault />
         <Providers />
         <SavedHostedModels />

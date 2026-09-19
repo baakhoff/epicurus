@@ -117,11 +117,10 @@ docker compose exec core-app python -c \
   "import urllib.request,sys; sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:8080/platform/v1/llm/local-runtime').read().decode())"
 ```
 
-`absent` is the hosted-only mode and nothing is wrong. `unreachable` means the container is
-down or the URL is wrong — check that `ollama` is running (`docker compose ps ollama`; it
-starts only with the `local-ai` profile, which `task up` and `infra/cd/reconcile.sh` pass for
-you) and that `OLLAMA_URL` matches it. A 500 from that endpoint is a bug worth reporting: it
-was the symptom this contract exists to remove.
+`absent` is the hosted-only mode (`task hosted-only-up`, or `EPICURUS_HOSTED_ONLY=1` on a
+deploy box) and nothing is wrong. `unreachable` means the container is down or the URL is
+wrong — check `docker compose ps ollama` and that `OLLAMA_URL` matches it. A 500 from that
+endpoint is a bug worth reporting: it was the symptom this contract exists to remove.
 
 ### OpenBao is sealed {#openbao-sealed}
 

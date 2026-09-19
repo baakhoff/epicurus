@@ -366,6 +366,14 @@ ADR-0144). Shell-facing; no body, no query params.
 `url_configured` is the *why* behind the state, and is `false` exactly when `state` is
 `absent`.
 
+**A client that cannot get an answer reads it as `ok`.** A 404 (an older core, which has no
+such route), a non-2xx, or an unparseable body all mean *keep doing what you did before this
+endpoint existed* — render the full local UI. The alternative default, `absent`, would have a
+shell collapse every local-runtime control against a core that is serving one perfectly well,
+which is a worse failure than showing a control that then refuses. The state is an
+optimisation on what the surface shows, never the authority on what the core will do: the
+core refuses for itself, with a status and a sentence, whatever the shell believed.
+
 Three facts that used to be one, which is why this endpoint exists rather than an envelope
 around the model list. `GET /platform/v1/llm/models` stays a bare `list[ModelInfo]` (twelve
 consumers read that array) and **never 500s again**: it answers `200` with `[]` when the

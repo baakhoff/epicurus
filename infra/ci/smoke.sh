@@ -53,11 +53,7 @@ mkdir -p "$SMOKE_MOUNT_DIR"
 chmod 0777 "$SMOKE_MOUNT_DIR"
 printf 'seed\n' > "$SMOKE_MOUNT_DIR/seed.txt"
 BOOT_LOG="$(mktemp)"
-# `--profile local-ai`: the Ollama services carry that profile since #962 (it is how a
-# hosted-only deployment leaves them out). This gate boots the *default* stack — local AI on
-# — and asserts things that need the workload to exist: the ollama-init one-shot's exit code,
-# and the KV-cache change restarting it through the container seam.
-DC="docker compose --profile local-ai -f compose.yaml -f infra/ci/compose.ci.yaml --env-file $ENV_FILE"
+DC="docker compose -f compose.yaml -f infra/ci/compose.ci.yaml --env-file $ENV_FILE"
 CURL_IMG="curlimages/curl:8.11.1"
 
 DATA_PLANE="openbao postgres valkey nats qdrant minio minio-init"
@@ -159,7 +155,7 @@ docker pull -q "$CURL_IMG" >/dev/null
 # Pre-flight: two fragments publishing the same host port is the #68 collision class.
 # The smoke itself clears ports (for isolation), so check the real compose instead.
 log "Pre-flight: checking for duplicate published host ports"
-dupes="$(docker compose --profile local-ai -f compose.yaml config 2>/dev/null |
+dupes="$(docker compose -f compose.yaml config 2>/dev/null |
   grep -oE 'published: "?[0-9]+' | grep -oE '[0-9]+' | sort | uniq -d | tr '\n' ' ')"
 [ -z "$dupes" ] || die "two services publish the same host port(s): $dupes — pick a unique one"
 ok "no duplicate published host ports"

@@ -20,11 +20,12 @@ services:
       NATS_URL: nats://nats:4222
       NATS_USER: core
       NATS_PASSWORD: ${NATS_CORE_PASSWORD:-epicurus-dev}
-      # The local LLM runtime. **Blank means there is none** (#962, ADR-0144): a hosted-only
-      # stack sets `OLLAMA_URL=` and `COMPOSE_PROFILES=` (which leaves the `local-ai` profile,
-      # and so the ollama service itself, out of the stack). Single-dash `-`, not `:-`: `:-`
-      # would substitute the default back in for a deliberately *empty* value, which is
-      # precisely the setting an operator uses to say "there is no local runtime here".
+      # The local LLM runtime. **Blank means there is none** (#962, ADR-0144) — the
+      # hosted-only overlay (infra/ollama/compose.hosted-only.yaml, `task hosted-only-up`)
+      # sets it blank and drops the ollama service in one step. Single-dash `-`, not `:-`:
+      # `:-` would substitute the default back in for a deliberately *empty* value, which is
+      # precisely what an operator sets to say "there is no local runtime here" — so the
+      # env-var route (`OLLAMA_URL=` in .env) works too.
       OLLAMA_URL: ${OLLAMA_URL-http://ollama:11434}
       # ── LLM gateway tuning (all optional; blank/unset = provider default) ──
       # Set any of these and restart — no code edit needed (issue #114).
@@ -87,9 +88,9 @@ services:
         condition: service_started
       ollama:
         condition: service_started
-        # Not required (#962, ADR-0144): a hosted-only stack leaves the `local-ai` profile
-        # out, and without this the whole `up` would fail on a dependency that is absent on
-        # purpose. With local AI on (the default) the ordering is unchanged.
+        # Not required (#962, ADR-0144): the hosted-only overlay removes the ollama service
+        # altogether, and without this the whole `up` would fail on a dependency that is
+        # absent on purpose. With local AI on (the default) the ordering is unchanged.
         required: false
       openbao:
         condition: service_healthy

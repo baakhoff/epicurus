@@ -456,7 +456,7 @@ old guard — `required` on `ollama.external.url` — refused a *legitimate* dep
 refuses a broken one. Add each provider's API key on the Models page before the first turn.
 
 The Compose equivalent is the
-[`local-ai` profile](index.md#hosted-only-no-local-llm-runtime).
+[hosted-only overlay](index.md#hosted-only-no-local-llm-runtime) (`task hosted-only-up`).
 
 **MinIO is on by default**, matching the Compose stack. It backs two different
 things: the `storage` module's object store (chat uploads, agent-written objects,

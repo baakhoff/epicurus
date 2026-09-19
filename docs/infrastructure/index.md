@@ -244,29 +244,34 @@ after boot — so there is no startup race regardless.
 ### Hosted-only: no local LLM runtime
 
 A deployment can run **no local runtime at all** — hosted chat and hosted embeddings, nothing
-local (#962, ADR-0144). `ollama` and `ollama-init` carry the **`local-ai` compose profile**, so
-they can be left out of the stack entirely; a blank `OLLAMA_URL` is how the core is told that is
-deliberate, and `core-app`'s dependency on `ollama` is `required: false` so its absence does not
-fail the whole `up`.
-
-**Local AI is on by default and stays on.** A compose profile is opt-in by construction, so every
-path that starts the stack selects it explicitly: `.env.example` ships `COMPOSE_PROFILES=local-ai`
-(what a bare `docker compose up -d` reads), `task up` / `task obs-up` / `task docker-socket-up` /
-`task external-mounts-up` pass `--profile local-ai`, and `infra/cd/reconcile.sh` passes it unless
-`EPICURUS_LOCAL_AI=0`. Nothing about an existing install changes.
-
-To run hosted-only, three things — the first alone gives you a stack with no runtime *and* a core
-still looking for one:
+local (#962, ADR-0144). It is an **opt-out overlay**,
+[`infra/ollama/compose.hosted-only.yaml`](../../infra/ollama/compose.hosted-only.yaml), the same
+idiom as the Docker-socket and external-mount opt-ins:
 
 ```bash
-# 1. leave Ollama out of the stack        2. tell the core there is no local runtime
-# (COMPOSE_PROFILES= in .env, or just)    (OLLAMA_URL= in .env, or just)
-OLLAMA_URL= docker compose up -d          # == task hosted-only-up
+task hosted-only-up
+# == docker compose -f compose.yaml -f infra/ollama/compose.hosted-only.yaml up -d
+```
 
-# 3. in .env, point both model defaults at hosted ids — a bare name routes to the
-#    local runtime, so leaving these is the half-working stack:
-#      LLM_DEFAULT_MODEL=claude/claude-sonnet-4-6
-#      MEMORY_EMBED_MODEL=gpt/text-embedding-3-small
+The overlay does **both** halves, because either alone is wrong: it removes `ollama` and
+`ollama-init` from the stack (which `core-app`'s `required: false` dependency on `ollama` is what
+makes survivable), *and* it blanks `OLLAMA_URL`, which is how the core is told the absence is
+deliberate. Remove only the container and the core is left probing a host that is gone — that is
+the `unreachable` state, not `absent`.
+
+**Nothing about the default install changes.** `docker compose up -d` from a fresh clone, with no
+`.env` and no flags, still starts the local runtime exactly as before — which is why this is an
+overlay and not a compose profile on the `ollama` services. A profile is opt-in by construction,
+so it would have taken the runtime out of every fresh clone while the shipped `llama3.2` /
+`nomic-embed-text` defaults still pointed at it, which is the half-working stack the Kubernetes
+chart now refuses to render.
+
+Set both model defaults to hosted ids in `.env` as well — a bare name routes to the local
+runtime, so leaving them is that same half-working stack:
+
+```dotenv
+LLM_DEFAULT_MODEL=claude/claude-sonnet-4-6
+MEMORY_EMBED_MODEL=gpt/text-embedding-3-small
 ```
 
 Add each provider's API key on the **Models** page before the first turn. With no local runtime
@@ -277,8 +282,10 @@ model as `n/a` instead of "warming" forever. A local model id asked to answer is
 sentence naming the fix, before any provider call. The Kubernetes equivalent is
 [`ollama.enabled: false` with a blank `ollama.external.url`](kubernetes.md#hosted-only-no-local-llm-runtime).
 
-To go back, remove `OLLAMA_URL=` from `.env` and bring the stack up with the profile again; the
-`ollama-models` volume is untouched by any of this, so the models are still there.
+On the deploy box, `EPICURUS_HOSTED_ONLY=1` makes `infra/cd/reconcile.sh` apply the same overlay;
+unset (the default) it keeps the local runtime, so a box that never asked for a hosted-only stack
+cannot lose Ollama to a reconcile. To go back, drop the overlay (`task up`): the `ollama-models`
+volume is untouched by any of this, so the models are still there.
 
 ## Log retention
 

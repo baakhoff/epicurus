@@ -33,12 +33,15 @@ images to GHCR.
   On **Kubernetes** the chart renders an empty `OLLAMA_URL`, blanks `LLM_BOOTSTRAP_MODELS` on its
   own, and gains the guard actually worth having — it refuses to render a runtime-less release
   whose chat or embedding default is still a bare local name, naming the hosted alias to set. On
-  **Compose** Ollama moves behind a `local-ai` profile that every start path (`task up`,
-  `task obs-up`, `infra/cd/reconcile.sh`, `.env.example`) selects explicitly, so the default
-  install is unchanged and `task hosted-only-up` is the opt-out. Both gates cover it:
-  `compose-validate` resolves the hosted-only stack, `chart-validate` renders it *and* proves the
-  guard refuses the half-working one, and `k8s-smoke` upgrades a live release into the mode and
-  asserts the core answers. `core-app` 0.128.0→0.129.0 (MINOR), chart 0.1.2→0.2.0 (MINOR).
+  **Compose** it is an opt-out overlay — `task hosted-only-up` — which removes the Ollama
+  services *and* blanks `OLLAMA_URL` in one step, the same idiom as the Docker-socket and
+  external-mount opt-ins; the documented install (`git clone`, `docker compose up -d`, no
+  `.env`) is byte-identical and still starts the local runtime, which a compose profile on
+  those services would have quietly stopped doing. Three gates cover it: `compose-validate`
+  proves both the default stack and the overlay resolve, `chart-validate` renders the
+  hosted-only release *and* proves the guard refuses the half-working one, and `k8s-smoke`
+  upgrades a live release into the mode and asserts the core answers. `core-app`
+  0.128.0→0.129.0 (MINOR), chart 0.1.2→0.2.0 (MINOR).
 - **The bound on a turn is the operator's; runaway is caught by behaviour** (#925) — the
   **Agent cycles** setting stopped at 12, and the route enforced it *silently*: type 40 and 12 was
   stored. A genuinely long task — search → read → read → summarize → write — ran out of rounds and

@@ -6,11 +6,11 @@ was disabled, and Compose included the fragment unconditionally with `core-app` 
 on the service. These are the static and render-time halves of the fix:
 
 * **Compose** — parsed from the fragments directly, in the style of ``test_compose_ports.py``:
-  the profile that lets Ollama be left out, the `required: false` that stops its absence
+  the opt-out overlay that removes Ollama, the `required: false` that stops its absence
   failing the whole `up`, and the env interpolation that carries a *deliberately blank*
-  ``OLLAMA_URL`` through to the core. Plus the thing that is easy to get wrong and impossible
-  to see: that turning the runtime into a profile did not turn local AI off for everyone who
-  was not asking for that.
+  ``OLLAMA_URL`` through to the core. And, first, the thing this feature could most easily
+  break for people who never asked for it: the **documented install** — `git clone` &&
+  `docker compose up -d`, no `.env`, no flags — must still bring up the local runtime.
 * **Chart** — real ``helm template`` renders (no cluster), because a guard nobody renders is a
   guard that has quietly stopped guarding. Skipped, not silently passed, without ``helm``.
 """
@@ -30,11 +30,14 @@ CHART = REPO / "infra" / "k8s" / "epicurus"
 OLLAMA_FRAGMENT = REPO / "infra" / "ollama" / "compose.yaml"
 CORE_FRAGMENT = REPO / "services" / "core-app" / "compose.yaml"
 
-LOCAL_AI_PROFILE = "local-ai"
+HOSTED_ONLY_OVERLAY = REPO / "infra" / "ollama" / "compose.hosted-only.yaml"
 
-# Every command that starts the stack must select the profile, or the operator who typed it
-# silently loses local AI. The Taskfile tasks are listed by name so a *new* start task that
-# forgets it is a conversation at review, not a surprise on someone's box.
+# The services that *are* the local runtime. Named here so a rename has to come past these
+# assertions rather than quietly making them vacuous.
+_LOCAL_AI_SERVICES = ("ollama", "ollama-init")
+
+# Every Taskfile command that starts the stack for ordinary use. None of them may need a flag
+# to get local AI: the flagless path is the one the docs publish.
 _START_TASKS = ("up", "obs-up", "docker-socket-up", "external-mounts-up")
 
 
@@ -47,13 +50,72 @@ def _fragment(path: Path) -> dict[str, Any]:
 # ── Compose ──────────────────────────────────────────────────────────────────────
 
 
-def test_the_local_runtime_can_be_left_out_of_the_stack() -> None:
+def test_the_default_install_still_brings_up_the_local_runtime() -> None:
+    """The regression guard on the *documented* install path.
+
+    `README.md` and `docs/user/installation.md` both publish `git clone` → `cd epicurus` →
+    `docker compose up -d`, and neither mentions an `.env` before that step. So whatever
+    expresses "no local runtime" must be something the operator **adds**, never something the
+    default path has to remember to select. The first cut of #962 used a compose profile on
+    these services; a profile is opt-in, so it removed Ollama from every fresh clone while the
+    shipped `llama3.2` / `nomic-embed-text` defaults still pointed at it — the half-working
+    stack the chart's render-time guard refuses, delivered by default.
+
+    Asserted on the fragments (no Docker): nothing may gate these services behind a profile,
+    and no start command may need a flag to get them. `compose-validate` proves the same thing
+    against a real `docker compose config`.
+    """
     services = _fragment(OLLAMA_FRAGMENT)["services"]
-    for name in ("ollama", "ollama-init"):
-        assert services[name].get("profiles") == [LOCAL_AI_PROFILE], (
-            f"{name} must carry the {LOCAL_AI_PROFILE!r} profile — it is how a hosted-only "
-            "deployment leaves the local runtime out (#962)"
+    for name in _LOCAL_AI_SERVICES:
+        assert "profiles" not in services[name], (
+            f"{name} is behind a compose profile, so `docker compose up -d` from a fresh "
+            "clone no longer starts the local runtime — use the opt-out overlay "
+            "(infra/ollama/compose.hosted-only.yaml) instead (#962)"
         )
+
+    taskfile = yaml.safe_load((REPO / "Taskfile.yml").read_text(encoding="utf-8"))
+    for name in _START_TASKS:
+        cmds = " ".join(str(c) for c in taskfile["tasks"][name]["cmds"])
+        assert "hosted-only" not in cmds and "--profile local-ai" not in cmds, (
+            f"task {name} should start the local runtime with no extra selection"
+        )
+
+    reconcile = (REPO / "infra" / "cd" / "reconcile.sh").read_text(encoding="utf-8")
+    assert "EPICURUS_HOSTED_ONLY" in reconcile, (
+        "the deploy path has no way to opt out of the local runtime"
+    )
+    assert "EPICURUS_HOSTED_ONLY:-0" in reconcile, (
+        "the deploy path must default to *keeping* the local runtime — a box that never "
+        "asked for a hosted-only stack must not lose Ollama on its next reconcile"
+    )
+
+
+def test_the_local_runtime_can_be_left_out_through_the_overlay() -> None:
+    """The opt-out, and both halves of it.
+
+    Removing the container alone leaves a core still pointed at `http://ollama:11434` — that
+    is *unreachable*, not *absent*, and the whole point of #962 is that those are different
+    facts. The overlay does both, so `task hosted-only-up` is one command and cannot be
+    half-applied.
+    """
+    overlay = _fragment(HOSTED_ONLY_OVERLAY)["services"]
+
+    for name in _LOCAL_AI_SERVICES:
+        profiles = overlay[name].get("profiles")
+        assert profiles, f"the overlay does not remove {name}"
+        # An override file can add to the compose model but not delete from it, so assigning a
+        # profile nothing enables is how a service is taken out. Any profile name works; what
+        # must stay true is that it is not one this repo ever activates.
+        for profile in profiles:
+            assert profile != "observability", (
+                "the overlay parks a service on a profile the repo actually enables, so the "
+                "removal would undo itself"
+            )
+
+    assert overlay["core-app"]["environment"]["OLLAMA_URL"] == "", (
+        "the overlay removes the container but leaves the core looking for it — that is the "
+        "`unreachable` state, not `absent` (#962)"
+    )
 
 
 def test_the_core_does_not_hard_depend_on_the_local_runtime() -> None:
@@ -73,40 +135,23 @@ def test_a_blank_ollama_url_survives_interpolation() -> None:
     assert env["OLLAMA_URL"] == "${OLLAMA_URL-http://ollama:11434}"
 
 
-def test_every_start_path_still_turns_local_ai_on() -> None:
-    """A profile is opt-in by construction; the default install must not have changed.
-
-    This is the regression guard for the way this feature could hurt people who did not ask
-    for it: put a profile on Ollama and every existing `task up`, every deploy reconcile and
-    every documented `.env` stops starting the local runtime. So each of those paths selects
-    the profile explicitly, and this test is what keeps it that way.
-    """
+def test_the_opt_out_is_reachable_as_one_command() -> None:
+    """The overlay only helps if an operator can find it; `task hosted-only-up` is how."""
     taskfile = yaml.safe_load((REPO / "Taskfile.yml").read_text(encoding="utf-8"))
-    for name in _START_TASKS:
-        cmds = " ".join(str(c) for c in taskfile["tasks"][name]["cmds"])
-        assert f"--profile {LOCAL_AI_PROFILE}" in cmds, (
-            f"task {name} no longer starts the local AI runtime — a profile is opt-in, so "
-            "every start path has to select it or the default install silently changes"
-        )
-
-    reconcile = (REPO / "infra" / "cd" / "reconcile.sh").read_text(encoding="utf-8")
-    assert f"--profile {LOCAL_AI_PROFILE}" in reconcile, (
-        "infra/cd/reconcile.sh would take the local runtime down on the next deploy of a "
-        "box that never asked for a hosted-only stack"
-    )
-    assert "EPICURUS_LOCAL_AI" in reconcile, "the deploy path has no way to opt out"
-
-    env_example = (REPO / ".env.example").read_text(encoding="utf-8")
-    assert f"COMPOSE_PROFILES={LOCAL_AI_PROFILE}" in env_example, (
-        ".env.example must ship the profile: it is what selects local AI for a bare "
-        "`docker compose up -d`"
-    )
+    cmds = " ".join(str(c) for c in taskfile["tasks"]["hosted-only-up"]["cmds"])
+    assert "infra/ollama/compose.hosted-only.yaml" in cmds
+    assert "-f compose.yaml" in cmds, "the overlay must be layered over the assembled stack"
 
 
-def test_the_compose_smoke_gate_boots_the_local_runtime() -> None:
-    """`runtime-smoke` asserts ollama-init's exit code and a KV-cache restart — both need it."""
+def test_the_compose_gate_keeps_booting_the_default_stack() -> None:
+    """`runtime-smoke` asserts ollama-init's exit code and a KV-cache restart — both need it.
+
+    It boots the plain stack with no overlay, which is the point: the gate and the documented
+    install are the same shape, so one cannot drift from the other unnoticed.
+    """
     smoke = (REPO / "infra" / "ci" / "smoke.sh").read_text(encoding="utf-8")
-    assert f"--profile {LOCAL_AI_PROFILE}" in smoke
+    assert "compose.hosted-only.yaml" not in smoke
+    assert "ollama-init" in smoke, "the gate no longer asserts the local runtime's one-shot"
 
 
 def test_the_kubernetes_gate_asserts_the_hosted_only_mode() -> None:

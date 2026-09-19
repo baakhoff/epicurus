@@ -158,27 +158,41 @@ jobs:
       - name: Validate the assembled compose stack (observability profile)
         run: docker compose -f compose.yaml --profile observability config -q
 
-      # The default stack, local AI on — the shape every operator installs and the one
-      # `runtime-smoke` boots. Ollama carries `profiles: [local-ai]` since #962 so a
-      # hosted-only deployment can leave it out; this proves the on path still resolves.
-      - name: Validate the assembled compose stack (local-ai profile)
-        run: docker compose -f compose.yaml --profile local-ai config -q
-
-      # And the hosted-only shape (#962, ADR-0144): no `local-ai` profile and a blank
-      # OLLAMA_URL. The assertion is not just that it parses — it is that core-app's
-      # dependency on the absent ollama service is `required: false`, which is what makes
-      # the whole `up` succeed rather than fail on a service that is missing on purpose.
-      - name: Validate the assembled compose stack (hosted-only — no local runtime)
+      # The documented install — `git clone` && `docker compose up -d`, no `.env`, no flags
+      # (README.md, docs/user/installation.md) — must keep starting the local AI runtime.
+      # #962 made "no local runtime" a supported mode, and the first cut expressed it as a
+      # compose profile on `ollama`: profiles are opt-in, so that silently removed Ollama
+      # from every fresh clone while the shipped `llama3.2` / `nomic-embed-text` defaults
+      # still pointed at it. This step is the guard against that being reintroduced.
+      - name: Validate the assembled compose stack (default install starts the local runtime)
         run: |
-          OLLAMA_URL= docker compose -f compose.yaml config -q
-          rendered="$(OLLAMA_URL= docker compose -f compose.yaml config)"
+          rendered="$(docker compose -f compose.yaml config)"
+          for svc in ollama ollama-init; do
+            if ! printf '%s' "$rendered" | grep -qE "^  ${svc}:"; then
+              echo "the default stack no longer starts '${svc}' — see #962"; exit 1
+            fi
+          done
+          if ! printf '%s' "$rendered" | grep -q 'OLLAMA_URL: http://ollama:11434'; then
+            echo "the default stack does not point the core at the local runtime"; exit 1
+          fi
+          echo "the documented install still brings up the local AI runtime"
+
+      # And the opt-out overlay (#962, ADR-0144): no Ollama, blank OLLAMA_URL. The assertion
+      # is not just that it parses — it is that core-app's dependency on the now-absent
+      # ollama service is `required: false`, which is what lets the whole `up` succeed on a
+      # service that is missing on purpose.
+      - name: Validate the assembled compose stack (hosted-only overlay — no local runtime)
+        run: |
+          set -- -f compose.yaml -f infra/ollama/compose.hosted-only.yaml
+          docker compose "$@" config -q
+          rendered="$(docker compose "$@" config)"
           if ! printf '%s' "$rendered" | grep -q 'OLLAMA_URL: ""'; then
-            echo "a blank OLLAMA_URL did not survive interpolation"; exit 1
+            echo "the overlay did not blank OLLAMA_URL"; exit 1
           fi
           if printf '%s' "$rendered" | grep -qE '^  ollama:'; then
-            echo "ollama is still selected without the local-ai profile"; exit 1
+            echo "the overlay did not remove the ollama service"; exit 1
           fi
-          echo "hosted-only stack resolves with no local runtime"
+          echo "the hosted-only overlay resolves with no local runtime"
 
   # The Helm chart gets the same treatment the compose stack does: rendered, then
   # checked. `helm lint` catches template errors, `helm template` proves the branches

@@ -25,8 +25,9 @@ images to GHCR.
   mode, spelled `OLLAMA_URL=""`: the model list answers **200 and an empty array** in both
   non-serving states, the new `GET /platform/v1/llm/local-runtime` says which one applies, the
   local-only actions (pull, delete, unload, the KV-cache setting) refuse with **409** and a
-  sentence naming the mode — **502** when a configured runtime is unreachable, never a bare 500
-  — readiness reports the model as **n/a** instead of warming, and the bootstrap logs one line
+  sentence naming the mode — and pull and delete answer **502** when a configured runtime is
+  unreachable, never a bare 500 — readiness reports the model as **n/a** instead of warming,
+  and the bootstrap logs one line
   and returns. A local model id asked to serve is refused before any provider call with the
   capability error the rest of the gateway already speaks (ADR-0140), so a hosted embedding model
   keeps working while a bare one fails with the fix in the message instead of a connection error.

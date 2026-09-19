@@ -378,12 +378,19 @@ Three facts that used to be one, which is why this endpoint exists rather than a
 around the model list. `GET /platform/v1/llm/models` stays a bare `list[ModelInfo]` (twelve
 consumers read that array) and **never 500s again**: it answers `200` with `[]` when the
 runtime is absent *and* when it is unreachable. Everything that genuinely needs a runtime
-answers **409** when it is absent, with a `detail` naming the mode, and **502** when it is
-configured but unreachable — never a bare 500:
+refuses with a reason and never a bare 500: **409** when it is absent, with a `detail` naming
+the mode, and **502** when it is configured but unreachable — except on the three paths whose
+own shape rules the second half out, which are called out below:
 
-- `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` (refused **before** the
-  stream starts, so the caller sees a real status rather than a 200 whose only event is an
-  error) · `DELETE /platform/v1/llm/models` · `POST /platform/v1/llm/unload`;
+- `POST /platform/v1/llm/pull` · `DELETE /platform/v1/llm/models` — the full pair, 409 and 502;
+- `POST /platform/v1/llm/pull/stream` — **409 when absent only**, refused *before* the stream
+  starts so the caller sees a real status rather than a 200 whose only event is an error. Once
+  the stream has begun it cannot take its status back, so an *unreachable* runtime is still
+  reported the way it always was: a `200` whose last frame is `event: error`;
+- `POST /platform/v1/llm/unload` — **409 when absent only**. The gateway's `unload` never
+  raises (it is also on the power-pause path, which must keep working on a hosted-only
+  deployment), so an unreachable runtime answers `200` with nothing unloaded, exactly as
+  before this change;
 - `PUT /platform/v1/llm/prefs/kv-cache-type` — **409 when absent only**. This path never talks
   to Ollama (it writes the start-up env file and asks the container runtime to bounce the
   workload), so "unreachable" is not something it can observe, and setting the value while the

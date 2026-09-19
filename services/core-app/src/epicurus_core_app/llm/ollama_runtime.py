@@ -84,7 +84,7 @@ class OllamaRuntime:
         to exist.
         """
         if not self._local_runtime_enabled:
-            log.info("no local LLM runtime; KV-cache choice recorded but nothing to apply")
+            log.info("no local LLM runtime; nothing to write and nothing to restart")
             return KvCacheApplyResult(applied=False, staged=False)
         try:
             self._write_env_file(kv_cache_type)

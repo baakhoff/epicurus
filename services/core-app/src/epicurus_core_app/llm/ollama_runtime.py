@@ -55,11 +55,17 @@ class OllamaRuntime:
     """Writes Ollama's start-up env file and restarts the container to apply it."""
 
     def __init__(
-        self, docker: ContainerController | None, *, env_path: str, service: str = "ollama"
+        self,
+        docker: ContainerController | None,
+        *,
+        env_path: str,
+        service: str = "ollama",
+        local_runtime_enabled: bool = True,
     ) -> None:
         self._docker = docker
         self._env_path = Path(env_path)
         self._service = service
+        self._local_runtime_enabled = local_runtime_enabled
 
     def apply_kv_cache_type(self, kv_cache_type: str | None) -> KvCacheApplyResult:
         """Apply ``kv_cache_type`` to the live Ollama runtime; report how far it got (#709).
@@ -67,7 +73,19 @@ class OllamaRuntime:
         Writes (or clears) the shared env file, then restarts Ollama so it re-reads it. Degrades
         instead of failing the request, in two distinct ways the caller must be able to tell
         apart — see :class:`KvCacheApplyResult`. Never raises.
+
+        With **no local runtime** (#962, ADR-0144) it does neither and reports neither: the
+        same "unavailable"-shaped result the two degraded modes use, ``applied=False,
+        staged=False``. The route refuses such a call with 409 before it ever arrives here,
+        so this is belt-and-braces for an internal caller — but it matters that the answer is
+        the existing shape rather than a new one, on *both* arms of the container seam
+        (ADR-0134): with nothing to restart, neither Docker nor Kubernetes should be asked to
+        look, and neither should report a failed restart of a workload that was never meant
+        to exist.
         """
+        if not self._local_runtime_enabled:
+            log.info("no local LLM runtime; KV-cache choice recorded but nothing to apply")
+            return KvCacheApplyResult(applied=False, staged=False)
         try:
             self._write_env_file(kv_cache_type)
         except OSError as exc:  # volume not mounted / not writable — degrade, don't fail

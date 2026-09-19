@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from epicurus_core_app.llm.catalog import CatalogEntry, ModelCatalog
+from epicurus_core_app.llm.errors import LocalRuntimeState, LocalRuntimeUnavailableError
 from epicurus_core_app.llm.model_settings import ModelSettingsStore
-from epicurus_core_app.llm.models import ModelDetails
+from epicurus_core_app.llm.models import ModelDetails, ModelInfo
 from epicurus_core_app.llm.ollama_runtime import KvCacheApplyResult, OllamaRuntime
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router
@@ -24,12 +25,47 @@ class _StubGateway:
     ``show`` backs the /models/details route; ``model_role`` backs the role gate on the two
     default-setting routes (#944), answering ``unknown`` for anything not in ``roles`` — the
     "catalogue says nothing" case, which the gate lets through; ``unload`` records its calls so
-    the unload route can be asserted.
+    the unload route can be asserted. ``local_runtime_enabled`` / ``require_local_runtime`` /
+    ``local_runtime_state`` back the three-state local-runtime contract (#962): build it with
+    ``local_runtime=False`` for a hosted-only deployment, where every local-only write route
+    must refuse with 409 instead of reaching a runtime that is not there.
     """
 
-    def __init__(self, roles: dict[str, str] | None = None) -> None:
+    def __init__(self, roles: dict[str, str] | None = None, *, local_runtime: bool = True) -> None:
         self.unloaded: list[str | None] = []
         self.roles = roles or {}
+        self._local_runtime = local_runtime
+        self.pulled: list[str] = []
+        self.deleted: list[str] = []
+
+    @property
+    def local_runtime_enabled(self) -> bool:
+        return self._local_runtime
+
+    def require_local_runtime(self, action: str) -> None:
+        if self._local_runtime:
+            return
+        raise LocalRuntimeUnavailableError(
+            state="absent",
+            message=f"cannot {action}: this deployment runs no local LLM runtime",
+        )
+
+    async def local_runtime_state(self) -> LocalRuntimeState:
+        return "ok" if self._local_runtime else "absent"
+
+    async def models(
+        self, tenant_id: str | None = None, *, with_capabilities: bool = False
+    ) -> list[ModelInfo]:
+        # What the real gateway answers in both non-serving states (#962): an empty list.
+        return [] if not self._local_runtime else [ModelInfo(name="llama3.2:latest")]
+
+    async def pull(self, model: str) -> None:
+        self.require_local_runtime("pull a model")
+        self.pulled.append(model)
+
+    async def delete_model(self, model: str) -> None:
+        self.require_local_runtime("delete a model")
+        self.deleted.append(model)
 
     async def show(self, model: str, tenant_id: str | None = None) -> ModelDetails:
         return ModelDetails(
@@ -1002,3 +1038,110 @@ async def test_capability_override_rejects_a_bad_role_value() -> None:
             json={"model": "grok/grok-latest", "role": "reranker"},
         )
     assert put.status_code == 422
+
+
+# ── no local runtime at all (#962, ADR-0144) ─────────────────────────────────────
+#
+# `absent` answers 409 — the request is meaningless on this deployment and retrying will
+# never help — and every one of these paths used to answer 500 or (worse) 200.
+
+
+def _hosted_only_app() -> FastAPI:
+    """An app whose gateway reports a hosted-only deployment (``OLLAMA_URL`` blank)."""
+    return _app(gateway=_StubGateway(local_runtime=False), prefs=None)
+
+
+async def _client(app: FastAPI) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+def test_the_local_runtime_endpoint_is_declared() -> None:
+    assert "/platform/v1/llm/local-runtime" in _app().openapi()["paths"]
+
+
+async def test_local_runtime_reports_ok_when_one_answers() -> None:
+    async with await _client(_app()) as client:
+        body = (await client.get("/platform/v1/llm/local-runtime")).json()
+    assert body == {"state": "ok", "url_configured": True}
+
+
+async def test_local_runtime_reports_absent_on_a_hosted_only_deployment() -> None:
+    async with await _client(_hosted_only_app()) as client:
+        response = await client.get("/platform/v1/llm/local-runtime")
+    assert response.status_code == 200
+    assert response.json() == {"state": "absent", "url_configured": False}
+
+
+async def test_models_is_a_bare_empty_list_and_200_without_a_runtime() -> None:
+    """The regression test for the 500 the Models page collected every ten seconds.
+
+    The *shape* matters as much as the status: five web consumers and seven internal callers
+    read this array, so the state went to its own endpoint rather than into an envelope here.
+    """
+    async with await _client(_hosted_only_app()) as client:
+        response = await client.get("/platform/v1/llm/models")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_pull_refuses_with_409_without_a_runtime() -> None:
+    gateway = _StubGateway(local_runtime=False)
+    async with await _client(_app(gateway=gateway)) as client:
+        response = await client.post("/platform/v1/llm/pull", json={"model": "llama3.2"})
+    assert response.status_code == 409
+    assert "no local LLM runtime" in response.json()["detail"]
+    assert gateway.pulled == []
+
+
+async def test_pull_stream_refuses_before_the_stream_starts() -> None:
+    """A 409, not a 200 whose only SSE event is an error — an SSE cannot take back its status."""
+    async with await _client(_hosted_only_app()) as client:
+        response = await client.post("/platform/v1/llm/pull/stream", json={"model": "llama3.2"})
+    assert response.status_code == 409
+    assert "text/event-stream" not in response.headers.get("content-type", "")
+
+
+async def test_delete_refuses_with_409_without_a_runtime() -> None:
+    gateway = _StubGateway(local_runtime=False)
+    async with await _client(_app(gateway=gateway)) as client:
+        response = await client.delete("/platform/v1/llm/models?name=llama3.2")
+    assert response.status_code == 409
+    assert gateway.deleted == []
+
+
+async def test_unload_refuses_with_409_without_a_runtime() -> None:
+    """The gateway's own unload stays silent (the power-pause path needs it); the route says so."""
+    gateway = _StubGateway(local_runtime=False)
+    async with await _client(_app(gateway=gateway)) as client:
+        response = await client.post("/platform/v1/llm/unload", json={"model": None})
+    assert response.status_code == 409
+    assert gateway.unloaded == []
+
+
+async def test_a_runtime_that_answers_with_an_error_is_a_502_not_a_500() -> None:
+    """`unreachable` is an error — and the core is a gateway in front of it."""
+
+    class _Unreachable(_StubGateway):
+        async def pull(self, model: str) -> None:
+            raise httpx.ConnectError("connection refused")
+
+    async with await _client(_app(gateway=_Unreachable())) as client:
+        response = await client.post("/platform/v1/llm/pull", json={"model": "llama3.2"})
+    assert response.status_code == 502
+    assert "unreachable" in response.json()["detail"]
+
+
+async def test_kv_cache_type_refuses_with_409_and_persists_nothing_without_a_runtime() -> None:
+    """The setting describes how Ollama *starts*; with no Ollama there is nothing to record."""
+    prefs = await _fresh_prefs()
+    runtime = _FakeRuntime()
+    app = _app(
+        prefs=prefs,
+        ollama_runtime=runtime,  # type: ignore[arg-type]
+        gateway=_StubGateway(local_runtime=False),
+    )
+    async with await _client(app) as client:
+        response = await client.put("/platform/v1/llm/prefs/kv-cache-type", json={"value": "q4_0"})
+    assert response.status_code == 409
+    assert runtime.applied == []
+    assert await prefs.get_kv_cache_type("local") is None

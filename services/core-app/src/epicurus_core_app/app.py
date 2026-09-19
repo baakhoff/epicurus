@@ -507,6 +507,9 @@ def create_app() -> FastAPI:
         docker,
         env_path=settings.ollama_runtime_env_path,
         service=settings.ollama_service_name,
+        # A hosted-only deployment has no Ollama workload on either runtime arm (#962,
+        # ADR-0144), so the KV-cache apply neither writes nor restarts anything.
+        local_runtime_enabled=settings.local_runtime_enabled,
     )
     # Agent tool discovery scans only enabled modules (#126); wired after the registry
     # exists (the host needs the registry and the registry needs the host).

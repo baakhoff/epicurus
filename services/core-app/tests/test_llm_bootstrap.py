@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
 from epicurus_core_app.llm.bootstrap import ModelBootstrap
+from epicurus_core_app.llm.errors import LocalRuntimeState
 from epicurus_core_app.llm.models import ModelInfo
 
 
@@ -27,6 +28,7 @@ class FakeGateway:
         embed_default: str = "nomic-embed-text",
         pull_failures: dict[str, int] | None = None,
         reachable: bool = True,
+        local_runtime_enabled: bool = True,
     ) -> None:
         self.installed = list(installed or [])
         self.default = default
@@ -34,8 +36,20 @@ class FakeGateway:
         # Model → number of times pull raises before succeeding.
         self.pull_failures = dict(pull_failures or {})
         self.reachable = reachable
+        self._local_runtime_enabled = local_runtime_enabled
         self.pull_calls: list[str] = []
         self.models_calls = 0
+        self.state_calls = 0
+
+    @property
+    def local_runtime_enabled(self) -> bool:
+        return self._local_runtime_enabled
+
+    async def local_runtime_state(self) -> LocalRuntimeState:
+        self.state_calls += 1
+        if not self._local_runtime_enabled:
+            return "absent"
+        return "ok" if self.reachable else "unreachable"
 
     async def models(
         self, tenant_id: str | None = None, *, with_capabilities: bool = False
@@ -146,7 +160,11 @@ async def test_explicit_list_still_ensures_on_a_non_empty_runtime() -> None:
 async def test_unreachable_runtime_gives_up_quietly() -> None:
     gateway = FakeGateway(reachable=False)
     await make_bootstrap(gateway, models_spec="auto").run()
-    assert gateway.models_calls >= 1
+    # It waits on the runtime's *state*, not on `models()` raising: since #962 an
+    # unreachable runtime reports an empty list rather than an error, and polling that
+    # would read a still-starting Ollama as "an empty runtime" and race it with a pull.
+    assert gateway.state_calls >= 1
+    assert gateway.models_calls == 0
     assert gateway.pull_calls == []
 
 
@@ -214,3 +232,23 @@ async def test_cancellation_propagates_for_shutdown() -> None:
     with suppress(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=1.0)
     assert task.cancelled()
+
+
+async def test_no_local_runtime_returns_at_once_without_polling() -> None:
+    """A hosted-only deployment spent 180 s of every process start polling nothing (#962).
+
+    Asserted on behaviour, not on a clock: the bootstrap must not probe the runtime's state,
+    must not list models, and must not pull — it knows from the configuration alone.
+    """
+    gateway = FakeGateway(local_runtime_enabled=False)
+    await make_bootstrap(gateway, models_spec="auto", ready_timeout_s=30.0).run()
+    assert gateway.state_calls == 0
+    assert gateway.models_calls == 0
+    assert gateway.pull_calls == []
+
+
+async def test_no_local_runtime_wins_over_an_explicit_model_list() -> None:
+    """An explicit pin is a standing instruction — but not one this deployment can carry out."""
+    gateway = FakeGateway(local_runtime_enabled=False)
+    await make_bootstrap(gateway, models_spec="llama3.2,nomic-embed-text").run()
+    assert gateway.pull_calls == []

@@ -241,6 +241,45 @@ hit `PermissionError` and the choice would save but never apply (#392). `ollama-
 only**: the core's write is lazy — it happens when the operator changes the KV-cache type, long
 after boot — so there is no startup race regardless.
 
+### Hosted-only: no local LLM runtime
+
+A deployment can run **no local runtime at all** — hosted chat and hosted embeddings, nothing
+local (#962, ADR-0144). `ollama` and `ollama-init` carry the **`local-ai` compose profile**, so
+they can be left out of the stack entirely; a blank `OLLAMA_URL` is how the core is told that is
+deliberate, and `core-app`'s dependency on `ollama` is `required: false` so its absence does not
+fail the whole `up`.
+
+**Local AI is on by default and stays on.** A compose profile is opt-in by construction, so every
+path that starts the stack selects it explicitly: `.env.example` ships `COMPOSE_PROFILES=local-ai`
+(what a bare `docker compose up -d` reads), `task up` / `task obs-up` / `task docker-socket-up` /
+`task external-mounts-up` pass `--profile local-ai`, and `infra/cd/reconcile.sh` passes it unless
+`EPICURUS_LOCAL_AI=0`. Nothing about an existing install changes.
+
+To run hosted-only, three things — the first alone gives you a stack with no runtime *and* a core
+still looking for one:
+
+```bash
+# 1. leave Ollama out of the stack        2. tell the core there is no local runtime
+# (COMPOSE_PROFILES= in .env, or just)    (OLLAMA_URL= in .env, or just)
+OLLAMA_URL= docker compose up -d          # == task hosted-only-up
+
+# 3. in .env, point both model defaults at hosted ids — a bare name routes to the
+#    local runtime, so leaving these is the half-working stack:
+#      LLM_DEFAULT_MODEL=claude/claude-sonnet-4-6
+#      MEMORY_EMBED_MODEL=gpt/text-embedding-3-small
+```
+
+Add each provider's API key on the **Models** page before the first turn. With no local runtime
+the core refuses every local-only action with a reason — `409` from pull, delete, unload and the
+KV-cache setting — `GET /platform/v1/llm/models` answers `200` with an empty list rather than
+500ing, `GET /platform/v1/llm/local-runtime` reports `absent`, and chat readiness reports the
+model as `n/a` instead of "warming" forever. A local model id asked to answer is refused with a
+sentence naming the fix, before any provider call. The Kubernetes equivalent is
+[`ollama.enabled: false` with a blank `ollama.external.url`](kubernetes.md#hosted-only-no-local-llm-runtime).
+
+To go back, remove `OLLAMA_URL=` from `.env` and bring the stack up with the profile again; the
+`ollama-models` volume is untouched by any of this, so the models are still there.
+
 ## Log retention
 
 Every service in every compose fragment sets a bounded `json-file` logging driver

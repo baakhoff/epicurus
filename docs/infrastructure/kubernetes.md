@@ -398,7 +398,7 @@ cluster points at managed services.
 | `ollama.resources` | `requests: 500m / 4Gi` (add `limits` — memory especially) |
 | `ollama.env` | `OLLAMA_KEEP_ALIVE: 5m`, `OLLAMA_FLASH_ATTENTION: "0"`, `OLLAMA_KV_CACHE_TYPE: f16` |
 | `ollama.gpu.enabled` / `.count` / `.resourceName` / `.runtimeClassName` | `false` / `1` / `nvidia.com/gpu` / `""` |
-| `ollama.external.url` | `""` |
+| `ollama.external.url` | `""` — blank with `ollama.enabled: false` means **no local runtime at all** (see below) |
 | `searxng.enabled` | `true` |
 | `searxng.image.repository` / `.tag` | `searxng/searxng` / `2026.6.10-de03f4eb1` |
 | `searxng.settings` | `""` (blank = the compose `settings.yml`) |
@@ -411,9 +411,52 @@ defaults set `requests` only, and `limits` are yours to add. Each data-plane blo
 also takes `nodeSelector`, `tolerations` and `affinity`.
 Every `external.url` is required once its `enabled` is `false` — Helm fails the
 render with a named message rather than deploying something that cannot connect.
-Postgres is the exception in shape: an external server is addressed by
-`external.host`/`.port` and the credentials still come from the Secret, so no DSN
-with a password in it ever sits in a values file.
+**Ollama and MinIO are the two exceptions**, because unlike Postgres, NATS, Qdrant
+and OpenBao the core can genuinely run without either: a blank `ollama.external.url`
+with `ollama.enabled: false` means *there is no local LLM runtime*, which is a
+supported deployment and not an omission (see below). Postgres is the exception in
+shape: an external server is addressed by `external.host`/`.port` and the
+credentials still come from the Secret, so no DSN with a password in it ever sits in
+a values file.
+
+### Hosted-only: no local LLM runtime
+
+Three Ollama deployments, not two (#962, ADR-0144):
+
+| | `ollama.enabled` | `ollama.external.url` | `OLLAMA_URL` in the pod |
+| --- | --- | --- | --- |
+| the chart runs Ollama (default) | `true` | ignored | `http://ollama:11434` |
+| an Ollama you run elsewhere | `false` | your URL | your URL |
+| **no local runtime at all** | `false` | `""` | `""` |
+
+The third is hosted chat and hosted embeddings with nothing local. It is a real mode, not a
+degraded one: with an empty `OLLAMA_URL` the core reports `absent` at
+`GET /platform/v1/llm/local-runtime`, answers `200` and `[]` from `GET /platform/v1/llm/models`
+(rather than the 500 it used to, on a page that polls every ten seconds), refuses pull / delete
+/ unload / the KV-cache setting with **409** and a sentence naming the mode, reports the chat
+model as `n/a` in readiness instead of "warming" forever, and skips the first-boot model
+bootstrap in one log line. The chart also blanks `LLM_BOOTSTRAP_MODELS` for you when it is left
+at `auto` — there is nothing to pull into — while leaving an explicit list you set alone.
+
+**Both model defaults must name hosted models**, and the chart enforces it at render time:
+
+```bash
+helm install epicurus oci://ghcr.io/baakhoff/charts/epicurus \
+  --namespace epicurus --create-namespace \
+  --set ollama.enabled=false \
+  --set core.llm.defaultModel=claude/claude-sonnet-4-6 \
+  --set core.memoryEmbedModel=gpt/text-embedding-3-small
+```
+
+Leave the chart's defaults (`llama3.2`, `nomic-embed-text`) in place and the render **fails**,
+naming the key and an example value. That is deliberate: a bare model name routes to the local
+runtime, so a runtime-less release with bare defaults is the half-working stack where chat works
+through the hosted provider while memory recall and every module index fail at call time. The
+old guard — `required` on `ollama.external.url` — refused a *legitimate* deployment; this one
+refuses a broken one. Add each provider's API key on the Models page before the first turn.
+
+The Compose equivalent is the
+[`local-ai` profile](index.md#hosted-only-no-local-llm-runtime).
 
 **MinIO is on by default**, matching the Compose stack. It backs two different
 things: the `storage` module's object store (chat uploads, agent-written objects,

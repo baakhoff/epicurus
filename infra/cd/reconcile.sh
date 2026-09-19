@@ -69,10 +69,22 @@ fi
 #      path re-adds a discovered override explicitly — `docker-compose.override.yml` is gitignored
 #      precisely so an operator can keep one on the box, and dropping it here would be the same
 #      class of silent revert this change exists to fix.
+#   3. Local AI is ON by default, here as everywhere else (#962, ADR-0144). Ollama carries the
+#      `local-ai` profile so a hosted-only deployment can leave it out — but a profile is
+#      opt-in by construction, and a deploy script that silently stopped selecting it would
+#      take the local runtime down on the next reconcile of a box that never asked for that.
+#      So the profile is passed explicitly (`--profile` does not disable override discovery —
+#      only `-f` does, see 2), and turning it off is a deliberate `EPICURUS_LOCAL_AI=0`,
+#      paired with `OLLAMA_URL=` in .env or the core keeps probing a host that is gone.
 set --
+if [ "${EPICURUS_LOCAL_AI:-1}" = "0" ]; then
+  log "EPICURUS_LOCAL_AI=0 — reconciling WITHOUT the local AI runtime (hosted models only)."
+else
+  set -- --profile local-ai
+fi
 if [ -n "${DOCKER_GID}" ]; then
   log "DOCKER_GID is set — including the Docker-socket opt-in overlay."
-  set -- -f compose.yaml
+  set -- "$@" -f compose.yaml
   for override in \
     compose.override.yaml compose.override.yml \
     docker-compose.override.yaml docker-compose.override.yml; do

@@ -8,6 +8,16 @@
 #
 # Internal-only: the core reaches it at http://ollama:11434 on the epicurus network;
 # it is not published to the host (private-by-default — the core is the front door).
+#
+# ── Leaving it out (#962, ADR-0144) ─────────────────────────────────────────────
+# Both services carry the `local-ai` profile, so a deployment can run *no* local runtime —
+# hosted chat and hosted embeddings, nothing local to run a model on. The profile is ON
+# everywhere the stack is actually started, so the default install is unchanged:
+# `.env.example` ships `COMPOSE_PROFILES=local-ai`, every `task *-up` passes
+# `--profile local-ai`, and `infra/cd/reconcile.sh` passes it unless `EPICURUS_LOCAL_AI=0`.
+# A hosted-only stack is `COMPOSE_PROFILES=` **and** `OLLAMA_URL=`: the blank URL is what
+# tells the core there is no local runtime, and without it the core would keep probing a
+# hostname that no longer resolves instead of refusing with a reason.
 
 # Bounded json-file logging (#462) — see infra/compose/docker-compose.yml for the rationale.
 x-logging: &default-logging
@@ -26,6 +36,9 @@ services:
   # the root — no subdirs needed. Mirrors qdrant-init, the core image entrypoint, and the OpenBao chown.
   ollama-init:
     image: alpine:3.21
+    # Same profile as the server it prepares: with no local runtime there is no volume to
+    # chown and no reason to run a one-shot for it (#962).
+    profiles: [local-ai]
     restart: "no"
     user: root
     volumes:
@@ -44,6 +57,9 @@ services:
 
   ollama:
     image: ollama/ollama:0.30.7
+    # On by default (see the header): the local runtime is the local-first default, and the
+    # profile exists so an operator can *opt out* of it, never so they must opt in (#962).
+    profiles: [local-ai]
     restart: unless-stopped
     # Wait for the chown one-shot so the volume the core later writes to is owned by uid 10001
     # (#392). This is ordering only — nothing here races the core's write, which is lazy: it

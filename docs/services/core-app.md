@@ -527,12 +527,13 @@ own `POST /platform/v1/llm/chat` was **removed in `core-app` 0.2.0** — it dupl
 
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) and trained `context_length` (#618) from `/api/show` — opt-in (one call per model), so the Models page can badge them and show a context-window chip while the chat picker stays light. `context_length` is `null` when the runtime doesn't report it — never a fake default. |
+| `GET /platform/v1/llm/models[?capabilities=true]` · `DELETE /platform/v1/llm/models?name=…` | **The list never fails**: `200` with `[]` when the local runtime is absent or unreachable (#962) — which state applies is `GET /llm/local-runtime`'s job, not an envelope here. `DELETE` answers **409** with no local runtime and **502** when one is unreachable. List / remove local models (the `loaded` flag marks in-memory ones). `?capabilities=true` additionally fills each model's reported `capabilities` (e.g. `tools`, `vision`) and trained `context_length` (#618) from `/api/show` — opt-in (one call per model), so the Models page can badge them and show a context-window chip while the chat picker stays light. `context_length` is `null` when the runtime doesn't report it — never a fake default. |
 | `GET /platform/v1/llm/models/details?model=…` | Read-only facts about a model: `{quantization, parameter_size, context_length, family, capabilities}` (any field `null`/empty when not reported — never a fake default). Local models read the runtime's `/api/show`; **hosted** models (#633/#618) read LiteLLM's own model-cost/context map instead (no provider call) — `quantization`/`parameter_size`/`family` stay `null` there (Ollama-only concepts), `capabilities` is what the resolution actually decided — `tools` only when the model is resolved tool-capable (no longer hard-coded), `vision` when the map or an override says so, `embedding` for an embedding model. Three resolved fields ride beside it (ADR-0140): `role` (`chat`|`embedding`|`unknown`), `supports_tools` (`true`/`false`, `null` when the local runtime could not be asked at all) and `in_catalogue` (`false` for a hosted id LiteLLM's map has never heard of — `null` for a local model). They exist because `capabilities` cannot express *unknown*: an empty list means both "nothing to badge" and "no idea", and a shell guessing between them shows the wrong hint. Backs the model-settings sheet, the Models page's context-window chip and **unlisted** badge, and the chat "can't use tools" / "can't see images" hints. `model` is a query param (names carry `:`/`/`). |
 | `GET /platform/v1/llm/catalog` | The browsable model catalog the core parses from upstream on a schedule (#269). Returns `{entries[], source, updated_at, stale}`; each entry's `size_gb` is the **real on-disk size** backfilled from its family's tags page (#571; `null` until the size fill or a variant lookup reaches the family, and always `null` for `cloud` rows). `stale` flags a seed / last-good list served after a failed or skipped refresh. See **Model catalog** below. |
 | `GET /platform/v1/llm/catalog/variants?model=…` | The quant variants available for a model (#330), looked up on demand from the model's public library **tags page** (the catalog index lists *sizes*, not quants). Returns `{model, variants:[{tag, quant, size_gb}]}` — `size_gb` is the tag row's real on-disk size (#571; `null` when upstream shows none, e.g. a cloud alias). Best-effort — an empty list (offline, or a model not in the public library) makes the UI fall back to a manual tag box. A successful lookup also piggybacks its sizes onto the catalog snapshot. `model` is a query param. See **Model catalog** below. |
-| `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). |
-| `POST /platform/v1/llm/unload` | Drop model(s) from memory now (`keep_alive=0`) **without** changing power state (#331). Body `{model: str\|null}` — `null`/omitted unloads every loaded model, a name unloads just that one. Returns `{status, model}` (`"all"` when none given). The standalone unload the Models page calls; the `loaded` flag refreshes on the next poll. |
+| `GET /platform/v1/llm/local-runtime` | Whether this deployment has a local LLM runtime, and whether it answers (#962, ADR-0144): `{state: "absent"|"unreachable"|"ok", url_configured: bool}`. `absent` means `OLLAMA_URL` is blank — a deliberate hosted-only deployment, where a surface should *collapse* its local half rather than draw it broken; `unreachable` is an error and should still look like one. A separate endpoint on purpose: `GET /llm/models` stays a bare array (twelve consumers read it) and now answers `200` with `[]` in both non-serving states instead of the 500 the Models page collected every ten seconds. |
+| `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` | Pull a model (blocking / SSE progress). **409** when this deployment runs no local runtime, **502** when one is configured and unreachable (#962) — never a bare 500. The SSE form refuses *before* the response starts, so the caller gets a real status rather than a 200 whose only event is an error. |
+| `POST /platform/v1/llm/unload` | Drop model(s) from memory now (`keep_alive=0`) **without** changing power state (#331). Body `{model: str\|null}` — `null`/omitted unloads every loaded model, a name unloads just that one. Returns `{status, model}` (`"all"` when none given). The standalone unload the Models page calls; the `loaded` flag refreshes on the next poll. **409** with no local runtime (#962): the gateway's own `unload` stays silent there because it is also on the power-pause path, which must keep working on a hosted-only box, so the refusal is made at the route — where the caller is an operator who clicked Unload and deserves to know why nothing happened. |
 | `GET /platform/v1/llm/providers` | Providers and what the secret store knows about each one's key. Each row is `{alias, local, configured, needs_base_url, key_state, key_error}`. `key_state` is `not_required` (the local runtime holds no key) / `present` / `missing` (OpenBao answered and has nothing there) / `unavailable` (OpenBao could not be asked — an expired app token, the service down), with `key_error` naming the reason for the last one. `configured` is unchanged (`true` for `not_required` and `present`) — it was one bit over three facts, and collapsing "we could not ask" into "there is no key" is how #728's expired token read as a fleet of unconfigured providers, sending the operator to re-enter keys that were already set. The core reports the distinction; rendering it is the shell's job (ADR-0018) — the Models page's "Add a hosted model" row (#922) is the first place that reads `key_state`, hinting inline when it is `missing`/`unavailable`. |
 | `PUT` · `DELETE /platform/v1/llm/providers/{alias}/key` | Store / clear a hosted provider's key (core → OpenBao; never logged or returned). |
 | `GET /platform/v1/llm/prefs` | Stored preferences: `global_default` (chat), `global_embed_default` (embedding), `global_context_window` (num_ctx), `kv_cache_type` (Ollama KV-cache), `global_agent_max_steps` (agent loop bound), `hidden` (model list). |
@@ -572,6 +573,41 @@ with `partition`, never `split("/")` — in the core (`resolve` / `is_hosted`) a
 (`isHostedModelId`). LiteLLM's static cost map carries many `openrouter/…` **chat** ids and no
 OpenRouter *embedding* ids, so `/models/details` and a saved model's `context_length` come back
 `null` for an OpenRouter embedding id. That is honest, not a bug — never a fake default.
+
+#### No local runtime (#962, ADR-0144)
+
+`OLLAMA_URL` blank means **this deployment has no local runtime**, deliberately — hosted chat
+and hosted embeddings, nothing local. It is a third state, and the point of naming it is that
+the gateway used to have only two: *absent*, *unreachable* and *misconfigured* were all "the
+call failed", so each call site guessed. Some caught and degraded (`show`, `unload`), some
+propagated to a 500 (`models`, `pull`, `delete`), and one polled for three minutes.
+
+`CoreAppSettings.local_runtime_enabled` (`bool(ollama_url.strip())`) is the fact; everything
+else reads it:
+
+| | with no local runtime |
+| --- | --- |
+| `LlmGateway.models()` | `[]`, no HTTP call — and `[]` rather than a raise when a *configured* runtime is unreachable, which is what stops `GET /llm/models` 500ing every ten seconds on the Models page |
+| `LlmGateway.local_runtime_state()` | `absent` \| `unreachable` \| `ok`, behind `GET /platform/v1/llm/local-runtime` |
+| `pull` / `pull_stream` / `delete_model` | raise `LocalRuntimeUnavailableError(state="absent")` → **409**; an unreachable runtime → **502** |
+| `unload` | returns quietly (it is on the power-pause path, which must keep working); the **route** answers 409 |
+| `_ensure_can_serve` | refuses a **local** model id with `ModelCapabilityError` → **400** and the hint *"No local runtime is configured — choose a hosted model."* — asked **before** the pause rule, because "resume to run inference" is an instruction an operator with no runtime cannot follow |
+| the chat fallback chain | skips local candidates (`_is_available`), so a hosted primary never falls back into a runtime that is not there |
+| `model_readiness` | `ModelWarmth(model, warm=None, runtime="absent")` → the readiness component reads `<model> · n/a` and **ready**, instead of "warming" forever |
+| `ModelBootstrap` | one log line and return — no 180s poll |
+| `OllamaRuntime.apply_kv_cache_type` | the existing "unavailable" result (`applied=False, staged=False`); nothing is written and neither arm of the container seam (ADR-0134) is asked to find a workload |
+
+The refusal for a local model id is the same `ModelCapabilityError` shape the role gate uses
+(ADR-0140) rather than a new one: an operator asking a model that cannot serve is one
+situation, and the reason it cannot serve — wrong role, or no runtime to run it — belongs in
+the message, not in a second error type for every surface to learn. This is also what closes
+the *quiet* failure: `show()` returns empty details when the runtime cannot be asked, the role
+reads `unknown`, and `unknown` is waved through by design — so without the absence check a
+local model would sail past the gate and die at the provider with a connection error.
+
+The deployment surfaces that select the mode are documented per runtime:
+[Compose](../infrastructure/index.md#hosted-only-no-local-llm-runtime) ·
+[Kubernetes](../infrastructure/kubernetes.md#hosted-only-no-local-llm-runtime).
 
 #### Embeddings — local and hosted (#865)
 
@@ -749,9 +785,15 @@ Behaviour is otherwise bounded and defensive, in keeping with what startup may c
   background while the rest of the core serves.
 - **Retries with exponential backoff** per model (the pull resumes partial downloads), then
   gives up with a warning naming the Models page as the manual fallback.
-- **Hosted ids are skipped** (`claude/…` cannot be pulled into the local runtime), and an
-  unreachable runtime (a hosted-only deployment running no Ollama) costs one warning after a
-  bounded wait, never a crash loop.
+- **Hosted ids are skipped** (`claude/…` cannot be pulled into the local runtime), and a
+  runtime that is configured but still down costs one warning after a bounded wait (180s of
+  polling), never a crash loop.
+- **A deployment with no local runtime at all returns immediately** — one log line, no poll
+  (#962, ADR-0144). Until then this paragraph claimed the bounded wait covered "a hosted-only
+  deployment running no Ollama", and it did in the sense that nothing crashed: every process
+  start simply spent three minutes asking an address that was never going to answer. Absence
+  is now a fact the core *knows* (`OLLAMA_URL` is blank) rather than one it infers from three
+  minutes of failures.
 
 `LLM_BOOTSTRAP_MODELS` tunes it: `auto` (default) seeds an empty runtime with the effective
 defaults, then no-ops forever after; blank disables the bootstrap (air-gapped builds — and
@@ -1170,7 +1212,7 @@ that previously had no bound at all.
 
 | Method · Path | Purpose |
 | --- | --- |
-| `GET /platform/v1/readiness?model=…` | A warming snapshot — `{ready, power, components[]}` — folding the power state, module health (compose health), and whether the turn's model is warm (hosted models are always ready). Best-effort: a slow/failing component reports not-yet-ready rather than erroring. The chat stream emits the **same** snapshot as leading `readiness` events so the UI shows a progress bar before the first token. |
+| `GET /platform/v1/readiness?model=…` | A warming snapshot — `{ready, power, components[]}` — folding the power state, module health (compose health), and whether the turn's model is warm. Three ways to be ready without warming up, and the `model` component's `detail` says which: `· hosted` (a provider needs no warm-up), `· n/a` (**this deployment has no local runtime**, #962 — it used to report `warming` forever, on every turn, for the life of the deployment) and `· warm`. None of them holds `ready` down. Best-effort: a slow/failing component reports not-yet-ready rather than erroring. The chat stream emits the **same** snapshot as leading `readiness` events so the UI shows a progress bar before the first token. |
 
 ### Module registry (ADR-0004/0007)
 
@@ -1883,7 +1925,7 @@ decision that already landed. Payload shapes and dedup keys are in the
 
 | Env var | Default | Meaning |
 | --- | --- | --- |
-| `OLLAMA_URL` | `http://ollama:11434` | Local LLM runtime. |
+| `OLLAMA_URL` | `http://ollama:11434` | Local LLM runtime. **Blank means there is none** (#962, ADR-0144) — a deliberate hosted-only deployment; see [no local runtime](#no-local-runtime-962-adr-0144). |
 | `LLM_DEFAULT_MODEL` | `llama3.2` | Model when a request names none. |
 | `LLM_FALLBACKS` | — | Comma-separated fallback chain (e.g. `claude/claude-3-5-sonnet-latest`). |
 | `LLM_KEEP_ALIVE` | `5m` | How long Ollama keeps a model loaded (ADR-0005). |

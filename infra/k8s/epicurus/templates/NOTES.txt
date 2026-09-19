@@ -60,8 +60,15 @@ Images: tag {{ default .Chart.AppVersion .Values.image.tag }} from {{ .Values.im
 
    Ollama starts with an EMPTY model store — models are never baked into the
    image. The core pulls the default chat and embedding models in the background
-   on first boot (LLM_BOOTSTRAP_MODELS={{ .Values.core.llm.bootstrapModels }}); on CPU that
+   on first boot (LLM_BOOTSTRAP_MODELS={{ include "epicurus.bootstrapModels" $ }}); on CPU that
    takes a while and chat 404s until it finishes.
+{{- else if not (include "epicurus.localRuntimeEnabled" $) }}
+
+   This release runs NO LOCAL LLM RUNTIME (#962): chat and embeddings both go to
+   hosted providers. Add each provider's API key on the Models page before the
+   first turn — nothing local will answer. The local half of that page is shown
+   collapsed rather than broken, and every local-runtime action (pull, delete,
+   unload, the KV-cache setting) refuses with 409 instead of hanging.
 {{- end }}
 
 {{- if and (not .Values.minio.enabled) (not .Values.minio.external.url) (and .Values.modules.storage .Values.modules.storage.enabled) }}

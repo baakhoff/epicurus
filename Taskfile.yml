@@ -62,9 +62,14 @@ tasks:
       - uv run python scripts/migrate.py check {{.CLI_ARGS}}
 
   up:
-    desc: Start the full stack (data plane + enabled modules; Docker control is on by default through docker-proxy-core, observability is opt-in — see `obs-up` / `docker-socket-up`)
+    desc: Start the full stack (data plane + enabled modules + the local AI runtime; Docker control is on by default through docker-proxy-core, observability is opt-in — see `obs-up` / `docker-socket-up` / `hosted-only-up`)
     cmds:
-      - docker compose up -d
+      - docker compose --profile local-ai up -d
+
+  hosted-only-up:
+    desc: 'Start the stack with NO local LLM runtime (#962) — no Ollama container, and OLLAMA_URL blank so the core says so instead of probing a host that is not there. Set LLM_DEFAULT_MODEL + MEMORY_EMBED_MODEL to hosted ids first, or chat and embedding both fail at call time'
+    cmds:
+      - OLLAMA_URL= docker compose up -d
 
   down:
     desc: Stop the full stack (append `-- -v` to also drop volumes)
@@ -74,7 +79,7 @@ tasks:
   obs-up:
     desc: Start the stack with the opt-in observability profile (Grafana/Prometheus/Loki/Tempo)
     cmds:
-      - docker compose --profile observability up -d
+      - docker compose --profile local-ai --profile observability up -d
 
   obs-down:
     desc: Stop the stack including the observability profile (append `-- -v` to drop volumes)
@@ -84,7 +89,7 @@ tasks:
   docker-socket-up:
     desc: 'Start the stack with core-app on the RAW Docker socket instead of the default docker-proxy-core (#622, #708) — root-equivalent, no allowlist in front of it; requires DOCKER_GID (see services/core-app/compose.docker-socket.yaml)'
     cmds:
-      - docker compose -f compose.yaml -f services/core-app/compose.docker-socket.yaml up -d
+      - docker compose --profile local-ai -f compose.yaml -f services/core-app/compose.docker-socket.yaml up -d
 
   docker-socket-down:
     desc: Stop the stack including the Docker-socket override (append `-- -v` to drop volumes)
@@ -94,7 +99,7 @@ tasks:
   external-mounts-up:
     desc: 'Start the stack with operator-declared external file mounts (#731) — additional Files roots bound from the host; requires EXTERNAL_MOUNT_*_HOST_PATH + FILES_EXTERNAL_MOUNTS (see services/core-app/compose.external-mounts.yaml)'
     cmds:
-      - docker compose -f compose.yaml -f services/core-app/compose.external-mounts.yaml up -d
+      - docker compose --profile local-ai -f compose.yaml -f services/core-app/compose.external-mounts.yaml up -d
 
   external-mounts-down:
     desc: Stop the stack including the external-mounts override (append `-- -v` to drop volumes)

@@ -74,7 +74,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 
 | Field | Env var | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `ollama_url` | `OLLAMA_URL` | `str` | `http://localhost:11434` | Local LLM runtime (the stack reaches it at `http://ollama:11434`). |
+| `ollama_url` | `OLLAMA_URL` | `str` | `http://localhost:11434` | Local LLM runtime (the stack reaches it at `http://ollama:11434`). **Blank means this deployment has no local runtime at all** (#962, ADR-0144) — a deliberate hosted-only install, not a misconfiguration; whitespace counts as blank. The derived `local_runtime_enabled` is what every call site asks. With no runtime: `GET /llm/models` answers 200 and `[]`, `GET /llm/local-runtime` reports `absent`, pull / delete / unload / the KV-cache setting answer **409**, a local model id is refused with a capability error before any provider call, readiness reports the model `n/a`, and the first-boot bootstrap returns at once. See [Hosted-only deployments](../infrastructure/index.md#hosted-only-no-local-llm-runtime). |
 | `ollama_runtime_env_path` | `OLLAMA_RUNTIME_ENV_PATH` | `str` | `/etc/epicurus/ollama.env` | Where the core writes Ollama's start-up env file (KV-cache type) for it to source on restart (#307). A shared volume; override only if you remap the mount. |
 | `ollama_service_name` | `OLLAMA_SERVICE_NAME` | `str` | `ollama` | Compose service the core restarts to apply a KV-cache change (#307). |
 | `llm_default_model` | `LLM_DEFAULT_MODEL` | `str` | `llama3.2` | Model used when a request names none. |

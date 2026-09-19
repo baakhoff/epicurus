@@ -346,6 +346,51 @@ tenant-scoped (both mirror a public registry).
 
 ---
 
+## `GET /platform/v1/llm/local-runtime`
+
+Whether this deployment has a **local** LLM runtime, and whether it is answering (#962,
+ADR-0144). Shell-facing; no body, no query params.
+
+**Response**
+
+```json
+{ "state": "absent", "url_configured": false }
+```
+
+| `state` | meaning | what a surface should do |
+| --- | --- | --- |
+| `absent` | `OLLAMA_URL` is blank — a deliberate hosted-only deployment | collapse the local half: no pull card, no catalog, no KV-cache or context-window card, no `Local (Ollama)` group in a model picker |
+| `unreachable` | a runtime **is** configured and did not answer | show today's warning — this state *is* an error and should look like one |
+| `ok` | it answered | the full local UI |
+
+`url_configured` is the *why* behind the state, and is `false` exactly when `state` is
+`absent`.
+
+Three facts that used to be one, which is why this endpoint exists rather than an envelope
+around the model list. `GET /platform/v1/llm/models` stays a bare `list[ModelInfo]` (twelve
+consumers read that array) and **never 500s again**: it answers `200` with `[]` when the
+runtime is absent *and* when it is unreachable. Everything that genuinely needs a runtime
+answers **409** when it is absent, with a `detail` naming the mode, and **502** when it is
+configured but unreachable — never a bare 500:
+
+- `POST /platform/v1/llm/pull` · `POST /platform/v1/llm/pull/stream` (refused **before** the
+  stream starts, so the caller sees a real status rather than a 200 whose only event is an
+  error) · `DELETE /platform/v1/llm/models` · `POST /platform/v1/llm/unload`;
+- `PUT /platform/v1/llm/prefs/kv-cache-type` — **409 when absent only**. This path never talks
+  to Ollama (it writes the start-up env file and asks the container runtime to bounce the
+  workload), so "unreachable" is not something it can observe, and setting the value while the
+  server is down is legitimate: `applied`/`staged` already report how far it got (#709).
+
+Inference itself is refused one layer earlier: a **local** model id on a runtime-less
+deployment raises the same `ModelCapabilityError` shape as every other capability refusal
+(ADR-0140) → **400** with `{"error": "wrong_model_role", …}` and the hint *"No local runtime is
+configured — choose a hosted model."* A hosted model — chat **or** embedding — is untouched, so
+memory recall and module indexing keep working with `gpt/text-embedding-3-small` and friends.
+`GET /platform/v1/readiness` reports the model component as `<model> · n/a` and **ready**, not
+"warming" forever.
+
+---
+
 ## `GET /platform/v1/agent/instructions` · `PUT /platform/v1/agent/instructions`
 
 The agent's editable **base system prompt** (#497, ADR-0083) — injected as the **first** message

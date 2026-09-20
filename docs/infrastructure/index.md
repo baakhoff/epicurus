@@ -241,6 +241,52 @@ hit `PermissionError` and the choice would save but never apply (#392). `ollama-
 only**: the core's write is lazy — it happens when the operator changes the KV-cache type, long
 after boot — so there is no startup race regardless.
 
+### Hosted-only: no local LLM runtime
+
+A deployment can run **no local runtime at all** — hosted chat and hosted embeddings, nothing
+local (#962, ADR-0144). It is an **opt-out overlay**,
+[`infra/ollama/compose.hosted-only.yaml`](../../infra/ollama/compose.hosted-only.yaml), the same
+idiom as the Docker-socket and external-mount opt-ins:
+
+```bash
+task hosted-only-up
+# == docker compose -f compose.yaml -f infra/ollama/compose.hosted-only.yaml up -d
+```
+
+The overlay does **both** halves, because either alone is wrong: it removes `ollama` and
+`ollama-init` from the stack (which `core-app`'s `required: false` dependency on `ollama` is what
+makes survivable), *and* it blanks `OLLAMA_URL`, which is how the core is told the absence is
+deliberate. Remove only the container and the core is left probing a host that is gone — that is
+the `unreachable` state, not `absent`.
+
+**Nothing about the default install changes.** `docker compose up -d` from a fresh clone, with no
+`.env` and no flags, still starts the local runtime exactly as before — which is why this is an
+overlay and not a compose profile on the `ollama` services. A profile is opt-in by construction,
+so it would have taken the runtime out of every fresh clone while the shipped `llama3.2` /
+`nomic-embed-text` defaults still pointed at it, which is the half-working stack the Kubernetes
+chart now refuses to render.
+
+Set both model defaults to hosted ids in `.env` as well — a bare name routes to the local
+runtime, so leaving them is that same half-working stack:
+
+```dotenv
+LLM_DEFAULT_MODEL=claude/claude-sonnet-4-6
+MEMORY_EMBED_MODEL=gpt/text-embedding-3-small
+```
+
+Add each provider's API key on the **Models** page before the first turn. With no local runtime
+the core refuses every local-only action with a reason — `409` from pull, delete, unload and the
+KV-cache setting — `GET /platform/v1/llm/models` answers `200` with an empty list rather than
+500ing, `GET /platform/v1/llm/local-runtime` reports `absent`, and chat readiness reports the
+model as `n/a` instead of "warming" forever. A local model id asked to answer is refused with a
+sentence naming the fix, before any provider call. The Kubernetes equivalent is
+[`ollama.enabled: false` with a blank `ollama.external.url`](kubernetes.md#hosted-only-no-local-llm-runtime).
+
+On the deploy box, `EPICURUS_HOSTED_ONLY=1` makes `infra/cd/reconcile.sh` apply the same overlay;
+unset (the default) it keeps the local runtime, so a box that never asked for a hosted-only stack
+cannot lose Ollama to a reconcile. To go back, drop the overlay (`task up`): the `ollama-models`
+volume is untouched by any of this, so the models are still there.
+
 ## Log retention
 
 Every service in every compose fragment sets a bounded `json-file` logging driver

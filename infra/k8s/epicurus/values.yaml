@@ -129,6 +129,14 @@ core:
       # Use a ServiceAccount you manage instead of the chart's.
       serviceAccountName: ""
   # LLM gateway (#114). Blank = the code default; every knob is env-only.
+  #
+  # On a **hosted-only** release — `ollama.enabled: false` with a blank
+  # `ollama.external.url` (#962, ADR-0144) — `defaultModel` and `memoryEmbedModel` must both
+  # name a *hosted* model, `<provider>/<model>`: e.g. `claude/claude-sonnet-4-6` and
+  # `gpt/text-embedding-3-small`. A bare name routes to the local runtime, so leaving the
+  # defaults below in place there gives a stack where chat works through the hosted provider
+  # and every embedding (memory recall, each module's index) fails at call time. The chart
+  # refuses to render that, and the failure names the fix.
   llm:
     defaultModel: llama3.2
     keepAlive: 5m
@@ -139,7 +147,9 @@ core:
     topP: ""
     numCtx: ""
     # auto = pull the effective chat + embedding defaults on first boot;
-    # "" = never pull; "a,b" = pull exactly these.
+    # "" = never pull; "a,b" = pull exactly these. On a hosted-only release `auto` becomes
+    # blank on its own — there is nothing to pull into — while an explicit list is left as
+    # the operator wrote it.
     bootstrapModels: auto
   memoryEmbedModel: nomic-embed-text
   oauth:
@@ -485,6 +495,16 @@ minio:
 
 # The local LLM runtime. A StatefulSet (component `ollama`) so the
 # container-runtime seam can rollout-restart it by that label (#891).
+#
+# Three deployments, not two (#962, ADR-0144):
+#   enabled: true                            — the chart runs Ollama (the default);
+#   enabled: false + external.url: http://…  — an Ollama you run elsewhere;
+#   enabled: false + external.url: ""        — **no local runtime at all**: hosted chat and
+#                                              hosted embeddings only. `OLLAMA_URL` renders
+#                                              empty, the core refuses every local-runtime
+#                                              action with a reason instead of hanging, and
+#                                              `core.llm.defaultModel` / `core.memoryEmbedModel`
+#                                              must name hosted models (the chart checks).
 ollama:
   enabled: true
   image:
@@ -515,6 +535,8 @@ ollama:
     resourceName: nvidia.com/gpu
     runtimeClassName: ""
   external:
+    # An Ollama you run elsewhere, when `enabled` is false. **Blank is meaningful**: it says
+    # this deployment has no local runtime at all, rather than being a missing setting (#962).
     url: ""
   nodeSelector: {}
   tolerations: []

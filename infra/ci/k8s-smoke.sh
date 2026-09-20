@@ -252,11 +252,23 @@ smoke_assert
 # this job already runs ~10 of its 20 minutes with 11 uncached builds inside. A changed
 # `core.extraEnv` value forces the same thing the tag would — a real pod-template change,
 # so core-app genuinely rolls — for the cost of one API call.
-log "Upgrading the release in place (helm upgrade over a running install)"
+#
+# The upgrade also carries the **hosted-only** switch (#962, ADR-0144): `ollama.external.url`
+# goes blank and both model defaults become hosted ids, which is exactly what an operator
+# with no local runtime installs. Folded into this step rather than given a second boot
+# because a second boot would not fit the 20-minute budget — and because it makes the
+# upgrade a *real* config change instead of a timestamp, which is a better upgrade test
+# than the one it replaces. Everything asserted before this point ran with a runtime
+# configured (the KV-cache restart through the seam needs the workload to exist); what is
+# asserted after it is the mode where there is none.
+log "Upgrading the release in place, into the hosted-only mode (no local runtime)"
 helm upgrade "$RELEASE" "$CHART" \
   --namespace "$NS" \
   --values "$VALUES" \
   --set "image.tag=$IMAGE_TAG" \
+  --set "ollama.external.url=" \
+  --set "core.llm.defaultModel=claude/claude-sonnet-4-6" \
+  --set "core.memoryEmbedModel=gpt/text-embedding-3-small" \
   --set-string "core.extraEnv.EPICURUS_SMOKE_UPGRADE=$(date -u +%s)" \
   --wait --timeout 8m
 kc rollout status deployment/core-app --timeout=300s >/dev/null
@@ -277,6 +289,36 @@ prov="$(http "http://core-app:8080/platform/v1/llm/providers" || true)"
 printf '%s' "$prov" | grep -oE '"alias":"claude"[^}]*' | grep -q '"configured":true' \
   || die "the provider key did not survive a helm upgrade (vault re-initialised, or a new app token?)"
 ok "state survived the upgrade: every module still registered, the stored secret still readable"
+
+# ── a deployment with no local runtime at all (#962, ADR-0144) ────────────────
+# The mode the chart refused to render until now, and the one the core used to 500 in.
+# `infra/ci/ollama-stub.yaml` is still applied above — it is what gives the seam's restart
+# arm a real StatefulSet to patch (#919) — but the core no longer has a URL for it, which
+# is precisely the deployment being asserted here.
+log "Asserting the hosted-only mode (OLLAMA_URL is blank)"
+
+lr="$(http "http://core-app:8080/platform/v1/llm/local-runtime" || true)"
+printf '%s' "$lr" | grep -q '"state":"absent"' \
+  || die "the core does not report an absent local runtime on a hosted-only release: $lr"
+printf '%s' "$lr" | grep -q '"url_configured":false' \
+  || die "the core reports a configured URL on a hosted-only release: $lr"
+ok "GET /platform/v1/llm/local-runtime reports absent"
+
+# The regression this issue exists for: the Models page polls this every 10 seconds, and
+# it used to answer 500 every time. `-f` fails the curl on any non-2xx, so a 500 dies here.
+models="$(http -f "http://core-app:8080/platform/v1/llm/models")" \
+  || die "GET /platform/v1/llm/models did not return 2xx with no local runtime (#962)"
+[ "$(printf '%s' "$models" | tr -d ' \n')" = "[]" ] \
+  || die "the local model list is not empty with no local runtime: $models"
+ok "GET /platform/v1/llm/models is 200 and empty, not a 500 every ten seconds"
+
+# And the local-only actions refuse with a reason rather than a bare 500. 409, because
+# nothing is broken — the request is meaningless on this deployment.
+pull_code="$(http -o /dev/null -w '%{http_code}' -X POST \
+  "http://core-app:8080/platform/v1/llm/pull" \
+  -H 'Content-Type: application/json' -d '{"model":"llama3.2"}' || true)"
+[ "$pull_code" = "409" ] || die "a pull with no local runtime answered $pull_code (expected 409)"
+ok "POST /platform/v1/llm/pull refuses with 409"
 
 # ── the Kubernetes arm of the container-runtime seam (#891, ADR-0134) ──────────
 # Everything above is true of any deployment. This is the part that was mock-only

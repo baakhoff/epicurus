@@ -158,6 +158,42 @@ jobs:
       - name: Validate the assembled compose stack (observability profile)
         run: docker compose -f compose.yaml --profile observability config -q
 
+      # The documented install — `git clone` && `docker compose up -d`, no `.env`, no flags
+      # (README.md, docs/user/installation.md) — must keep starting the local AI runtime.
+      # #962 made "no local runtime" a supported mode, and the first cut expressed it as a
+      # compose profile on `ollama`: profiles are opt-in, so that silently removed Ollama
+      # from every fresh clone while the shipped `llama3.2` / `nomic-embed-text` defaults
+      # still pointed at it. This step is the guard against that being reintroduced.
+      - name: Validate the assembled compose stack (default install starts the local runtime)
+        run: |
+          rendered="$(docker compose -f compose.yaml config)"
+          for svc in ollama ollama-init; do
+            if ! printf '%s' "$rendered" | grep -qE "^  ${svc}:"; then
+              echo "the default stack no longer starts '${svc}' — see #962"; exit 1
+            fi
+          done
+          if ! printf '%s' "$rendered" | grep -q 'OLLAMA_URL: http://ollama:11434'; then
+            echo "the default stack does not point the core at the local runtime"; exit 1
+          fi
+          echo "the documented install still brings up the local AI runtime"
+
+      # And the opt-out overlay (#962, ADR-0144): no Ollama, blank OLLAMA_URL. The assertion
+      # is not just that it parses — it is that core-app's dependency on the now-absent
+      # ollama service is `required: false`, which is what lets the whole `up` succeed on a
+      # service that is missing on purpose.
+      - name: Validate the assembled compose stack (hosted-only overlay — no local runtime)
+        run: |
+          set -- -f compose.yaml -f infra/ollama/compose.hosted-only.yaml
+          docker compose "$@" config -q
+          rendered="$(docker compose "$@" config)"
+          if ! printf '%s' "$rendered" | grep -q 'OLLAMA_URL: ""'; then
+            echo "the overlay did not blank OLLAMA_URL"; exit 1
+          fi
+          if printf '%s' "$rendered" | grep -qE '^  ollama:'; then
+            echo "the overlay did not remove the ollama service"; exit 1
+          fi
+          echo "the hosted-only overlay resolves with no local runtime"
+
   # The Helm chart gets the same treatment the compose stack does: rendered, then
   # checked. `helm lint` catches template errors, `helm template` proves the branches
   # render at all, and `kubeconform -strict` validates the result against the real
@@ -233,6 +269,41 @@ jobs:
             --set qdrant.enabled=false,qdrant.external.url=http://qdrant.example.com:6333 \
             --set searxng.enabled=false,searxng.external.url=http://searx.example.com:8080 \
             | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" -
+
+      # No local LLM runtime at all (#962, ADR-0144) — the third Ollama state, which the
+      # chart refused to render until now. Hosted model ids are mandatory here, so this
+      # renders the escape hatch the guard's message names.
+      - name: Render and validate — hosted-only (no local runtime)
+        run: |
+          rendered="$(helm template epicurus "$CHART" \
+            --set ollama.enabled=false \
+            --set core.llm.defaultModel=claude/claude-sonnet-4-6 \
+            --set core.memoryEmbedModel=gpt/text-embedding-3-small)"
+          printf '%s' "$rendered" | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" -
+          if ! printf '%s' "$rendered" | grep -A1 'name: OLLAMA_URL' | grep -q 'value: ""'; then
+            echo "OLLAMA_URL is not empty on a hosted-only release"; exit 1
+          fi
+          if ! printf '%s' "$rendered" | grep -A1 'name: LLM_BOOTSTRAP_MODELS' | grep -q 'value: ""'; then
+            echo "LLM_BOOTSTRAP_MODELS was not blanked on a hosted-only release"; exit 1
+          fi
+          if printf '%s' "$rendered" | grep -q 'app.kubernetes.io/component: ollama'; then
+            echo "an Ollama workload was rendered for a hosted-only release"; exit 1
+          fi
+          echo "hosted-only release renders with no local runtime"
+
+      # And the guard that makes the mode safe: a hosted-only release whose models are
+      # still bare local names must FAIL to render, naming the fix. A guard nothing proves
+      # is a guard that quietly stops guarding.
+      - name: Render — hosted-only with a local model name must be refused
+        run: |
+          if helm template epicurus "$CHART" --set ollama.enabled=false >/dev/null 2>err.txt; then
+            echo "the chart rendered a hosted-only release with local model defaults"; exit 1
+          fi
+          grep -q 'no local LLM runtime' err.txt \
+            || { echo "the refusal did not name the mode:"; cat err.txt; exit 1; }
+          grep -q 'core.memoryEmbedModel' err.txt \
+            || { echo "the refusal did not name the fix:"; cat err.txt; exit 1; }
+          echo "the guard refuses a half-working hosted-only release"
 
   # Validates Prometheus and Alertmanager configs without booting the
   # observability stack. The runtime-smoke gate skips that stack, so a bad rule

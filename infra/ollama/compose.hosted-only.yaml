@@ -1,0 +1,60 @@
+# Opt-out overlay: run the stack with NO local LLM runtime (#962, ADR-0144).
+#
+# Hosted chat and hosted embeddings, no Ollama container at all. Layered *over* the assembled
+# stack, never included by it:
+#
+#   docker compose -f compose.yaml -f infra/ollama/compose.hosted-only.yaml up -d
+#   # or simply:  task hosted-only-up
+#
+# Why an overlay and not a profile on the `ollama` services. A compose profile is opt-in by
+# construction: the moment those services carry one, they stop starting unless something
+# selects it — and the repo's documented install is `git clone` → `cd epicurus` →
+# `docker compose up -d` (README, docs/user/installation.md), which mentions no `.env` at all.
+# A profile would therefore have taken the local runtime out of every fresh clone while the
+# shipped defaults (`llama3.2`, `nomic-embed-text`) still pointed at it — precisely the
+# half-working stack the chart's render-time guard exists to refuse, delivered by default to
+# the person least able to diagnose it. This is the idiom the repo already uses for exactly
+# this shape (`services/core-app/compose.docker-socket.yaml`,
+# `services/core-app/compose.external-mounts.yaml`): the default path stays byte-identical and
+# the opt-out is a visible command. `tests/test_no_local_runtime.py` pins both halves.
+#
+# Two changes, and both are needed — the first alone leaves a core still looking for a runtime
+# that is no longer there, which is *unreachable*, not *absent*:
+#
+#   1. the `ollama` / `ollama-init` services are assigned a profile nothing ever enables, so
+#      they are excluded from the stack (`core-app`'s `depends_on` is `required: false`,
+#      which is what lets the rest of the stack come up without them);
+#   2. `OLLAMA_URL` is blanked, which is how the core is told there is no local runtime: it
+#      then reports `absent` at `GET /platform/v1/llm/local-runtime`, answers `200` + `[]`
+#      from the model list instead of 500ing, refuses pull / delete / unload / the KV-cache
+#      setting with `409` and a reason, and reports chat readiness as `n/a` rather than
+#      "warming" forever.
+#
+# **Set hosted model defaults too**, in `.env` — a bare name routes to the local runtime, so
+# leaving the shipped defaults in place gives you working chat and a failing embed on every
+# memory recall and module index:
+#
+#   LLM_DEFAULT_MODEL=claude/claude-sonnet-4-6
+#   MEMORY_EMBED_MODEL=gpt/text-embedding-3-small
+#
+# then add each provider's API key on the Models page before the first turn.
+#
+# Nothing here is destructive: the `ollama-models` volume is untouched, so dropping the
+# overlay and bringing the stack up normally restores the runtime with its models intact.
+
+services:
+  # `local-ai-disabled` is never enabled by anything in this repo — assigning it is how a
+  # compose overlay *removes* a service, since an override file can add to the model but
+  # cannot delete from it. Do not enable this profile; that is not a supported combination
+  # (you would get the container back while the core is still told it has no runtime).
+  ollama:
+    profiles: [local-ai-disabled]
+
+  ollama-init:
+    profiles: [local-ai-disabled]
+
+  core-app:
+    environment:
+      # Blank is a deliberate value, not an omission (see the header). It overrides the
+      # fragment's `${OLLAMA_URL-http://ollama:11434}`, so this works with no `.env` at all.
+      OLLAMA_URL: ""

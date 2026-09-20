@@ -7,6 +7,16 @@ never carry provider payloads, account ids or tokens.
 
 from __future__ import annotations
 
+from typing import Literal
+
+LocalRuntimeState = Literal["absent", "unreachable", "ok"]
+"""What the deployment's local LLM runtime is doing (#962, ADR-0144).
+
+``absent`` — none is configured (``OLLAMA_URL`` blank), deliberately. ``unreachable`` — one is
+configured and did not answer. ``ok`` — it answered. Every local-runtime surface branches on
+exactly these three; nothing anywhere may re-derive them from a caught exception.
+"""
+
 
 class ModelCapabilityError(RuntimeError):
     """The selected model cannot serve this request (#944, #947).
@@ -26,6 +36,34 @@ class ModelCapabilityError(RuntimeError):
         self.capability = capability
         self.message = message
         self.hint = hint
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class LocalRuntimeUnavailableError(RuntimeError):
+    """A local-runtime-only action was asked of a deployment that cannot serve it (#962).
+
+    Carries which of the two non-serving states applies, because they are different facts
+    with different answers, and collapsing them is what made every one of these paths a bare
+    500 (ADR-0144):
+
+    * ``absent`` — no local runtime is configured (``OLLAMA_URL`` is blank). A deliberate
+      hosted-only deployment. Nothing is wrong; the action simply does not exist here, so the
+      surface answers **409**.
+    * ``unreachable`` — a runtime *is* configured and did not answer. That is an error, and
+      the surface answers **502**.
+
+    Args:
+        state: ``"absent"`` or ``"unreachable"``.
+        message: Operator-readable explanation naming the mode. No payloads, no URLs with
+            credentials in them.
+    """
+
+    def __init__(self, *, state: LocalRuntimeState, message: str) -> None:
+        super().__init__(message)
+        self.state = state
+        self.message = message
 
     def __str__(self) -> str:
         return self.message

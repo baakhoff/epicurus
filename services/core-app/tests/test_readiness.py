@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from epicurus_core import ModuleManifest
-from epicurus_core_app.llm.models import PowerState
+from epicurus_core_app.llm.models import ModelWarmth, PowerState
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.modules import ModuleSnapshot, ModuleStatus
 from epicurus_core_app.readiness import Readiness, ReadinessComponent, ReadinessProbe
@@ -12,12 +12,12 @@ from epicurus_core_app.readiness import Readiness, ReadinessComponent, Readiness
 class _FakeGateway:
     """Replays a scripted ``model_readiness`` result (or raises)."""
 
-    def __init__(self, result: tuple[str, bool | None] | Exception) -> None:
+    def __init__(self, result: ModelWarmth | Exception) -> None:
         self._result = result
 
     async def model_readiness(
         self, model: str | None = None, *, tenant_id: str | None = None
-    ) -> tuple[str, bool | None]:
+    ) -> ModelWarmth:
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -64,7 +64,7 @@ def _component(readiness: Readiness, name: str) -> ReadinessComponent:
 
 async def test_all_warm_is_ready() -> None:
     probe = _probe(
-        gateway=_FakeGateway(("llama3.2", True)),
+        gateway=_FakeGateway(ModelWarmth("llama3.2", True)),
         registry=_FakeRegistry([_snap("calendar", True), _snap("notes", True)]),
     )
     readiness = await probe.check()
@@ -76,7 +76,7 @@ async def test_all_warm_is_ready() -> None:
 
 async def test_cold_local_model_blocks_ready() -> None:
     probe = _probe(
-        gateway=_FakeGateway(("llama3.2", False)),
+        gateway=_FakeGateway(ModelWarmth("llama3.2", False)),
         registry=_FakeRegistry([_snap("calendar", True)]),
     )
     readiness = await probe.check()
@@ -87,7 +87,7 @@ async def test_cold_local_model_blocks_ready() -> None:
 
 async def test_hosted_model_is_always_ready() -> None:
     probe = _probe(
-        gateway=_FakeGateway(("claude/claude-sonnet-4-6", None)),
+        gateway=_FakeGateway(ModelWarmth("claude/claude-sonnet-4-6", None, "hosted")),
         registry=_FakeRegistry([]),
     )
     readiness = await probe.check()
@@ -100,7 +100,7 @@ async def test_paused_is_never_ready() -> None:
     power = PowerController()
     power.pause()
     probe = _probe(
-        gateway=_FakeGateway(("llama3.2", False)),
+        gateway=_FakeGateway(ModelWarmth("llama3.2", False)),
         registry=_FakeRegistry([_snap("calendar", True)]),
         power=power,
     )
@@ -111,7 +111,7 @@ async def test_paused_is_never_ready() -> None:
 
 async def test_no_modules_reports_none_and_does_not_block() -> None:
     probe = _probe(
-        gateway=_FakeGateway(("llama3.2", True)),
+        gateway=_FakeGateway(ModelWarmth("llama3.2", True)),
         registry=_FakeRegistry([]),
     )
     readiness = await probe.check()
@@ -121,7 +121,7 @@ async def test_no_modules_reports_none_and_does_not_block() -> None:
 
 async def test_unhealthy_module_is_reported_not_ready() -> None:
     probe = _probe(
-        gateway=_FakeGateway(("llama3.2", True)),
+        gateway=_FakeGateway(ModelWarmth("llama3.2", True)),
         registry=_FakeRegistry([_snap("calendar", True), _snap("notes", False)]),
     )
     readiness = await probe.check()
@@ -132,7 +132,7 @@ async def test_unhealthy_module_is_reported_not_ready() -> None:
 
 async def test_registry_failure_degrades_without_blocking() -> None:
     probe = _probe(
-        gateway=_FakeGateway(("llama3.2", True)),
+        gateway=_FakeGateway(ModelWarmth("llama3.2", True)),
         registry=_FakeRegistry(RuntimeError("registry down")),
     )
     readiness = await probe.check()
@@ -153,7 +153,7 @@ async def test_gateway_failure_degrades_without_blocking() -> None:
 
 async def test_stream_yields_pending_then_resolved() -> None:
     probe = _probe(
-        gateway=_FakeGateway(("llama3.2", True)),
+        gateway=_FakeGateway(ModelWarmth("llama3.2", True)),
         registry=_FakeRegistry([_snap("calendar", True)]),
     )
     frames = [snap async for snap in probe.stream()]
@@ -164,3 +164,22 @@ async def test_stream_yields_pending_then_resolved() -> None:
     # The second is the resolved snapshot.
     assert frames[1].ready is True
     assert _component(frames[1], "modules").detail == "1/1 healthy"
+
+
+async def test_no_local_runtime_reports_n_a_and_never_blocks() -> None:
+    """A hosted-only deployment used to report the model "warming" on every turn, forever.
+
+    The probe asked a runtime that was not there, caught the failure, and read it as cold —
+    so the chat progress bar never completed once in the life of the deployment (#962). The
+    honest answer is that warm-up does not apply here, and it must not hold `ready` down.
+    """
+    probe = _probe(
+        gateway=_FakeGateway(ModelWarmth("llama3.2", None, "absent")),
+        registry=_FakeRegistry([_snap("calendar", True)]),
+    )
+    readiness = await probe.check()
+    model = _component(readiness, "model")
+    assert model.ready is True
+    assert model.detail == "llama3.2 · n/a"
+    assert "warming" not in model.detail
+    assert readiness.ready is True

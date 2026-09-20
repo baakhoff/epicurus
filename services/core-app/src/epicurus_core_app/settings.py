@@ -17,6 +17,9 @@ class CoreAppSettings(CoreSettings):
     """Adds the LLM-gateway configuration to the shared settings."""
 
     # Ollama, the local LLM runtime. On the internal Docker network: http://ollama:11434.
+    # **Blank means this deployment runs no local runtime at all** (#962, ADR-0144) — a
+    # deliberate hosted-only install, not a misconfiguration; see `local_runtime_enabled`.
+    # The default stays local-first: an operator opts *out* by blanking the value.
     ollama_url: str = "http://localhost:11434"
     # KV-cache apply (#307): the core writes Ollama's start-up env file here (a named volume
     # both containers share; the Ollama entrypoint sources it), then restarts this service so it
@@ -377,6 +380,19 @@ class CoreAppSettings(CoreSettings):
         if isinstance(value, str) and value.strip() == "":
             return cls.model_fields["llm_timeout"].default
         return value
+
+    @property
+    def local_runtime_enabled(self) -> bool:
+        """Whether this deployment has a local LLM runtime at all (#962, ADR-0144).
+
+        The three states a call site used to collapse into one are *absent* (no runtime is
+        configured — this property), *unreachable* (one is configured and does not answer) and
+        *ok*. A blank ``OLLAMA_URL`` is the operator saying "hosted only": every local-runtime
+        surface then refuses with a reason (409 / a capability refusal) instead of timing out,
+        500ing, or polling for three minutes. Whitespace is blank — ``OLLAMA_URL=" "`` from a
+        hand-edited env file means the same thing as empty.
+        """
+        return bool(self.ollama_url.strip())
 
     @property
     def fallback_models(self) -> list[str]:

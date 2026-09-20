@@ -12,6 +12,37 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A hosted-only deployment runs no local runtime** (#962) — running with hosted chat and
+  hosted embeddings and *no* Ollama was a documented capability that nothing actually supported.
+  The Helm chart refused to render it (`ollama.enabled: false` demanded an external URL), Compose
+  could not express it (an unconditional fragment and a hard `depends_on`), and an operator who
+  forced it with a placeholder URL met a core that collapsed three different facts into one:
+  **absent** (no runtime configured — a deliberate choice), **unreachable** (one is configured
+  and does not answer) and **ok**. `GET /platform/v1/llm/models` **500ed**, on a page that polls
+  it every ten seconds; pull and delete 500ed the same way; the chat warm-up indicator reported
+  the model "warming" forever, on every turn, for the life of the deployment; and startup spent
+  180 seconds polling an address that was never going to answer. Absence is now a first-class
+  mode, spelled `OLLAMA_URL=""`: the model list answers **200 and an empty array** in both
+  non-serving states, the new `GET /platform/v1/llm/local-runtime` says which one applies, the
+  local-only actions (pull, delete, unload, the KV-cache setting) refuse with **409** and a
+  sentence naming the mode — and pull and delete answer **502** when a configured runtime is
+  unreachable, never a bare 500 — readiness reports the model as **n/a** instead of warming,
+  and the bootstrap logs one line
+  and returns. A local model id asked to serve is refused before any provider call with the
+  capability error the rest of the gateway already speaks (ADR-0140), so a hosted embedding model
+  keeps working while a bare one fails with the fix in the message instead of a connection error.
+  On **Kubernetes** the chart renders an empty `OLLAMA_URL`, blanks `LLM_BOOTSTRAP_MODELS` on its
+  own, and gains the guard actually worth having — it refuses to render a runtime-less release
+  whose chat or embedding default is still a bare local name, naming the hosted alias to set. On
+  **Compose** it is an opt-out overlay — `task hosted-only-up` — which removes the Ollama
+  services *and* blanks `OLLAMA_URL` in one step, the same idiom as the Docker-socket and
+  external-mount opt-ins; the documented install (`git clone`, `docker compose up -d`, no
+  `.env`) is byte-identical and still starts the local runtime, which a compose profile on
+  those services would have quietly stopped doing. Three gates cover it: `compose-validate`
+  proves both the default stack and the overlay resolve, `chart-validate` renders the
+  hosted-only release *and* proves the guard refuses the half-working one, and `k8s-smoke`
+  upgrades a live release into the mode and asserts the core answers. `core-app`
+  0.128.0→0.129.0 (MINOR), chart 0.1.2→0.2.0 (MINOR).
 - **The bound on a turn is the operator's; runaway is caught by behaviour** (#925) — the
   **Agent cycles** setting stopped at 12, and the route enforced it *silently*: type 40 and 12 was
   stored. A genuinely long task — search → read → read → summarize → write — ran out of rounds and

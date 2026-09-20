@@ -1,5 +1,15 @@
 # A stand-in for the Ollama workload, for the `k8s-smoke` gate only (#919).
 #
+# #962 note. That issue named this stub as the proof we had papered over a missing
+# deployment mode — "we wrote a stub instead of a mode" — and proposed retiring it once the
+# mode existed. The mode now exists (ADR-0144) and the gate asserts it, in the upgrade phase
+# (`ollama.external.url` goes blank and the core must answer `absent`). The stub stays
+# because it is load-bearing for a *different* assertion: it is the only Ollama workload a
+# kind run ever has, and without it `KubernetesController.restart_service` and the chart
+# Role's `statefulsets` verb go straight back to mock-only — the #919 hole. The gate now
+# proves both halves: with a runtime configured, a KV-cache change restarts this workload
+# through the seam; with none, the core refuses every local action with a reason.
+#
 # Why this exists. `infra/ci/values-ci.yaml` turns the chart's Ollama off — the image
 # is multi-gigabyte and its pod asks for 4Gi before it has done anything, and nothing
 # the smoke asserts needs a model. The cost of that was silent: with no Ollama

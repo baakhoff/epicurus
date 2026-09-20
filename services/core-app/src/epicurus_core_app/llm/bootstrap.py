@@ -34,13 +34,19 @@ from typing import Protocol
 
 from epicurus_core import get_logger
 from epicurus_core_app.llm import providers as registry
+from epicurus_core_app.llm.errors import LocalRuntimeState
 from epicurus_core_app.llm.models import ModelInfo
 
 log = get_logger("epicurus_core_app.llm.bootstrap")
 
 
 class _Gateway(Protocol):
-    """The four gateway methods the bootstrap needs (kept narrow for tests)."""
+    """The four gateway methods (and one property) the bootstrap needs (narrow, for tests)."""
+
+    @property
+    def local_runtime_enabled(self) -> bool: ...
+
+    async def local_runtime_state(self) -> LocalRuntimeState: ...
 
     async def models(
         self, tenant_id: str | None = None, *, with_capabilities: bool = False
@@ -100,6 +106,15 @@ class ModelBootstrap:
             log.error("model bootstrap failed unexpectedly", error=str(exc))
 
     async def _run(self) -> None:
+        if not self._gateway.local_runtime_enabled:
+            # No local runtime to seed, by the operator's choice (#962, ADR-0144). One line
+            # and out: before this, a hosted-only deployment spent 180 s of every process
+            # start polling an address that was never going to answer — the poll loop's own
+            # docstring said "a hosted-only deployment may run no Ollama at all" while having
+            # no way to know that it was one.
+            log.info("model bootstrap skipped: this deployment runs no local LLM runtime")
+            return
+
         spec = self._models_spec.strip()
         if not spec:
             log.info("model bootstrap disabled (LLM_BOOTSTRAP_MODELS is blank)")
@@ -138,18 +153,25 @@ class ModelBootstrap:
     async def _wait_for_runtime(self) -> set[str] | None:
         """Poll the runtime until it answers, returning the installed (tagged) model names.
 
-        ``None`` after the deadline — a hosted-only deployment may run no Ollama at all,
-        and that must cost one warning, not a crash loop.
+        ``None`` after the deadline — a configured runtime that is still down when the clock
+        runs out costs one warning, not a crash loop. Only reached when a runtime *is*
+        configured: the absent case returns from :meth:`_run` before any of this.
+
+        It polls the **state**, not a raised exception. ``models()`` no longer raises for a
+        runtime that cannot answer (#962) — it reports an empty list, which is the truth for
+        a caller asking what is installed and a trap for a caller asking whether the runtime
+        is up: an Ollama container thirty seconds into its own start-up would have read as
+        "an empty runtime", and the bootstrap would have raced it with a pull instead of
+        waiting the few seconds it needed.
         """
         deadline = asyncio.get_running_loop().time() + self._ready_timeout_s
         while True:
-            try:
+            if await self._gateway.local_runtime_state() == "ok":
                 return {info.name for info in await self._gateway.models()}
-            except Exception as exc:
-                if asyncio.get_running_loop().time() >= deadline:
-                    log.debug("runtime still unreachable at deadline", error=str(exc))
-                    return None
-                await asyncio.sleep(self._poll_interval_s)
+            if asyncio.get_running_loop().time() >= deadline:
+                log.debug("runtime still unreachable at deadline", waited_s=self._ready_timeout_s)
+                return None
+            await asyncio.sleep(self._poll_interval_s)
 
     async def _resolve_wanted(self, spec: str) -> list[str]:
         """The models to ensure: the effective defaults for ``auto``, else the explicit list.

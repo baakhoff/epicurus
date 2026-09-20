@@ -94,8 +94,33 @@ unreachable) — pull it from the web UI's **Models** page. Restarting the core 
 retry it: if the other default landed, the runtime is no longer empty and `auto` no-ops
 (#923). Name the model in `LLM_BOOTSTRAP_MODELS` if you want a restart to keep trying for
 it. `LLM_BOOTSTRAP_MODELS=`
-(blank) disables the bootstrap entirely — intended for hosted-only or air-gapped
-deployments, where a local 404 instead means the model was simply never pulled.
+(blank) disables the bootstrap entirely — intended for air-gapped deployments, where a
+local 404 instead means the model was simply never pulled.
+
+On a **hosted-only** deployment (`OLLAMA_URL=`, #962) none of this applies: the bootstrap
+returns in one log line, and a local model id fails with a **400** naming the mode ("No
+local runtime is configured — choose a hosted model") rather than a 404 from a runtime that
+is not there. If you *do* see a 404 or a connection error naming Ollama on such a
+deployment, the blank `OLLAMA_URL` did not reach the container — check
+`docker compose exec core-app printenv OLLAMA_URL` (it must print nothing) and that the
+compose interpolation is `${OLLAMA_URL-…}`, not `${OLLAMA_URL:-…}`.
+
+### The Models page shows nothing, or 500s every few seconds {#models-page-empty}
+
+`GET /platform/v1/llm/models` answers `200` with an empty list whenever the local runtime
+cannot serve — both when there is none (`OLLAMA_URL` blank) and when one is configured but
+unreachable (#962, ADR-0144). Which of the two it is comes from
+`GET /platform/v1/llm/local-runtime` → `{"state": "absent"|"unreachable"|"ok"}`:
+
+```bash
+docker compose exec core-app python -c \
+  "import urllib.request,sys; sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:8080/platform/v1/llm/local-runtime').read().decode())"
+```
+
+`absent` is the hosted-only mode (`task hosted-only-up`, or `EPICURUS_HOSTED_ONLY=1` on a
+deploy box) and nothing is wrong. `unreachable` means the container is down or the URL is
+wrong — check `docker compose ps ollama` and that `OLLAMA_URL` matches it. A 500 from that
+endpoint is a bug worth reporting: it was the symptom this contract exists to remove.
 
 ### OpenBao is sealed {#openbao-sealed}
 

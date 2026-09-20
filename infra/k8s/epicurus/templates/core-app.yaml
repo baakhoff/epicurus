@@ -1,3 +1,7 @@
+{{- /* A hosted-only release must not render with a local model name nothing here can run
+       (#962, ADR-0144) — see `epicurus.assertHostedOnlyModels`. Evaluated first, so the
+       failure names the fix before anything downstream can fail for a vaguer reason. */}}
+{{- include "epicurus.assertHostedOnlyModels" . -}}
 {{- $files := .Values.core.persistence -}}
 {{- $localFiles := eq .Values.core.filesBackend "local" -}}
 {{- $baoTokenSecret := include "epicurus.openbaoTokenSecret" . -}}
@@ -196,7 +200,7 @@ spec:
             - name: LLM_NUM_CTX
               value: {{ .Values.core.llm.numCtx | quote }}
             - name: LLM_BOOTSTRAP_MODELS
-              value: {{ .Values.core.llm.bootstrapModels | quote }}
+              value: {{ include "epicurus.bootstrapModels" $ | quote }}
             - name: OAUTH_REDIRECT_BASE_URL
               value: {{ include "epicurus.oauthRedirectBaseUrl" $ | quote }}
             - name: OAUTH_STATE_SECRET

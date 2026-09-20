@@ -110,11 +110,73 @@ http://openbao:8200
 {{- end -}}
 {{- end -}}
 
+{{/*
+The local LLM runtime's URL — **and the empty string is a valid answer** (#962, ADR-0144).
+
+Three deployments, not two: the chart's own Ollama, an external one, and *none at all* —
+hosted chat and hosted embeddings, no local runtime anywhere. The third was unreachable
+because this helper was written by copying `epicurus.qdrantUrl` / `epicurus.openbaoUrl`,
+components the core genuinely cannot run without, where `required` is right. Ollama is not
+one of them, and `epicurus.minioUrl` three definitions down already shows the other shape.
+An empty `OLLAMA_URL` is how the core is told there is no local runtime, and it then refuses
+every local-runtime action with a reason instead of timing out against a placeholder.
+*/}}
 {{- define "epicurus.ollamaUrl" -}}
 {{- if .Values.ollama.enabled -}}
 http://ollama:11434
 {{- else -}}
-{{- required "ollama.external.url is required when ollama.enabled is false" .Values.ollama.external.url -}}
+{{- default "" .Values.ollama.external.url -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether this deployment has a local LLM runtime at all — "true" or "" (Helm's falsy string).
+The one place the question is answered, so the env, the bootstrap default and the guard below
+cannot disagree about what "hosted-only" means.
+*/}}
+{{- define "epicurus.localRuntimeEnabled" -}}
+{{- if include "epicurus.ollamaUrl" . -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+`LLM_BOOTSTRAP_MODELS` for this deployment.
+
+With no local runtime there is nothing to pull into, so the chart's default (`auto`) becomes
+blank on its own rather than making every hosted-only operator discover the setting. An
+operator who set the value themselves is left alone — an explicit list is a stated pin, and
+the core answers a pull with a clean refusal now, not a three-minute poll.
+*/}}
+{{- define "epicurus.bootstrapModels" -}}
+{{- if and (not (include "epicurus.localRuntimeEnabled" .)) (eq .Values.core.llm.bootstrapModels "auto") -}}
+{{- else -}}
+{{- .Values.core.llm.bootstrapModels -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Refuse to render the half-working stack (#962, ADR-0144).
+
+With no local runtime, a **bare** model name — `llama3.2`, `nomic-embed-text`, the chart's own
+defaults — routes to a runtime that does not exist. Chat would work through whatever hosted
+provider the operator configured while memory recall and every module index failed at call
+time. That is exactly the deployment we refuse to ship elsewhere, so it fails at render time
+with the fix in the message. The old guard (`required` on `ollama.external.url`) refused a
+*legitimate* deployment; this one refuses a broken one.
+
+A hosted id is `<known-alias>/<model>`, mirroring `providers.is_hosted` in the core —
+`local/…` is deliberately not on the list, and neither is an unknown prefix, because both
+route to the local runtime there too.
+*/}}
+{{- define "epicurus.assertHostedOnlyModels" -}}
+{{- if not (include "epicurus.localRuntimeEnabled" .) -}}
+{{- $hosted := list "claude" "gpt" "grok" "deepseek" "gemini" "openrouter" "custom" -}}
+{{- $checks := dict "core.llm.defaultModel" .Values.core.llm.defaultModel "core.memoryEmbedModel" .Values.core.memoryEmbedModel -}}
+{{- range $key, $model := $checks -}}
+{{- $alias := (splitList "/" ($model | toString)) | first -}}
+{{- if not (and (contains "/" ($model | toString)) (has $alias $hosted)) -}}
+{{- fail (printf "this release has no local LLM runtime (ollama.enabled is false and ollama.external.url is blank), but %s is %q — a local model name, which nothing here can run. Set %s to a hosted alias, e.g. core.memoryEmbedModel=gpt/text-embedding-3-small and core.llm.defaultModel=claude/claude-sonnet-4-6, or enable Ollama." $key ($model | toString) $key) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

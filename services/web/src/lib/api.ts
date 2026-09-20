@@ -31,6 +31,7 @@ import {
   FileText,
   HoverCard,
   LlmPrefs,
+  LocalRuntimeStatus,
   LogEntry,
   MaintenanceCurrentRun,
   MaintenanceRunPage,
@@ -211,6 +212,10 @@ export const api = {
       z.array(ModelInfo),
       `/platform/v1/llm/models${withCapabilities ? "?capabilities=true" : ""}`,
     ),
+  // Whether this deployment runs a local runtime at all (#962) — `absent` (deliberately none),
+  // `unreachable` (one is configured and down), or `ok`. Its own endpoint rather than an
+  // envelope around the model list, which stays a bare array for its five web consumers.
+  localRuntime: () => request(LocalRuntimeStatus, "/platform/v1/llm/local-runtime"),
   // The browsable model catalog the core parses from upstream on a schedule (#269).
   catalog: () => request(CatalogResponse, "/platform/v1/llm/catalog"),
   deleteModel: (name: string) =>

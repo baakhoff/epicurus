@@ -23,6 +23,28 @@ export const ModelInfo = z.object({
 });
 export type ModelInfo = z.infer<typeof ModelInfo>;
 
+/**
+ * Whether this deployment runs a local model runtime at all (#962).
+ *
+ * Three states, because `absent` and `unreachable` are not the same thing and never were:
+ * `absent` is a **deliberate deployment mode** (`OLLAMA_URL=""` — hosted chat, hosted
+ * embeddings, no Ollama), so nothing is wrong and there is nothing for the operator to fix;
+ * `unreachable` is a runtime the deployment expects and cannot reach, which *is* an error and
+ * still looks like one. `ok` is the common case. The state is read from this endpoint and never
+ * inferred from a failing model list — since #962 `GET /llm/models` answers `[]` with a 200 in
+ * both of the unhappy states, so an error there no longer carries the information.
+ */
+export const LocalRuntimeState = z.enum(["absent", "unreachable", "ok"]);
+export type LocalRuntimeState = z.infer<typeof LocalRuntimeState>;
+
+export const LocalRuntimeStatus = z.object({
+  state: LocalRuntimeState,
+  // Whether `OLLAMA_URL` carries a value at all. Defaulted for tolerance: the state is what
+  // every surface renders from, and a core that reports one without the other is still usable.
+  url_configured: z.boolean().default(true),
+});
+export type LocalRuntimeStatus = z.infer<typeof LocalRuntimeStatus>;
+
 /** Per-model tuning; null on a field means "inherit" the global / env default. */
 export const ModelSettings = z.object({
   context_window: z.number().nullable(),

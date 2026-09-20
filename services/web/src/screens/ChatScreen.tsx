@@ -87,6 +87,7 @@ import {
 } from "@/lib/format";
 import { SHARE_CACHE, SHARE_FILE_KEY, SHARE_FILE_NAME_HEADER, SHARE_META_KEY, type ShareMeta } from "@/lib/shareTarget";
 import { SUGGESTION_VERB, suggestionTarget } from "@/lib/suggestions";
+import { useLocalRuntime } from "@/lib/useLocalRuntime";
 import {
   fetchSessions,
   useChat,
@@ -616,6 +617,10 @@ function ModelPicker() {
   const sessionModel = sessions.data?.find((s) => s.id === sessionId)?.model ?? null;
   const effectiveModel = sessionModel ?? model;
   const models = useQuery({ queryKey: ["models"], queryFn: () => api.models(), enabled: open });
+  // No local runtime (#962) → no Local group at all: no heading, no "local runtime unreachable",
+  // nothing to pick. The core-default row survives on its own, because the core's default may
+  // perfectly well be a hosted model and this is the only way back to it.
+  const runtime = useLocalRuntime();
   const providers = useQuery({ queryKey: ["providers"], queryFn: api.providers, enabled: open });
   const llmPrefs = useQuery({ queryKey: ["llmPrefs"], queryFn: api.llmPrefs, enabled: open });
   const saved = useQuery({ queryKey: ["savedModels"], queryFn: api.savedModels, enabled: open });
@@ -695,25 +700,34 @@ function ModelPicker() {
               </span>
             </p>
           )}
-          <div>
-            <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Local</p>
+          {runtime.absent ? (
             <div className="flex flex-col gap-1">
               <PickRow label={defaultLabel} active={effectiveModel === null} onPick={() => choose(null)} />
-              {visibleModels.map((m) => (
-                <PickRow
-                  key={m.name}
-                  label={m.name}
-                  loaded={m.loaded}
-                  size={m.size}
-                  active={effectiveModel === m.name}
-                  onPick={() => choose(m.name)}
-                />
-              ))}
-              {models.isError && (
-                <p className="text-xs text-warn">local runtime unreachable</p>
-              )}
             </div>
-          </div>
+          ) : (
+            <div>
+              <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Local</p>
+              <div className="flex flex-col gap-1">
+                <PickRow label={defaultLabel} active={effectiveModel === null} onPick={() => choose(null)} />
+                {visibleModels.map((m) => (
+                  <PickRow
+                    key={m.name}
+                    label={m.name}
+                    loaded={m.loaded}
+                    size={m.size}
+                    active={effectiveModel === m.name}
+                    onPick={() => choose(m.name)}
+                  />
+                ))}
+                {/* Driven by the runtime's own state (#962) — the model list stopped erroring on
+                    an unreachable runtime, so `models.isError` alone would never fire again. It
+                    is kept beside it for an older core, which still 500s here. */}
+                {(runtime.unreachable || models.isError) && (
+                  <p className="text-xs text-warn">local runtime unreachable</p>
+                )}
+              </div>
+            </div>
+          )}
 
           <div>
             <p className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">
@@ -817,6 +831,28 @@ function Welcome() {
   const active = useDownloads((s) => s.active);
   const queryClient = useQueryClient();
   const suggestions = ["llama3.2", "qwen2.5:0.5b"];
+  // The first thing a new operator reads must not be advice they cannot take (#962): with no
+  // local runtime there is nothing to pull, and "pull a local one" would send them looking for a
+  // Pull button that this deployment deliberately doesn't have.
+  const runtime = useLocalRuntime();
+
+  if (runtime.absent) {
+    return (
+      <EmptyState quote={dayQuote()}>
+        <Card className="mt-2 w-full max-w-sm text-left">
+          <h3 className="font-serif text-base text-ink">Welcome to the garden</h3>
+          <p className="mt-1 text-sm leading-relaxed text-ink-dim">
+            No model is configured yet. This deployment runs no local AI, so add a hosted
+            provider key under{" "}
+            <Link to="/models" className="text-accent-strong underline">
+              Models
+            </Link>{" "}
+            and pick a model there.
+          </p>
+        </Card>
+      </EmptyState>
+    );
+  }
 
   return (
     <EmptyState quote={dayQuote()}>

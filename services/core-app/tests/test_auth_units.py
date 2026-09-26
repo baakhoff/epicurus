@@ -52,6 +52,11 @@ def _settings(**overrides: Any) -> CoreAppSettings:
     return CoreAppSettings(**values)
 
 
+def _raw(**values: Any) -> CoreAppSettings:
+    """Settings from raw (env-shaped) values, which the static types would reject."""
+    return CoreAppSettings(**values)
+
+
 def _config(**overrides: Any) -> AuthConfig:
     return load_auth_config(_settings(**overrides))
 
@@ -86,22 +91,20 @@ def test_the_default_is_no_sign_in_and_nothing_is_validated() -> None:
 
 @pytest.mark.parametrize("raw", ["OIDC", " oidc ", "Oidc"])
 def test_auth_mode_is_case_and_space_insensitive(raw: str) -> None:
-    assert CoreAppSettings(auth_mode=raw).auth_mode == "oidc"
+    assert _raw(auth_mode=raw).auth_mode == "oidc"
 
 
 def test_a_blank_auth_mode_is_none() -> None:
-    assert CoreAppSettings(auth_mode="").auth_mode == "none"
+    assert _raw(auth_mode="").auth_mode == "none"
 
 
 def test_an_unknown_auth_mode_fails_rather_than_reading_as_none() -> None:
     with pytest.raises(ValidationError, match="auth_mode"):
-        CoreAppSettings(auth_mode="oauth")
+        _raw(auth_mode="oauth")
 
 
 def test_blank_bool_and_int_values_fall_back_to_their_defaults() -> None:
-    settings = CoreAppSettings(
-        oidc_allow_all_users="", oidc_auto_redirect=" ", auth_session_days=""
-    )
+    settings = _raw(oidc_allow_all_users="", oidc_auto_redirect=" ", auth_session_days="")
     assert settings.oidc_allow_all_users is False
     assert settings.oidc_auto_redirect is False
     assert settings.auth_session_days == 30

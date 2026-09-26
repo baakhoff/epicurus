@@ -319,7 +319,8 @@ smoke_assert() {
 # The sign-in phase (#969). Runs LAST in each gate: it restarts core-app with sign-in on,
 # and nothing after it may assume the web door is open. The runtime-specific half — *how*
 # core-app is restarted with the new environment — is the gate's `enable_sign_in`: an
-# override file merged onto the Compose service, `kubectl set env` on the Deployment.
+# override file merged onto the Compose service, a `helm upgrade` with the chart's `auth:`
+# values in a cluster.
 smoke_assert_sign_in() {
   log "Asserting sign-in: AUTH_MODE=oidc behind the web door (#969)"
   enable_sign_in

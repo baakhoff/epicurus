@@ -327,7 +327,9 @@ Authentik, Keycloak, …), owns the HttpOnly session cookie, and refuses any pro
 `/platform/` request without a session. The **web** only has to notice it is signed out, say
 so, and send the browser to the core's login route with a way back. With sign-in off
 (`mode: "none"`, the default everywhere) none of this shows: no sign-in screen, no Account
-card, and the only difference from before is one session read at boot.
+card, and the only difference from before is one session read at boot. Setting it up — the
+provider, the callback to register, Compose and the chart — is the operator's
+[sign-in guide](../infrastructure/sign-in.md).
 
 **The contract it consumes** (all core-app; zod mirror `AuthSession` in `src/lib/contracts.ts`,
 parsed tolerantly — extra fields ignored, `mode` read as a plain string so an unfamiliar mode

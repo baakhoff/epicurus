@@ -8,23 +8,33 @@ in the order we recommend trying it.
 
 ## Read this first — what "exposing the stack" actually exposes
 
-The edge gateway **only routes; it does not authenticate** (ADR-0008), and neither
-`core-app` nor the web shell carries any auth of its own. The web UI is served at the
-gateway root and its nginx **proxies `/platform/v1/*` straight to `core-app`** — agent
-runs, the Files browser, OAuth connect flows, model and provider-key settings. So the
-moment the web entrypoint is reachable off-box, **everything the UI can do is reachable
-by anyone who can reach it.** There is no login screen behind it yet — operator identity
-is a post-1.0 component, not something this stack has today.
+The web shell's nginx **proxies `/platform/v1/*` straight to `core-app`** — agent runs,
+the Files browser, OAuth connect flows, model and provider-key settings. So the moment the
+web shell is reachable off-box, **everything the UI can do is reachable by anyone who can
+reach it — unless sign-in is on.**
 
-Two rules follow, and the recipes below all obey them:
+epicurus has **built-in sign-in** with an OpenID Connect provider (Pocket ID, Authentik,
+Keycloak, Authelia, Kanidm, Google — see [Sign-in](sign-in.md), #969). It is **off by
+default**: a stack that sets nothing has no login screen, exactly as before. The edge gateway
+still **only routes; it does not authenticate** (ADR-0008) — and sign-in covers requests that
+reach the core *through the web shell*, not the gateway's per-module `<name>.localhost` routes
+or the published internal ports.
 
-1. **A perimeter that authenticates is mandatory for any non-loopback exposure** — not a
-   nice-to-have. Basic-auth or an IdP in front is the *only* thing standing between the
-   internet and `/platform/v1/*`.
-2. **Expose only the web entrypoint** (the gateway on `:80` → the web UI). Never publish
-   or reverse-proxy the internal module ports, `core-app` (`:8082`), the platform API
-   directly, or the data-plane services. The module↔core contract is **local-only by
-   design** (constraint #7) — keep it on the internal Docker network.
+Three rules follow, and the recipes below all obey them:
+
+1. **Something must authenticate for any non-loopback exposure** — not a nice-to-have.
+   Built-in sign-in, basic-auth at a reverse proxy, or an IdP-aware proxy: one of them is
+   the only thing standing between the network and `/platform/v1/*`. Tailscale's device
+   authentication counts for a tailnet only you are on.
+2. **Expose only the web shell** — `web:8080` on the internal network, or its published
+   port `8084`. **Not the gateway**: it also routes `echo.localhost`, `mail.localhost`,
+   `storage.localhost`, `grafana.localhost` and every other module by `Host` header, and
+   those routes are outside sign-in. Never publish or reverse-proxy the module ports,
+   `core-app` (`:8082`), the platform API directly, or the data-plane services. The
+   module↔core contract is **local-only by design** (constraint #7).
+3. **Sign-in and a network perimeter compose.** The perimeter decides which devices can
+   reach the box; sign-in decides which people get in. For a stack you use from your
+   phone, run both.
 
 Keep `BIND_ADDRESS=127.0.0.1` and let the perimeter be the *only* process listening on a
 public interface. You almost never need `BIND_ADDRESS=0.0.0.0`.
@@ -36,29 +46,59 @@ Zero exposed ports, no certificates to manage, no firewall holes. A device-level
 join — the sane default for a personal server, and what the maintainer runs.
 
 Leave `BIND_ADDRESS` at its `127.0.0.1` default, install Tailscale on the box, then serve
-the loopback-bound gateway onto your tailnet with automatic HTTPS:
+the loopback-bound web shell onto your tailnet with automatic HTTPS:
 
 ```bash
 tailscale up
-# Put the (loopback-only) gateway on your tailnet at https://<machine>.<tailnet>.ts.net/
-tailscale serve --bg 8088
+# Put the (loopback-only) web shell on your tailnet at https://<machine>.<tailnet>.ts.net/
+tailscale serve --bg 8084
 ```
 
 `tailscale serve` terminates TLS with a real MagicDNS certificate and proxies to
-`http://127.0.0.1:8088`. The stack itself never opens a port to the LAN or the internet —
-only tailnet devices can reach it, each authenticated by Tailscale. Add your phone to the
-tailnet and the PWA just works, on the go, over HTTPS.
+`http://127.0.0.1:8084` — the web shell's published port (`WEB_PORT`), not the gateway's
+`8088`, so the gateway's per-module routes stay on the box. The stack itself never opens
+a port to the LAN or the internet — only tailnet devices can reach it, each authenticated
+by Tailscale. Add your phone to the tailnet and the PWA just works, on the go, over HTTPS.
+
+If more than one person is on the tailnet, or you want a login on the phone anyway, turn on
+[built-in sign-in](#option-b--built-in-sign-in-oidc) too, with
+`OAUTH_REDIRECT_BASE_URL=https://<machine>.<tailnet>.ts.net`.
 
 > `tailscale funnel` can publish a serve target to the **public** internet. Only combine
-> it with one of the authenticating perimeters below — on its own it would expose
-> `/platform/v1/*` to everyone, exactly the exposure warned about at the top of this page.
+> it with sign-in or one of the authenticating perimeters below — on its own it would
+> expose `/platform/v1/*` to everyone, exactly the exposure warned about at the top of this
+> page.
 
-## Option B — Reverse proxy with basic auth
+## Option B — Built-in sign-in (OIDC)
+
+Recommended whenever you use the stack from several devices or your phone. Point epicurus at
+the OpenID Connect provider you already run — or install [Pocket ID](https://pocket-id.org),
+a small passkey-only one — and the web shell shows **Sign in with …** until you have a
+session. It is native: the phone PWA signs in with a passkey and stays signed in (a sliding
+30 days by default), instead of a browser basic-auth prompt, and it works the same on Compose
+and on Kubernetes.
+
+```dotenv
+# .env — the full walkthrough is in the Sign-in guide
+OAUTH_REDIRECT_BASE_URL=https://assistant.example.com
+AUTH_MODE=oidc
+OIDC_ISSUER_URL=https://id.example.com
+OIDC_CLIENT_ID=<from the provider>
+OIDC_CLIENT_SECRET=<from the provider; blank for a public client>
+OIDC_ALLOWED_EMAILS=you@example.com
+```
+
+Sign-in is not a perimeter: it still needs TLS in front (Tailscale, or Caddy from Option C
+without its `basic_auth` block), and it covers the web shell only — so the rules above about
+exposing `web` and nothing else still apply. See [Sign-in](sign-in.md) for the provider setup,
+Kubernetes values, who is admitted, and troubleshooting.
+
+## Option C — Reverse proxy with basic auth
 
 When you want a normal `https://assistant.example.com` on your own domain, put a small
 reverse proxy in front that terminates TLS and enforces HTTP basic auth. The stack stays
 loopback-bound; the proxy is the **one** process on a public port, and it joins the
-internal `epicurus` network to reach the gateway — so you don't publish the gateway port
+internal `epicurus` network to reach the web shell — so you don't publish any epicurus port
 at all.
 
 This is an **operator-provided** perimeter, deliberately **not** part of the default
@@ -71,15 +111,16 @@ certificate, so this is the whole config:
 # Replace the domain and the credentials. DNS for the domain must point at this box,
 # and ports 80 + 443 must reach it (for the ACME challenge and for traffic).
 assistant.example.com {
-	# Require a login before ANY request reaches epicurus — the only gate in front
-	# of /platform/v1/*. Generate a bcrypt hash with:
+	# Require a login before ANY request reaches epicurus. Drop this block if you use
+	# built-in sign-in (Option B) instead. Generate a bcrypt hash with:
 	#   docker run --rm caddy:2 caddy hash-password --plaintext 'a-long-passphrase'
 	basic_auth {
 		you $2a$14$REPLACE_WITH_YOUR_OWN_BCRYPT_HASH_000000000000000000000000
 	}
 
-	# Forward to the internal gateway; Traefik's catch-all routes it to the web UI.
-	reverse_proxy gateway:80
+	# Forward to the web shell — not the gateway, whose per-module Host routes sit
+	# outside any login.
+	reverse_proxy web:8080
 }
 ```
 
@@ -120,16 +161,19 @@ networks:
     name: epicurus
 ```
 
-nginx is a fine substitute if you already run it — point a `proxy_pass http://gateway:80;`
-`server` block at the same upstream, add `auth_basic` + an `htpasswd` file, and terminate
-TLS with your own certificate (or [Certbot](https://certbot.eff.org/)). The shape is
-identical: TLS + auth at the edge, `gateway:80` upstream, nothing else published.
+nginx is a fine substitute if you already run it — point a `proxy_pass http://web:8080;`
+`server` block at the same upstream, add `auth_basic` + an `htpasswd` file (or rely on
+built-in sign-in), and terminate TLS with your own certificate (or
+[Certbot](https://certbot.eff.org/)). The shape is identical: TLS + auth at the edge,
+`web:8080` upstream, nothing else published.
 
-## Option C — oauth2-proxy / OIDC (for the ambitious)
+## Option D — oauth2-proxy in front
 
-For real single sign-on — log in with Google/GitHub/your own Keycloak instead of a shared
-password — put [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) in front,
-still with TLS terminated ahead of it (Caddy from Option B, or your existing ingress):
+[Built-in sign-in](#option-b--built-in-sign-in-oidc) now covers what this option was for —
+single sign-on with your own provider — natively, including on the phone PWA. An
+[oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) in front remains an option when
+you already run one for every app on the box, still with TLS terminated ahead of it (Caddy
+from Option C, or your existing ingress):
 
 ```yaml
 # Sketch — see the oauth2-proxy docs for the full provider setup.
@@ -140,7 +184,7 @@ services:
     command:
       - --http-address=0.0.0.0:4180
       - --reverse-proxy=true
-      - --upstream=http://gateway:80          # epicurus, behind the login
+      - --upstream=http://web:8080            # epicurus's web shell, behind the login
       - --provider=oidc                        # or google, github, …
       - --oidc-issuer-url=https://your-idp.example.com/
       - --email-domain=example.com             # who is allowed in
@@ -152,10 +196,10 @@ networks:
     name: epicurus
 ```
 
-Front `auth:4180` with the Option-B Caddy service (swap its `reverse_proxy gateway:80`
-for `reverse_proxy auth:4180`) so TLS and the login both live at the edge. This is the
-most work and the most robust — pick it when more than one person uses the box, or when a
-shared password isn't good enough.
+Front `auth:4180` with the Option-C Caddy service (swap its `reverse_proxy web:8080`
+for `reverse_proxy auth:4180`) so TLS and the login both live at the edge. The app then
+still has no idea who is signed in, and the phone PWA meets the proxy's login page rather
+than its own sign-in screen — which is why built-in sign-in is now the recommended route.
 
 ## Self-hosting security checklist
 
@@ -163,13 +207,21 @@ Before (and after) you expose anything:
 
 - **Keep `BIND_ADDRESS=127.0.0.1`** unless a perimeter is genuinely in front — see
   [Configuration](../user/configuration.md). Let the perimeter own the only public port.
+  Sign-in does not cover the published ports (`core-app`'s `8082`, each module's), so this
+  holds with sign-in on too.
+- **Turn on [sign-in](sign-in.md)** for anything reached from more than this box, with an
+  explicit allowlist (`OIDC_ALLOWED_EMAILS` / `OIDC_ALLOWED_GROUPS`) — never
+  `OIDC_ALLOW_ALL_USERS=true` against a public provider such as Google.
+- **Point the perimeter at the web shell** (`web:8080` / port `8084`), never at the gateway
+  (`8088`): its `<module>.localhost` routes bypass sign-in.
 - **Never expose the Traefik dashboard** (`:8089`). It is intentionally unauthenticated
-  (`--api.insecure=true`) and loopback-bound; a reverse proxy should forward the gateway's
-  **web** entrypoint (`:80`) only, never the dashboard.
-- **Never proxy the internal contract.** Only the web entrypoint goes through the
+  (`--api.insecure=true`) and loopback-bound; a reverse proxy forwards the web shell only,
+  never the dashboard.
+- **Never proxy the internal contract.** Only the web shell goes through the
   perimeter — not module ports, not `core-app`, not the data plane (constraint #7).
-- **Terminate TLS** on anything that leaves the box (Options A–C all do). Plain HTTP over
-  a LAN still leaks session traffic.
+- **Terminate TLS** on anything that leaves the box (Options A, C and D do; B needs one of
+  them). Plain HTTP over a LAN still leaks session traffic — and a sign-in session cookie is
+  marked `Secure` only on an https address.
 - **Default-deny inbound at the host firewall**, then open only what the perimeter needs
   (443, plus 80 for ACME). Tailscale (Option A) needs no inbound rules at all.
 - **Store the OpenBao unseal key off-box**, not on the server whose secrets it unlocks —
@@ -178,9 +230,13 @@ Before (and after) you expose anything:
 - **Keep the host and images patched.** [Auto-deploy](auto-deploy.md) rolls released
   images onto the box; keep the OS and Docker current too.
 - **Rotate provider API keys** if a box is ever exposed without a perimeter, even briefly.
+- **Keep `OIDC_CLIENT_SECRET` in `.env` or a Kubernetes Secret** — never in a committed file
+  or a values file.
 
 ## See also
 
+- [Sign-in](sign-in.md) — built-in OpenID Connect sign-in: the Pocket ID walkthrough, other
+  providers, admission rules and troubleshooting.
 - [`infra/edge/README.md`](../../infra/edge/README.md) — the gateway and the short version
   of "access is yours to control" (ADR-0008).
 - [Installation → Default ports](../user/installation.md#default-ports) — where

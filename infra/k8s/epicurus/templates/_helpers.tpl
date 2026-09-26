@@ -283,6 +283,155 @@ http://localhost:8084
 {{- end -}}
 {{- end -}}
 
+{{/* ── Sign-in (#969) ───────────────────────────────────────────────────────── */}}
+
+{{/*
+Every env var the chart renders from `auth`, comma-separated. The one list both the env
+template and the `core.extraEnv` guard below read, so they cannot disagree about the family.
+*/}}
+{{- define "epicurus.signInEnvNames" -}}
+AUTH_MODE,AUTH_SESSION_DAYS,OIDC_ISSUER_URL,OIDC_PROVIDER_NAME,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,OIDC_SCOPES,OIDC_ALLOWED_EMAILS,OIDC_ALLOWED_GROUPS,OIDC_ALLOW_ALL_USERS,OIDC_AUTO_REDIRECT
+{{- end -}}
+
+{{/*
+A list — or a single comma-separated string, which is what `--set key=a,b` hands a template —
+as the comma-joined, trimmed, blank-free string the core parses. `[""]` and `" , "` both come
+out empty, which is what keeps the admission check honest: a list of blanks is not a rule.
+*/}}
+{{- define "epicurus.csv" -}}
+{{- $raw := . -}}
+{{- if kindIs "string" $raw -}}{{- $raw = splitList "," $raw -}}{{- end -}}
+{{- $items := list -}}
+{{- range $raw -}}
+{{- $item := trim (toString .) -}}
+{{- if $item -}}{{- $items = append $items $item -}}{{- end -}}
+{{- end -}}
+{{- join "," $items -}}
+{{- end -}}
+
+{{/*
+A switch as the core reads it: "true" or "false", nothing else. `--set-string x=false` hands a
+template the *string* "false", which is truthy — read naively, that would count as an admission
+rule the operator explicitly turned off.
+*/}}
+{{- define "epicurus.flag" -}}
+{{- if eq (lower (toString (default "" .))) "true" -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{/* Where the OIDC client credentials live: `auth.oidc.existingSecret`, else the shared Secret. */}}
+{{- define "epicurus.oidcSecretName" -}}
+{{- default (include "epicurus.secretName" .) (trim (toString (default "" .Values.auth.oidc.existingSecret))) -}}
+{{- end -}}
+
+{{/*
+The URL the provider must have registered — derived, never configured, from the same public
+base the connected-account OAuth flow already uses, so the two cannot drift. Trailing slashes
+are dropped the way the core drops them.
+*/}}
+{{- define "epicurus.signInCallbackUrl" -}}
+{{- printf "%s/platform/v1/auth/callback" (regexReplaceAll "/+$" (include "epicurus.oauthRedirectBaseUrl" .) "") -}}
+{{- end -}}
+
+{{/*
+Refuse to render a sign-in the core would refuse to start (#969).
+
+With AUTH_MODE=oidc the core fails closed: no issuer, no client id or no admission rule, and it
+does not start. A release that renders anyway only moves the reason from `helm install` into a
+crash-looping pod's log, so this mirrors the core's rule at render time — it does not replace
+it; the core still checks on its own, which is what covers Compose. The admission rule is the
+one that matters most: an empty allowlist is refused rather than read as "everyone", because a
+release pointed at a public provider (Google) would then admit anyone with an account there.
+
+`core.extraEnv` may not name any variable in the family. It is applied after the chart's own
+env, and Kubernetes keys a container's env list by name: two entries under one name is a
+duplicate that server-side apply (Flux, `kubectl apply --server-side`) rejects outright —
+`duplicate entries for key [name=…]` — while client-side apply quietly keeps the last. For
+sign-in the second failure is the worse one: the pod would run a configuration this guard never
+saw. So the family has exactly one source, `auth.*`.
+*/}}
+{{- define "epicurus.assertSignIn" -}}
+{{- $auth := .Values.auth -}}
+{{- $mode := toString (default "" $auth.mode) -}}
+{{- if not (has $mode (list "none" "oidc")) -}}
+{{- fail (printf "auth.mode is %q — set it to \"none\" (no sign-in: anyone who reaches the web shell has full access) or \"oidc\" (sign in with an OpenID Connect provider; see docs/infrastructure/sign-in.md)." $mode) -}}
+{{- end -}}
+{{- range $name := splitList "," (include "epicurus.signInEnvNames" .) -}}
+{{- if hasKey (default (dict) $.Values.core.extraEnv) $name -}}
+{{- fail (printf "core.extraEnv sets %s, one of the sign-in variables this chart renders from auth.* — remove it and set the matching auth value instead (auth.mode, auth.sessionDays, auth.oidc.*). Sign-in has one source so that no variable appears twice in the pod's env (server-side apply rejects a duplicate) and the pod never runs sign-in settings the chart did not check." $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $mode "oidc" -}}
+{{- $oidc := $auth.oidc -}}
+{{- if not (trim (toString (default "" $oidc.issuerUrl))) -}}
+{{- fail "auth.mode is \"oidc\" but auth.oidc.issuerUrl is blank — set it to your provider's issuer, e.g. https://id.example.com (the address whose /.well-known/openid-configuration describes it). The core refuses to start without one, so the chart refuses to render it." -}}
+{{- end -}}
+{{- $clientId := trim (toString (default "" $oidc.clientId)) -}}
+{{- $oidcSecret := trim (toString (default "" $oidc.existingSecret)) -}}
+{{- if not (or $clientId $oidcSecret .Values.secrets.existingSecret) -}}
+{{- fail "auth.mode is \"oidc\" but nothing supplies the client id — set auth.oidc.clientId (an identifier, not a secret), or auth.oidc.existingSecret to a Secret carrying OIDC_CLIENT_ID (and OIDC_CLIENT_SECRET for a confidential client). The chart-generated Secret epicurus-secrets holds no OIDC keys, so it cannot be the source." -}}
+{{- end -}}
+{{- $emails := include "epicurus.csv" $oidc.allowedEmails -}}
+{{- $groups := include "epicurus.csv" $oidc.allowedGroups -}}
+{{- $allowAll := eq (include "epicurus.flag" $oidc.allowAllUsers) "true" -}}
+{{- if not (or $emails $groups $allowAll) -}}
+{{- fail "auth.mode is \"oidc\" but no admission rule is set — set auth.oidc.allowedEmails (who may sign in), auth.oidc.allowedGroups (matched against the provider's groups claim; add `groups` to auth.oidc.scopes), or auth.oidc.allowAllUsers=true. An empty allowlist is refused, never read as \"everyone\": pointed at a public provider such as Google, that would admit anyone with an account there. Use allowAllUsers only when the provider itself limits who can use this client (e.g. Pocket ID's Allowed User Groups)." -}}
+{{- end -}}
+{{- if lt (int64 (default 0 $auth.sessionDays)) 1 -}}
+{{- fail (printf "auth.sessionDays is %v — set it to a whole number of days, 1 or more (default 30). It is how long an idle browser stays signed in." $auth.sessionDays) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The core's sign-in env. `AUTH_MODE` is always rendered — in the default `none` mode it is the
+whole footprint of the feature, one entry. In `oidc` mode, every key the core reads: the client
+id in the clear when `auth.oidc.clientId` is set (it is an identifier, not a secret), else from
+the Secret; the client secret only ever from a Secret, and `optional`, because a public client
+(PKCE only) has none. Lists are comma-joined and switches normalised to "true"/"false", so the
+pod receives exactly what `epicurus.assertSignIn` checked.
+*/}}
+{{- define "epicurus.signInEnv" -}}
+{{- $auth := .Values.auth -}}
+- name: AUTH_MODE
+  value: {{ $auth.mode | quote }}
+{{- if eq (toString $auth.mode) "oidc" }}
+{{- $oidc := $auth.oidc }}
+{{- $clientId := trim (toString (default "" $oidc.clientId)) }}
+{{- $secret := include "epicurus.oidcSecretName" . }}
+- name: AUTH_SESSION_DAYS
+  value: {{ int64 $auth.sessionDays | toString | quote }}
+- name: OIDC_ISSUER_URL
+  value: {{ trim (toString (default "" $oidc.issuerUrl)) | quote }}
+- name: OIDC_PROVIDER_NAME
+  value: {{ trim (toString (default "" $oidc.providerName)) | quote }}
+- name: OIDC_CLIENT_ID
+{{- if $clientId }}
+  value: {{ $clientId | quote }}
+{{- else }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: OIDC_CLIENT_ID
+{{- end }}
+- name: OIDC_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: OIDC_CLIENT_SECRET
+      optional: true
+- name: OIDC_SCOPES
+  value: {{ default "openid email profile" (trim (toString (default "" $oidc.scopes))) | quote }}
+- name: OIDC_ALLOWED_EMAILS
+  value: {{ include "epicurus.csv" $oidc.allowedEmails | quote }}
+- name: OIDC_ALLOWED_GROUPS
+  value: {{ include "epicurus.csv" $oidc.allowedGroups | quote }}
+- name: OIDC_ALLOW_ALL_USERS
+  value: {{ include "epicurus.flag" $oidc.allowAllUsers | quote }}
+- name: OIDC_AUTO_REDIRECT
+  value: {{ include "epicurus.flag" $oidc.autoRedirect | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* Scrape annotations for the pods that actually serve /metrics. */}}
 {{- define "epicurus.metricsAnnotations" -}}
 {{- if .Values.metrics.podAnnotations }}

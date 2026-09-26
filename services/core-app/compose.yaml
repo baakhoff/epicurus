@@ -60,6 +60,24 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:-http://localhost:8084}
       OAUTH_STATE_SECRET: ${OAUTH_STATE_SECRET:-change-this-before-use}
+      # Sign-in with an OpenID Connect provider (#969) — off unless AUTH_MODE=oidc, and then
+      # the core refuses to start without an issuer, a client id and an admission rule. The
+      # callback is derived from OAUTH_REDIRECT_BASE_URL above (<base>/platform/v1/auth/callback),
+      # so that must be the one public https address you sign in at. The switches and the day
+      # count carry their real defaults rather than blanks — a blank would fail the core's
+      # parsing. Walkthrough: docs/infrastructure/sign-in.md.
+      AUTH_MODE: ${AUTH_MODE:-none}
+      AUTH_SESSION_DAYS: ${AUTH_SESSION_DAYS:-30}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      # A secret — keep it in .env (gitignored), never in a committed file. Blank = a public client.
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+      OIDC_ALLOWED_EMAILS: ${OIDC_ALLOWED_EMAILS:-}
+      OIDC_ALLOWED_GROUPS: ${OIDC_ALLOWED_GROUPS:-}
+      OIDC_ALLOW_ALL_USERS: ${OIDC_ALLOW_ALL_USERS:-false}
+      OIDC_AUTO_REDIRECT: ${OIDC_AUTO_REDIRECT:-false}
       # Scopes confirmed module removal (#127) to this stack's containers only, so a
       # co-located stack (e.g. the CI smoke run beside a dev stack) is never touched.
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-epicurus}

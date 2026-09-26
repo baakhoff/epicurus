@@ -66,7 +66,8 @@ commonAnnotations: {}
 # An existing Secret must carry all of: POSTGRES_PASSWORD, NATS_CORE_PASSWORD,
 # NATS_MODULE_PASSWORD, NATS_SYS_PASSWORD, OAUTH_STATE_SECRET, MINIO_ROOT_USER,
 # MINIO_ROOT_PASSWORD. Keep passwords URL-safe: POSTGRES_PASSWORD is interpolated
-# into a DSN.
+# into a DSN. With sign-in on and no `auth.oidc.existingSecret`, it may also carry
+# OIDC_CLIENT_SECRET and OIDC_CLIENT_ID (see `auth` below).
 secrets:
   existingSecret: ""
   # Explicit values (blank = generate). Prefer `existingSecret` over these —
@@ -78,6 +79,65 @@ secrets:
   oauthStateSecret: ""
   minioRootUser: ""
   minioRootPassword: ""
+
+# ── Sign-in ──────────────────────────────────────────────────────────────────
+# Built-in sign-in with an OpenID Connect provider — Pocket ID, Authentik,
+# Keycloak, Authelia, Kanidm, Google (#969). OFF by default: `none` is the
+# behaviour from before sign-in existed, and in that mode this whole block
+# renders exactly one env var (AUTH_MODE=none). The walkthrough, a Pocket ID
+# example and the troubleshooting table are in docs/infrastructure/sign-in.md.
+#
+# What it guards: every request that reaches the core *through a proxy* — the web
+# shell's nginx behind the Ingress. The modules' calls to the core on the cluster
+# network are untouched by design, so if other workloads share this cluster, turn
+# on `networkPolicy` too: without it any pod can call the core directly.
+#
+# The callback URL is derived, never configured:
+# <core.oauth.redirectBaseUrl, else the Ingress host>/platform/v1/auth/callback.
+# NOTES prints it after an install — register exactly that with the provider. It
+# is one address, so sign in at that address only; make it https
+# (`ingress.tls.enabled`) so the session cookie is `Secure`.
+#
+# The chart refuses to render `oidc` without an issuer, a client id and an
+# admission rule — the same three things the core refuses to start without.
+# Configure sign-in here only: putting any of its env names in `core.extraEnv`
+# fails the render rather than emitting the variable twice.
+auth:
+  # none | oidc
+  mode: none
+  # AUTH_SESSION_DAYS. Sliding: every visit pushes the expiry out again, so this
+  # is how long an *idle* browser or phone stays signed in.
+  sessionDays: 30
+  oidc:
+    # The provider's issuer; discovery is <issuerUrl>/.well-known/openid-configuration.
+    # e.g. https://id.example.com for Pocket ID. Fetched lazily, so a provider that
+    # is down never blocks the core's start-up — only sign-in itself.
+    issuerUrl: ""
+    # The name on the button: "Sign in with <providerName>".
+    providerName: ""
+    # The client id, in the clear — it is an identifier, not a secret. Blank =
+    # read OIDC_CLIENT_ID from `existingSecret` (else the shared Secret).
+    clientId: ""
+    # A Secret you manage holding OIDC_CLIENT_SECRET, and optionally OIDC_CLIENT_ID.
+    # Blank = the shared Secret (`secrets.existingSecret`); the chart-generated
+    # `epicurus-secrets` holds no OIDC keys. The secret key is optional — a public
+    # client (PKCE only) has none. Never put the client secret in a values file.
+    existingSecret: ""
+    # Add `groups` when you admit by group — Pocket ID sends the claim only then.
+    scopes: "openid email profile"
+    # Who may sign in. At least one rule is required: an empty allowlist is
+    # refused, never read as "everyone" — pointed at a public provider (Google)
+    # that would admit anyone with an account there. Emails match
+    # case-insensitively; groups match the `groups` claim. A list, or one
+    # comma-separated string.
+    allowedEmails: []
+    allowedGroups: []
+    # Admit anyone the provider authenticates for this client. Only when the
+    # provider itself limits who can use the client (Pocket ID: Allowed User Groups).
+    allowAllUsers: false
+    # Send a signed-out visitor straight to the provider instead of the sign-in
+    # screen.
+    autoRedirect: false
 
 # ── core-app — the runtime ───────────────────────────────────────────────────
 core:
@@ -153,16 +213,21 @@ core:
     bootstrapModels: auto
   memoryEmbedModel: nomic-embed-text
   oauth:
-    # Public base URL a provider redirects back to. Blank derives it from
-    # `ingress.host` when the ingress is enabled, else falls back to the code
-    # default — set it explicitly for any real OAuth use.
+    # Public base URL a provider redirects back to — for connected accounts and,
+    # with `auth.mode: oidc`, for sign-in. Blank derives it from `ingress.host`
+    # when the ingress is enabled, else falls back to the code default — set it
+    # explicitly for any real OAuth use.
     redirectBaseUrl: ""
   podAnnotations: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}
   # Free-form extra env, e.g. MAINTENANCE_SCHEDULE_ENABLED. Applied last, so it
-  # overrides anything the chart set.
+  # overrides anything the chart set — except the sign-in variables `auth`
+  # renders, which fail the render here: AUTH_MODE, AUTH_SESSION_DAYS,
+  # OIDC_ISSUER_URL, OIDC_PROVIDER_NAME, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET,
+  # OIDC_SCOPES, OIDC_ALLOWED_EMAILS, OIDC_ALLOWED_GROUPS, OIDC_ALLOW_ALL_USERS,
+  # OIDC_AUTO_REDIRECT.
   extraEnv: {}
 
 # ── web — the UI shell ───────────────────────────────────────────────────────

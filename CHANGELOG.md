@@ -16,9 +16,10 @@ images to GHCR.
   followed Docker Hub (#934) and started refusing anonymous pulls of `quay.io/minio/minio` and
   `quay.io/minio/mc` — a `401` on the whole repository, not one tag — so every fresh
   `compose up`, the `quality` gate's testcontainers suites, `runtime-smoke`, and `k8s-smoke`
-  all failed the same way. `docker.io/pgsty/minio` and `docker.io/pgsty/mc` are a maintained
-  community build of the same upstream that still serves anonymously with pinned, multi-arch
-  (amd64/arm64) release tags; the Compose fragment, the chart's `minio.image` / `minio.initImage`
+  all failed the same way. `docker.io/pgsty/minio` and `docker.io/pgsty/mc` are a
+  **community-maintained fork** of the AGPL MinIO server and client (published by Pigsty — not
+  MinIO Inc. and not a Docker Hub verified publisher) that still serves anonymously with pinned,
+  multi-arch (amd64/arm64) release tags; the Compose fragment, the chart's `minio.image` / `minio.initImage`
   defaults, the testcontainers pins, and the docs now point there
   (`RELEASE.2026-08-04T00-00-00Z` / `RELEASE.2026-09-16T00-00-00Z`). Entrypoints, `Cmd`, and
   environment surface are unchanged from upstream, so nothing else moves. An operator who

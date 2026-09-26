@@ -16,6 +16,11 @@ services and the edge (a gateway and private ingress) are layered on separately.
 | minio | `docker.io/pgsty/minio:RELEASE.*` | 9000 (S3 API), 9001 (console) | S3-compatible object store for app-managed objects |
 | minio-init | `docker.io/pgsty/mc:RELEASE.*` | — | One-shot: seeds the default `epicurus` bucket on first run |
 
+The MinIO images come from `docker.io/pgsty/*`, a **community-maintained fork** of the AGPL
+MinIO server and client (not MinIO Inc.): upstream stopped serving anonymous pulls on Docker
+Hub (#934) and then on Quay (#973). Same entrypoints and env surface as upstream; operators who
+prefer another source override the image.
+
 ## Bring up
 
 ```bash

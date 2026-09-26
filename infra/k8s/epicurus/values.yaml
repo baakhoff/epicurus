@@ -464,6 +464,8 @@ openbao:
 # point at a real S3 with `external.url` and keep the credentials in the Secret.
 minio:
   enabled: true
+  # Community-maintained fork of the AGPL MinIO server/client (pgsty, not MinIO
+  # Inc.): upstream no longer serves anonymous pulls on Docker Hub or Quay (#973).
   image:
     repository: docker.io/pgsty/minio
     tag: RELEASE.2026-08-04T00-00-00Z

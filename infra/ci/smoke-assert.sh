@@ -23,7 +23,14 @@
 #   * an event-triggered automation runs, and its safety gates hold             (#666)
 #   * a secret set through core survives a vault restart                        (#93)
 #
-# SOURCED, never executed — it defines two functions and runs nothing at import.
+# and, in a second phase each gate runs last (`smoke_assert_sign_in`, #969):
+#
+#   * with AUTH_MODE=oidc and an unreachable issuer the core still starts (discovery is lazy)
+#   * the web door answers the sign-in session as signed out, 401s the platform API, and
+#     sends a sign-in attempt back with auth_error=provider_unreachable
+#   * the core's own port still answers directly, and module <-> core traffic still works
+#
+# SOURCED, never executed — it defines three functions and runs nothing at import.
 # The sourcing gate must provide, before calling `smoke_assert`:
 #
 #   http <curl-args…>   run curl against the stack's internal network, print the body
@@ -33,6 +40,8 @@
 #   restart_openbao     restart the vault, block until it is unsealed and healthy
 #   restart_core_app    restart core-app, block until it is healthy again
 #   settle_llm_runtime  block until the Ollama workload is back after a restart
+#   enable_sign_in      restart core-app with AUTH_MODE=oidc, an unreachable issuer, a
+#                       dummy client id and OIDC_ALLOW_ALL_USERS=true; block until healthy
 #   EXPECT_MODULES      space-separated module names this deployment should have
 #                       (`smoke_modules` below derives the canonical list)
 #
@@ -305,4 +314,64 @@ smoke_assert() {
   printf '%s' "$prov" | grep -oE '"alias":"claude"[^}]*' | grep -q '"configured":true' \
     || die "provider key did not survive an OpenBao + core-app restart"
   ok "provider key survived a vault + core restart (persistent secrets)"
+}
+
+# The sign-in phase (#969). Runs LAST in each gate: it restarts core-app with sign-in on,
+# and nothing after it may assume the web door is open. The runtime-specific half — *how*
+# core-app is restarted with the new environment — is the gate's `enable_sign_in`: an
+# override file merged onto the Compose service, `kubectl set env` on the Deployment.
+smoke_assert_sign_in() {
+  log "Asserting sign-in: AUTH_MODE=oidc behind the web door (#969)"
+  enable_sign_in
+  ok "core-app restarted with AUTH_MODE=oidc and an unreachable issuer (discovery is lazy)"
+
+  # (1) The sign-in state through the web door. Polled: nginx re-resolves the core's address
+  # on its resolver TTL (#891), so the first request after a recreate can still miss.
+  i=0
+  sess=""
+  while [ "$i" -lt 30 ]; do
+    sess="$(http "http://web:8080/platform/v1/auth/session" || true)"
+    printf '%s' "$sess" | grep -q '"mode":"oidc"' && break
+    i=$((i + 1))
+    sleep 2
+  done
+  printf '%s' "$sess" | grep -q '"mode":"oidc"' \
+    || die "the web door does not report AUTH_MODE=oidc (was core-app restarted with it?): $sess"
+  printf '%s' "$sess" | grep -q '"signed_in":false' \
+    || die "a cookie-less browser is reported as signed in: $sess"
+  ok "GET /platform/v1/auth/session through the web door: oidc, signed out"
+
+  # (2) The platform API through the web door needs a session now.
+  code="$(http -o /dev/null -w '%{http_code}' "http://web:8080/platform/v1/modules" || true)"
+  [ "$code" = "401" ] || die "the web door answered $code for the platform API with no session (expected 401)"
+  body="$(http "http://web:8080/platform/v1/modules" || true)"
+  printf '%s' "$body" | grep -q '"code":"unauthenticated"' \
+    || die "the 401 is not the documented JSON: $body"
+  ok "the platform API through the web door is 401 unauthenticated"
+
+  # (3) A sign-in attempt against a provider that is down ends on the shell, never on a JSON
+  # page: 302 to /?auth_error=provider_unreachable.
+  hdrs="$(http -o /dev/null -D - "http://web:8080/platform/v1/auth/login?next=/chat" || true)"
+  printf '%s' "$hdrs" | grep -qi '^location: /?auth_error=provider_unreachable' \
+    || die "a sign-in with the provider down did not redirect with provider_unreachable: $hdrs"
+  ok "a sign-in with the provider unreachable redirects to /?auth_error=provider_unreachable"
+
+  # (4) Straight to the core — no proxy headers — the same route still answers: modules,
+  # probes and Prometheus are inside the boundary and untouched by it.
+  http -f "http://core-app:8080/platform/v1/modules" >/dev/null \
+    || die "core-app refused a direct platform-API request with sign-in on (modules would break)"
+  ok "the platform API directly on core-app still answers 200"
+
+  # (5) Module <-> core, both directions: storage_list goes core -> storage over MCP, and the
+  # storage module lists the file space by calling core's /platform/v1/files/list itself.
+  # A file written directly beforehand must come back through that round trip.
+  SIGNIN_FILE="smoke-sign-in-$$.txt"
+  http -f -X PUT "http://core-app:8080/platform/v1/files/write?path=$SIGNIN_FILE" \
+    -H 'Content-Type: application/json' -d '{"content":"sign-in phase"}' >/dev/null \
+    || die "writing into the file space directly failed with sign-in on"
+  sl="$(http -X POST "http://core-app:8080/platform/v1/modules/storage/tools/storage_list" \
+    -H 'Content-Type: application/json' -d '{"arguments":{"path":""}}' || true)"
+  printf '%s' "$sl" | grep -q "$SIGNIN_FILE" \
+    || die "storage_list through core did not see the file (module -> core platform API refused?): $sl"
+  ok "module <-> core traffic still works: storage_list round-trips through the platform API"
 }

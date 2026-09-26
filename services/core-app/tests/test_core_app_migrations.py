@@ -1,6 +1,6 @@
 """core-app's migration environment, exercised end to end on SQLite.
 
-The core owns 40 tables across 28 ``DeclarativeBase`` objects — by far the biggest schema in the
+The core owns 42 tables across 29 ``DeclarativeBase`` objects — by far the biggest schema in the
 repository — and as of #927 every one of them comes from the revisions in
 ``epicurus_core_app.migrations`` rather than from 34 ``create_all`` + additive-reconcile calls in
 the lifespan (#834, ADR-0138). Five things are worth proving here:
@@ -14,7 +14,7 @@ the lifespan (#834, ADR-0138). Five things are worth proving here:
 * a database built **before** core-app adopted Alembic is adopted correctly — the baseline
   reconciles its existing tables, repairs the columns the additive reconcile was responsible
   for, adds the indexes it never could, and keeps every row;
-* the three post-baseline revisions do what they claim on the database state they were written
+* the post-baseline revisions do what they claim on the database state they were written
   for: 0002's doubled-quote defaults, 0003's and 0004's reconciled ``NULL``s;
 * running it twice is a no-op, and doing so off Postgres neither takes nor breaks on the
   advisory lock that serialises two replicas.
@@ -45,7 +45,7 @@ from epicurus_core_app.automations.store import AutomationStore
 from epicurus_core_app.migrations import METADATAS, SCRIPT_LOCATION, SERVICE
 from epicurus_core_app.module_prefs import ModulePrefsStore
 
-HEAD = "0006"
+HEAD = "0007"
 PACKAGE_ROOT = Path(epicurus_core_app.__file__).resolve().parent
 
 
@@ -192,7 +192,7 @@ def test_every_mapped_table_in_the_service_is_covered_by_metadatas() -> None:
         "a mapped table is missing from METADATAS (or its module is never imported by "
         f"migrations/__init__.py): {sorted(declared - covered)}"
     )
-    assert len(covered) == 40, "the core owns 40 tables; update this count deliberately"
+    assert len(covered) == 42, "the core owns 42 tables; update this count deliberately"
 
 
 # ── The revisions and the models agree ────────────────────────────────────────
@@ -218,7 +218,7 @@ async def test_upgrade_head_from_empty_matches_the_models(
         assert migrated == await _shape(direct)
     finally:
         await direct.dispose()
-    assert len(migrated) == 40
+    assert len(migrated) == 42
 
 
 async def test_a_store_works_against_a_migrated_schema(engine: AsyncEngine) -> None:
@@ -454,3 +454,93 @@ def test_the_advisory_lock_key_is_stable_for_this_service() -> None:
     assert advisory_lock_key(SERVICE) != advisory_lock_key("storage")
     # Hyphen folded to an underscore — a hyphen would need quoting in every DDL statement.
     assert version_table_name(SERVICE) == "alembic_version_core_app"
+
+
+# ── Revision 0007: the sign-in tables (#969) ──────────────────────────────────
+
+
+async def test_revision_0007_adds_the_sign_in_tables_to_a_managed_database(
+    engine: AsyncEngine,
+) -> None:
+    """A deployment sitting at 0006 — every running one before #969 — gains both tables.
+
+    The first post-baseline revision to create a *table* rather than a column: a plain
+    ``op.create_table``, which is only right because nothing before 0007 could have made one.
+    """
+
+    def upgrade_to(sync_conn: sa.Connection, target: str) -> None:
+        from alembic import command
+
+        command.upgrade(
+            alembic_config(
+                script_location=SCRIPT_LOCATION,
+                metadatas=METADATAS,
+                version_table=version_table_name(SERVICE),
+                connection=sync_conn,
+            ),
+            target,
+        )
+
+    async with engine.begin() as conn:
+        await conn.run_sync(upgrade_to, "0006")
+    assert await _version(engine) == "0006"
+    assert not {"auth_sessions", "auth_login_states"} & set(await _shape(engine))
+
+    assert await _migrate(engine) == "managed"
+    shape = await _shape(engine)
+    assert set(shape["auth_sessions"]) == {
+        "id",
+        "tenant",
+        "issuer",
+        "subject",
+        "email",
+        "name",
+        "groups",
+        "created_at",
+        "last_seen_at",
+        "expires_at",
+    }
+    assert set(shape["auth_login_states"]) == {
+        "state",
+        "tenant",
+        "nonce",
+        "code_verifier",
+        "next_path",
+        "created_at",
+        "expires_at",
+    }
+
+    def indexes(sync_conn: sa.Connection, table: str) -> set[str]:
+        return {ix["name"] or "" for ix in sa.inspect(sync_conn).get_indexes(table)}
+
+    async with engine.connect() as conn:
+        assert await conn.run_sync(indexes, "auth_sessions") == {
+            "ix_auth_sessions_tenant",
+            "ix_auth_sessions_expires_at",
+        }
+        assert await conn.run_sync(indexes, "auth_login_states") == {
+            "ix_auth_login_states_tenant",
+            "ix_auth_login_states_expires_at",
+        }
+
+
+async def test_revision_0007_downgrades_cleanly(engine: AsyncEngine) -> None:
+    await _migrate(engine)
+
+    def downgrade(sync_conn: sa.Connection) -> None:
+        from alembic import command
+
+        command.downgrade(
+            alembic_config(
+                script_location=SCRIPT_LOCATION,
+                metadatas=METADATAS,
+                version_table=version_table_name(SERVICE),
+                connection=sync_conn,
+            ),
+            "0006",
+        )
+
+    async with engine.begin() as conn:
+        await conn.run_sync(downgrade)
+    assert await _version(engine) == "0006"
+    assert not {"auth_sessions", "auth_login_states"} & set(await _shape(engine))

@@ -23,6 +23,111 @@ plus the shared ops endpoints. All of it is internal/local-only by default.
 | `GET /metrics` | Prometheus metrics. |
 | `GET /platform/v1/info` | Discovery: contract version, `core_app_version` + `library_version` (and the older `core_version`, which is the *library*'s and kept for compatibility — #893), the `release_track` this deployment pulled, and the tenant. |
 
+### Sign-in (#969)
+
+With `AUTH_MODE=oidc` the core is an **OpenID Connect relying party** — authorization code flow
+with PKCE (S256, always), a `state` bound to an HttpOnly transaction cookie, a `nonce` bound to the
+ID token — and the platform's **trust boundary**. `AUTH_MODE=none` (the default) is the platform
+exactly as it was before: no sign-in, the perimeter is the operator's (ADR-0008), and every piece
+below is inert. The code is one package, `epicurus_core_app/auth/`.
+
+**The four endpoints** (every response `Cache-Control: no-store`; shapes in the
+[platform-API reference](../reference/platform-api.md#sign-in-969)):
+
+| Method · Path | Purpose |
+| --- | --- |
+| `GET /platform/v1/auth/session` | Always 200: `{mode, signed_in, provider_name, auto_redirect, user: {subject, email, name, groups} \| null, expires_at}`. What the web shell asks first. |
+| `GET /platform/v1/auth/login?next=<path>` | 302 to the provider's authorization endpoint; sets the transaction cookie. `next` must be a same-origin path (anything else — `//host`, `/\host`, a scheme, a path under `/platform/v1/auth/` — becomes `/`). |
+| `GET /platform/v1/auth/callback` | The provider's redirect back. Success: a session, the session cookie, 302 → `next`. **Any** failure: 302 → `/?auth_error=<code>` — a top-level navigation never ends on a JSON page. |
+| `POST /platform/v1/auth/logout` | Deletes the session, clears the cookie, 200 `{"signed_out": true}` — always, signed in or not, in either mode. |
+
+`login` and `callback` answer **404** `{"detail": …, "code": "auth_disabled"}` with `AUTH_MODE=none`.
+
+**What the callback checks, in order.** The transaction cookie must equal the `state` parameter
+and name a stored login row — which is **consumed** (deleted as it is read, race-safe), so a
+replayed callback finds nothing — and the row must be under ten minutes old. A provider `error`
+is passed on (`access_denied`, anything else `provider_error`). If the callback carries an `iss`
+parameter (RFC 9207) it must be the issuer, and a provider whose discovery promises one must send
+it. Then the code is exchanged (`client_secret_basic` for a confidential client unless the
+provider advertises only `client_secret_post`; a public client sends just its `client_id`, PKCE
+binding the code), the **ID token** is verified against the provider's JWKS — algorithm pinned to
+RS256/384/512, PS256, ES256/384 or EdDSA *and* advertised by discovery (never `none`, never HMAC),
+`iss` = the discovery issuer, `aud` contains the client id, `azp` = the client id when present and
+required when there are several audiences, `exp`/`iat`/`nbf` with 60 s leeway, `nonce` = this
+login's — and **userinfo** (when the provider has an endpoint) is merged in: its profile claims
+win (`groups` often lives only there), the ID token's protocol claims (`sub`, `iss`, …) always
+win, a userinfo answer for a different `sub` is ignored, and a failing userinfo endpoint costs a
+WARNING, never the sign-in.
+
+**Admission** — any one of: `OIDC_ALLOW_ALL_USERS=true`; the lowercased `email` is on
+`OIDC_ALLOWED_EMAILS` and `email_verified` is not explicitly `false`; the `groups` claim (a list,
+or a single string) shares a group with `OIDC_ALLOWED_GROUPS` (exact match). An empty allowlist
+never means "everyone".
+
+**`auth_error` codes** — a closed set the web shell renders as sentences
+(`epicurus_core_app.auth.errors.AUTH_ERROR_CODES`):
+
+| Code | Meaning |
+| --- | --- |
+| `provider_unreachable` | Discovery, the JWKS or the token endpoint could not be reached (network failure or a 5xx from discovery/JWKS). |
+| `provider_error` | The provider returned an error other than `access_denied`, or a callback with neither a code nor an error. |
+| `access_denied` | The provider says the user declined or was refused (`error=access_denied`). |
+| `state_mismatch` | The login transaction is missing, unknown, expired, replayed, or another browser's. |
+| `token_exchange_failed` | The token endpoint refused the code or answered without an ID token. |
+| `invalid_token` | The ID token (or the callback's `iss`) failed a check above. |
+| `not_allowed` | Authenticated, but no admission rule admits this identity. |
+| `groups_claim_missing` | A groups allowlist is set, no `groups` claim arrived at all, and the email did not admit — almost always a missing `groups` scope. |
+| `email_unverified` | The email is on the allowlist, but the provider says it is not verified. |
+| `misconfigured` | The provider's metadata does not fit this client (issuer mismatch, no code flow, no S256, no acceptable signing algorithm) — or the core itself could not run the flow (its database refused the login row). |
+
+**Sessions.** The cookie `epicurus_session` holds an opaque 256-bit token
+(`secrets.token_urlsafe(32)`); the database holds only its SHA-256. HttpOnly, `SameSite=Lax`,
+`Path=/`, `Secure` exactly when `OAUTH_REDIRECT_BASE_URL` is https, `Max-Age` =
+`AUTH_SESSION_DAYS` × 86400. The expiry **slides**: a session in use is renewed at most once an
+hour (one UPDATE, the cookie re-issued on that response). Validated sessions are cached in
+process for up to 60 s — logout drops the entry, and an expired row never authenticates. The
+transaction cookie `epicurus_auth_tx` is HttpOnly, `SameSite=Lax`, `Path=/platform/v1/auth`,
+`Max-Age=600`, and is cleared by every callback. Expired rows are purged on sign-in and on each
+new login; in-flight logins are capped at 1000 per tenant (the oldest go first), so a flood of
+`/login` calls costs the flooder, not the table.
+
+**Where it is enforced — the trust boundary.** A pure-ASGI middleware
+(`auth/middleware.py`) runs before routing. A request is **proxied** if it carries any of
+`X-Forwarded-For`, `Forwarded`, `X-Forwarded-Host`, `X-Forwarded-Proto` or `X-Real-IP` — the web
+shell's nginx sets `X-Forwarded-For` on everything it proxies to `/platform/`, and so do
+ingress-nginx and Traefik. A proxied request needs a valid session, except `/health` and
+`/platform/v1/auth/…`; without one it gets **401** `{"detail": "Sign in to continue.",
+"code": "unauthenticated"}`. Proxied **unsafe** methods (POST/PUT/PATCH/DELETE, logout included)
+also pass a **cross-site check**: a `Sec-Fetch-Site` other than `same-origin`/`none` is refused,
+and a browser that sends none must send no `Origin` or the public URL's origin — else **403**
+`{"detail": "Cross-site request refused.", "code": "cross_site"}` (`SameSite=Lax` does not stop
+a sibling subdomain of the same site). A request with **no** proxy header arrived directly on the
+internal network — a module calling the platform API (constraint #7), a kubelet probe,
+Prometheus — and passes untouched, which is why no module changed. The signed-in identity is on
+`request.state.auth` (`AuthIdentity`) for handlers. Pure ASGI because it must never buffer an SSE
+stream; with `AUTH_MODE=none` it hands every request straight through, untouched.
+
+**What the boundary does not cover.** It closes the *web door*. Anything that reaches core-app's
+port without a proxy header is inside the perimeter: core-app's published host port (bound to
+`127.0.0.1` by default), a client inside the cluster or the Docker network, and a reverse proxy
+the operator puts in front of core-app directly *if* it strips forwarding headers. The Compose
+gateway's `<module>.localhost` routes reach the **modules**, not the core, and are not
+sign-in-protected at all. Keep those ports unpublished beyond loopback.
+
+**Startup.** With `AUTH_MODE=oidc` the core **refuses to start** unless it has an issuer
+(`OIDC_ISSUER_URL`, an absolute http(s) URL), a client id, and an admission rule, and
+`OAUTH_REDIRECT_BASE_URL` is an absolute http(s) URL — one log line names everything missing. It
+**warns** (and starts) when the public URL or the issuer is plain http on a non-loopback host.
+The provider is never contacted at startup — discovery is lazy, cached for an hour, re-fetched
+after a failure — so a provider that is down never blocks boot. The startup log prints the
+redirect URI to register with the provider: `<OAUTH_REDIRECT_BASE_URL>/platform/v1/auth/callback`.
+
+**Observability.** INFO `signed in` (`subject`, `email`) and `signed out`; WARNING `sign-in
+refused` with `reason` (the code), `detail`, and the subject/email when the provider got that far.
+Nothing logs a code, token, cookie, nonce, verifier or secret. The counter
+`epicurus_core_auth_sign_ins_total{tenant, outcome}` counts every finished attempt — `outcome` is
+`ok` or the `auth_error` code, a closed set.
+
 ### Inference (module-facing — used by the `PlatformClient`)
 
 | Method · Path | Purpose |
@@ -1962,6 +2067,14 @@ decision that already landed. Payload shapes and dedup keys are in the
 | `MAINTENANCE_SCHEDULE_ENABLED` | `false` | Run the maintenance orchestrator's **nightly** batch (ADR-0060). Off by default — the manual trigger is always available; this opts into a coordinated nightly light batch. |
 | `MAINTENANCE_HOUR` | `4` | Local hour of the scheduled nightly maintenance batch, an hour after `MEMORY_EXTRACTION_HOUR`. |
 | `SCHEDULED_TURNS_POLL_INTERVAL_S` | `60` | How often the scheduled-turns poll loop checks for a due row (ADR-0092). |
+| `AUTH_MODE` | `none` | `none` = no sign-in (today's behaviour); `oidc` = sign in with an OpenID Connect provider — see [Sign-in](#sign-in-969). An unknown value fails startup rather than reading as `none`. |
+| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | — | The provider's issuer (discovery at `<issuer>/.well-known/openid-configuration`), the client id, and its secret (blank = a public client, PKCE only). Issuer and client id are required with `oidc`. |
+| `OIDC_SCOPES` | `openid email profile` | Space- or comma-separated; `openid` is always requested. Add `groups` for group rules. |
+| `OIDC_PROVIDER_NAME` | — | The sign-in button's label ("Sign in with …"). |
+| `OIDC_ALLOWED_EMAILS` / `OIDC_ALLOWED_GROUPS` / `OIDC_ALLOW_ALL_USERS` | — / — / `false` | The admission rule — one is required with `oidc`; an empty allowlist never means everyone. |
+| `OIDC_AUTO_REDIRECT` | `false` | A signed-out visitor goes straight to the provider. |
+| `AUTH_SESSION_DAYS` | `30` | Sliding session lifetime (renewed at most hourly while in use). |
+| `OAUTH_REDIRECT_BASE_URL` | `http://localhost:8084` | The public URL. Both OAuth flows derive their callback from it — sign-in's is `<base>/platform/v1/auth/callback` — and its scheme decides whether cookies are `Secure`. |
 | `CONTAINER_RUNTIME` | `auto` | Which container runtime the privileged path uses (#891): `auto` / `docker` / `kubernetes` / `none` — see [Container runtime](#container-runtime-891). |
 | `KUBERNETES_NAMESPACE` | — | Namespace the `kubernetes` runtime addresses; blank = the pod's ServiceAccount `namespace` file. Ignored by every other runtime. |
 | `OTEL_TRACES_ENABLED` | `false` | Emit OpenTelemetry traces — the agent loop, platform API, and event bus — to Tempo (#57). See the [tracing reference](../reference/observability.md#tracing-57-adr-0068). |
@@ -2221,6 +2334,15 @@ Provider keys are **not** configured here — they go through the UI into OpenBa
   `MEMORY_EXTRACTION_HOUR` in the operator's timezone), serially, so extraction never competes
   with a live turn for the GPU. Drained rows are deleted; because the queue is durable, a
   restart never loses a pending exchange.
+- **Postgres `auth_sessions`** — one row per signed-in browser (#969): `id` (the **SHA-256** of
+  the cookie's token — never the token), `tenant`, `issuer`, `subject`, `email`, `name`, JSON
+  `groups`, `created_at`, `last_seen_at`, `expires_at` (indexed). Tenant-scoped (the default tenant
+  in v1 — identity-to-tenant mapping arrives with workspaces). Expired rows never authenticate and
+  are purged on the next sign-in. **Not exported** in a tenant archive — an imported tenant signs
+  in again (ADR-0133's `EXCLUSIONS`).
+- **Postgres `auth_login_states`** — one row per sign-in that has gone to the provider and not yet
+  come back: `state` (the key), `tenant`, `nonce`, `code_verifier`, `next_path`, `created_at`,
+  `expires_at` (ten minutes). Consumed by the callback, capped at 1000 per tenant, not exported.
 - **Postgres `portability_jobs`** — one row per tenant export/import (#867): `id` (an opaque
   uuid — it appears in the archive download URL, so never a guessable sequential id),
   `tenant`, `kind` (`export`/`import`), `status`, timestamps, JSON `progress` / `manifest` /
@@ -2251,7 +2373,7 @@ distillation cheap and off the chat model.
 
 ### Schema is migration-managed (#834, ADR-0138)
 
-All **40** tables above come from the revisions in `src/epicurus_core_app/migrations/versions/`,
+All **42** tables above come from the revisions in `src/epicurus_core_app/migrations/versions/`,
 applied once at startup: the lifespan calls `epicurus_core.db.migrations.run_migrations` before
 anything reads a row. Its private version table is `alembic_version_core_app`; every service
 shares one database and keeps its own head revision. Changing a column here means writing a
@@ -2271,7 +2393,7 @@ See **[Schema migrations](../developer/migrations.md)**.
   Helm chart runs core-app as a **singleton** (one replica, an RWO PVC — ADR-0135), so unlike a
   module it cannot scale out; the lock still earns its place because Compose can start a new
   container while the old one is shutting down.
-- **Nothing escapes the migration target.** The core has 28 `DeclarativeBase` objects across its
+- **Nothing escapes the migration target.** The core has 29 `DeclarativeBase` objects across its
   store modules, listed once in `migrations/__init__.py`'s `METADATAS` (two stores — `memory.profile`
   and `memory.extraction_queue` — hang their tables off `memory.store`'s base, so that module
   imports them for their mappers). A base left out would be a store no revision creates and no
@@ -2295,11 +2417,18 @@ See **[Schema migrations](../developer/migrations.md)**.
   divergence to fix) or carries a literal server default (the reconcile added it
   `NOT NULL DEFAULT …`). The portability seam's `NULL` normalisation (#914) stays regardless — an
   archive written before these revisions still carries the `NULL`.
+- **Revision 0007** creates `auth_sessions` and `auth_login_states` (#969) — the first revision
+  after the baseline to add a *table*, with a plain `op.create_table`: every database reaches 0006
+  without them, so a guard would only hide a disagreement. No server defaults, so the gate's drift
+  arm has nothing in them to drop.
 
 ## Dependencies
 
-Ollama (models) · Postgres (memory) · Qdrant (recall) · OpenBao (provider + module
-secrets) · NATS (usage events) · the modules in `MODULE_URLS` (tools, over MCP).
+Ollama (models) · Postgres (memory, sessions) · Qdrant (recall) · OpenBao (provider + module
+secrets) · NATS (usage events) · the modules in `MODULE_URLS` (tools, over MCP) · with
+`AUTH_MODE=oidc`, the **OpenID Connect provider** at `OIDC_ISSUER_URL` (discovery, JWKS, token and
+userinfo endpoints over https, 10 s timeouts, TLS verified — contacted on a sign-in, never at
+startup).
 
 ## Run & extend
 
@@ -2307,9 +2436,17 @@ secrets) · NATS (usage events) · the modules in `MODULE_URLS` (tools, over MCP
 docker compose up -d core-app      # comes up with the full stack
 ```
 
+Sign-in is off unless `AUTH_MODE=oidc` is set with an issuer, a client id and an admission rule;
+register `<OAUTH_REDIRECT_BASE_URL>/platform/v1/auth/callback` as the client's redirect URI at the
+provider (the startup log prints it). Its tests run against a fake provider (an
+`httpx.MockTransport` with locally generated keys): `tests/test_auth_units.py` and
+`tests/test_auth_flow.py`. A new `auth_error` code is a contract change — the web shell renders
+each one — so it is added to `auth/errors.py` *and* the shell together.
+
 Source is one package, `epicurus_core_app`, split by responsibility: `agent/`
 (loop + MCP host + routes), `llm/` (gateway, providers, power, models), `memory/`
-(store + facts + extraction + facade), `modules.py` (registry), `portability/` (tenant export/import — archive,
+(store + facts + extraction + facade), `auth/` (sign-in — settings, OIDC client, admission,
+session store, middleware, routes), `modules.py` (registry), `portability/` (tenant export/import — archive,
 core data sets, jobs, secret inventory, orchestrator, routes), `platform_api.py` (inference
 endpoints), `app.py` (wiring). The agent targets only the gateway's interface and
 modules only through MCP — never a provider SDK.

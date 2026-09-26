@@ -98,6 +98,18 @@ settle_llm_runtime() { # the shared KV-cache assertion rolls it; wait for the ne
   kc rollout status statefulset/ollama --timeout=180s >/dev/null
 }
 
+# The sign-in phase (#969): `kubectl set env` on the Deployment, which updates each variable
+# by name — so it composes with a chart that already renders AUTH_MODE (its `auth:` block)
+# instead of adding a duplicate the way `core.extraEnv` would. Then wait for the rollout.
+enable_sign_in() {
+  kc set env deployment/core-app \
+    AUTH_MODE=oidc \
+    OIDC_ISSUER_URL=http://127.0.0.1:9/smoke-issuer \
+    OIDC_CLIENT_ID=epicurus-smoke \
+    OIDC_ALLOW_ALL_USERS=true >/dev/null
+  kc rollout status deployment/core-app --timeout=300s >/dev/null
+}
+
 dump_diagnostics() {
   log "Diagnostics (k8s smoke failed)"
   kc get pods -o wide 2>&1 || true
@@ -349,5 +361,10 @@ printf '%s' "$rm_body" | grep -q '"containers":1' \
 replicas="$(kc get deployment echo -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
 [ "$replicas" = "0" ] || die "echo's Deployment has $replicas replicas after removal (expected 0)"
 ok "a confirmed removal scaled the module's Deployment to zero through the scoped Role (#891)"
+
+# ── sign-in on, last: the web door closes, module <-> core stays open (#969) ───
+# After the seam's removal of `echo` on purpose: the phase proves module <-> core through the
+# storage module, and nothing after it may assume the web door is open.
+smoke_assert_sign_in
 
 log "ALL K8S SMOKE CHECKS PASSED"

@@ -12,6 +12,31 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Sign-in on Compose and Kubernetes, and how to set it up** (#969) — the core's new OpenID
+  Connect sign-in only helps if every way of running epicurus can turn it on, and if an operator
+  can find out how. On **Compose** the core-app fragment now passes `AUTH_MODE`,
+  `AUTH_SESSION_DAYS` and every `OIDC_*` key through from `.env`, with the core's own defaults —
+  and the switches and the day count arrive as `false` / `30`, never blank, because a blank
+  boolean is a start-up error, not "unset"; `.env.example` gains a commented Pocket ID block.
+  On **Kubernetes** the chart gains an `auth:` block. A release that says nothing about it
+  renders exactly one env entry more than before — `AUTH_MODE=none` — and a test proves it
+  against the chart with the sign-in wiring cut out, on the default, published and hosted-only
+  shapes. `oidc` renders every key, the client id from a value or a Secret and the client
+  secret only from one (`auth.oidc.existingSecret`, else the shared Secret; optional, since a
+  public client has none), and the render **refuses** what the core would refuse to start with:
+  no issuer, no client-id source, or no admission rule — an empty allowlist, a list of blanks
+  and `--set-string …=false` included, because against Google an empty allowlist would admit
+  the internet. A sign-in variable in `core.extraEnv` fails the render too, rather than emit a
+  duplicate env entry that server-side apply (Flux) rejects. `NOTES.txt` prints the callback to
+  register, flags a plain-http one, and warns when a release publishes an Ingress with sign-in
+  off. The new [sign-in guide](docs/infrastructure/sign-in.md) walks through Pocket ID on both
+  platforms (the Secret created without touching shell history, SOPS for GitOps), the admission
+  rules, Authentik / Keycloak / Authelia / Kanidm / Google, the phone PWA, sign-out and a
+  troubleshooting table keyed by every `auth_error` code — and says plainly what sign-in does
+  not cover: the published internal ports and the Compose gateway's `<module>.localhost`
+  routes. So the remote-access recipes now point `tailscale serve` and Caddy at the web shell
+  (`8084` / `web:8080`) instead of the gateway, and present built-in sign-in as the option to
+  use beside a network perimeter. chart 0.2.0→0.3.0 (MINOR).
 - **A hosted-only deployment runs no local runtime** (#962) — running with hosted chat and
   hosted embeddings and *no* Ollama was a documented capability that nothing actually supported.
   The Helm chart refused to render it (`ollama.enabled: false` demanded an external URL), Compose

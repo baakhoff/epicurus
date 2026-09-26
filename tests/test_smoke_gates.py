@@ -48,7 +48,7 @@ _SHARED_ONLY = (
 # Every hook smoke-assert.sh calls back into. Named here *and* required to still be
 # present in the shared file, so dropping one from the contract fails loudly instead
 # of quietly shrinking what this test checks.
-_HOOKS = ("restart_openbao", "restart_core_app", "settle_llm_runtime")
+_HOOKS = ("restart_openbao", "restart_core_app", "settle_llm_runtime", "enable_sign_in")
 
 # The label pair KubernetesController._workloads selects on and _owns re-reads before
 # it patches anything (services/core-app/src/epicurus_core_app/kubernetes_control.py).
@@ -204,3 +204,44 @@ def test_the_compose_gate_starts_the_web_shell() -> None:
         "smoke.sh no longer starts `web`: the shared nginx-resolver assertion (#891) "
         "would fail, or worse, be moved back out of the shared file"
     )
+
+
+def test_both_gates_run_the_sign_in_phase_last() -> None:
+    """#969's "proof on both": each gate turns sign-in on after everything else has passed.
+
+    Last, because the phase closes the web door — an assertion after it that went through
+    ``web`` would fail for a reason that has nothing to do with what it asserts.
+    """
+    shared = SHARED.read_text(encoding="utf-8")
+    assert re.search(r"^smoke_assert_sign_in\(\) \{", shared, re.MULTILINE)
+    for needle in ("/platform/v1/auth/session", "auth_error=provider_unreachable", "storage_list"):
+        assert needle in shared, f"the sign-in phase no longer asserts {needle!r}"
+    for gate in GATES:
+        lines = [line.strip() for line in gate.read_text(encoding="utf-8").splitlines()]
+        calls = [i for i, line in enumerate(lines) if line == "smoke_assert_sign_in"]
+        assert calls, f"{gate.name} never runs the sign-in phase"
+        assert calls[0] > lines.index("smoke_assert"), (
+            f"{gate.name} runs the sign-in phase before the shared last mile"
+        )
+
+
+def test_the_sign_in_phase_turns_oidc_on_without_colliding_with_the_chart_or_compose() -> None:
+    """The mechanisms survive the core-app fragment and the chart both carrying AUTH_MODE.
+
+    Compose merges an override onto core-app's ``environment`` by key; Kubernetes uses
+    ``kubectl set env``, which updates by name — never ``core.extraEnv``, which would render a
+    second ``AUTH_MODE`` entry beside the one the chart's ``auth:`` block emits.
+    """
+    override = _load(CI / "compose.auth.yaml")
+    env = override["services"]["core-app"]["environment"]
+    assert env["AUTH_MODE"] == "oidc"
+    assert env["OIDC_ISSUER_URL"] and env["OIDC_CLIENT_ID"]
+    assert str(env["OIDC_ALLOW_ALL_USERS"]).lower() == "true"
+    assert set(override["services"]) == {"core-app"}, "the override must touch core-app only"
+    assert "-f infra/ci/compose.auth.yaml up -d --no-deps core-app" in (CI / "smoke.sh").read_text(
+        encoding="utf-8"
+    )
+
+    k8s = (CI / "k8s-smoke.sh").read_text(encoding="utf-8")
+    assert "kc set env deployment/core-app" in k8s and "AUTH_MODE=oidc" in k8s
+    assert "extraEnv.AUTH_MODE" not in k8s

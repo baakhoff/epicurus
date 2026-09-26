@@ -117,6 +117,16 @@ settle_llm_runtime() { # the shared KV-cache assertion restarts it; wait for it 
   wait_state ollama
 }
 
+# The sign-in phase (#969): recreate core-app alone with AUTH_MODE=oidc, merged onto its own
+# environment by infra/ci/compose.auth.yaml. An override file rather than an env-file edit so
+# it composes with whatever the core-app fragment passes through (it maps by key), and
+# `--no-deps` so nothing else is touched.
+enable_sign_in() {
+  $DC -f infra/ci/compose.auth.yaml up -d --no-deps core-app >/dev/null 2>&1 \
+    || die "could not recreate core-app with infra/ci/compose.auth.yaml"
+  wait_state core-app
+}
+
 dump_diagnostics() {
   log "Diagnostics (smoke failed)"
   $DC ps || true
@@ -285,5 +295,8 @@ ok "minio-init completed — the default bucket is seeded (#919)"
 
 # ── the runtime-neutral last mile, shared with the Kubernetes gate ─────────────
 smoke_assert
+
+# ── sign-in on, last: the web door closes, module <-> core stays open (#969) ───
+smoke_assert_sign_in
 
 log "ALL SMOKE CHECKS PASSED"

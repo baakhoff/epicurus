@@ -230,8 +230,18 @@ the core, the web shell's `/platform/` proxy, a tenant file-space round trip, a
 KV-cache change that restarts the LLM runtime, an MCP round-trip, the attachment
 picker, the event spine, automations, and a secret surviving a vault restart. Each
 gate supplies the runtime-specific half as shell functions (`http`,
-`restart_openbao`, `restart_core_app`, `settle_llm_runtime`) and calls
+`restart_openbao`, `restart_core_app`, `settle_llm_runtime`, `enable_sign_in`) and calls
 `smoke_assert`.
+
+Each gate then runs a **sign-in phase** last (`smoke_assert_sign_in`, #969): its
+`enable_sign_in` restarts core-app with `AUTH_MODE=oidc`, an unreachable issuer, a dummy client
+id and `OIDC_ALLOW_ALL_USERS=true` — an override file merged onto the service under Compose
+(`infra/ci/compose.auth.yaml`), `kubectl set env` on the Deployment in a cluster — and the shared
+function asserts that the core still starts (discovery is lazy), that the web door reports the
+session as signed out, 401s the platform API and bounces a sign-in attempt to
+`/?auth_error=provider_unreachable`, and that the core's own port and module ↔ core traffic (a
+`storage_list` round trip, which calls back into the core's file API) are untouched. Last,
+because it closes the web door.
 
 **Add a new integration assertion there**, not in a gate script, so both runtimes
 are held to it. `tests/test_smoke_gates.py` fails if a gate inlines one of them

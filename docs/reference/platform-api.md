@@ -59,6 +59,92 @@ deployment must do the same.
 
 ---
 
+## Sign-in (#969)
+
+With `AUTH_MODE=oidc` the core signs a person in through an OpenID Connect provider and guards the
+**web door**; with `AUTH_MODE=none` (the default) nothing below is enforced. Design, checks and
+configuration: [core-app § Sign-in](../services/core-app.md#sign-in-969). Every response of the
+four endpoints carries `Cache-Control: no-store`.
+
+### Who must be signed in
+
+A request is **proxied** when it carries any of `X-Forwarded-For`, `Forwarded`,
+`X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` (the web shell's nginx, an ingress, the
+Compose gateway). With `AUTH_MODE=oidc`:
+
+| Request | Result |
+| --- | --- |
+| Proxied, valid `epicurus_session` cookie | Passes; the identity is on `request.state.auth`. A session last renewed over an hour ago slides, and the response re-issues the cookie. |
+| Proxied, no or invalid/expired session | **401** `{"detail": "Sign in to continue.", "code": "unauthenticated"}` |
+| Proxied, to `/health` or `/platform/v1/auth/…` | Passes without a session. |
+| Proxied **unsafe** method (POST/PUT/PATCH/DELETE — logout included) whose `Sec-Fetch-Site` is not `same-origin`/`none`, or — with no `Sec-Fetch-Site` — whose `Origin` is not the public URL's origin | **403** `{"detail": "Cross-site request refused.", "code": "cross_site"}` |
+| Not proxied (a module on the internal network, a probe, Prometheus) | Passes untouched — the module ↔ core contract is unchanged. |
+
+Both refusals carry `Cache-Control: no-store`. The public origin is the scheme, host and port of
+`OAUTH_REDIRECT_BASE_URL`.
+
+### `GET /platform/v1/auth/session`
+
+Always **200**.
+
+```json
+{
+  "mode": "oidc",
+  "signed_in": true,
+  "provider_name": "Pocket ID",
+  "auto_redirect": false,
+  "user": {
+    "subject": "0b8f…",
+    "email": "me@example.com",
+    "name": "Me",
+    "groups": ["family"]
+  },
+  "expires_at": "2026-10-26T12:00:00+00:00"
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mode` | `"none"` \| `"oidc"` | `AUTH_MODE`. |
+| `signed_in` | `bool` | Whether this request's cookie names a live session. Always `false` with `mode: "none"`. |
+| `provider_name` | `str \| null` | `OIDC_PROVIDER_NAME` — the button label; `null` when unset (and always with `mode: "none"`). |
+| `auto_redirect` | `bool` | `OIDC_AUTO_REDIRECT` — send a signed-out visitor straight to `/login`. Always `false` with `mode: "none"`. |
+| `user` | `object \| null` | `subject` (the provider's `sub`), `email` (lowercased, or `null`), `name` (`name`, else `preferred_username`, or `null`), `groups` (list of strings, possibly empty). `null` when signed out. |
+| `expires_at` | ISO 8601 `str \| null` | When the session ends unless used again (it slides while in use). |
+
+### `GET /platform/v1/auth/login?next=<path>`
+
+**302** to the provider's authorization endpoint with `response_type=code`, `client_id`,
+`redirect_uri` (`<OAUTH_REDIRECT_BASE_URL>/platform/v1/auth/callback`), `scope`, `state`, `nonce`,
+`code_challenge` and `code_challenge_method=S256`, and sets the transaction cookie
+`epicurus_auth_tx` (HttpOnly, `SameSite=Lax`, `Path=/platform/v1/auth`, `Max-Age=600`, `Secure`
+when the public URL is https). `next` is where the callback lands afterwards; it must be a
+same-origin path — starting with `/` but not `//` or `/\`, no scheme or host, not under
+`/platform/v1/auth/` — or it becomes `/`. If the provider cannot be discovered: **302**
+`/?auth_error=provider_unreachable` (or `misconfigured` if its metadata does not fit). With
+`AUTH_MODE=none`: **404** `{"detail": "Sign-in is not enabled on this deployment.", "code":
+"auth_disabled"}`.
+
+### `GET /platform/v1/auth/callback`
+
+The provider's redirect back (`code`, `state`, optionally `iss`, or `error`). On success: a new
+session, the `epicurus_session` cookie (HttpOnly, `SameSite=Lax`, `Path=/`, `Max-Age` =
+`AUTH_SESSION_DAYS` × 86400, `Secure` when https), the transaction cookie cleared, **302** →
+`next`. On **any** failure: **302** `/?auth_error=<code>`, the transaction cookie cleared, no
+session. The codes are a closed set — `provider_unreachable`, `provider_error`, `access_denied`,
+`state_mismatch`, `token_exchange_failed`, `invalid_token`, `not_allowed`,
+`groups_claim_missing`, `email_unverified`, `misconfigured` — each explained in
+[core-app § Sign-in](../services/core-app.md#sign-in-969). With `AUTH_MODE=none`: the **404**
+above.
+
+### `POST /platform/v1/auth/logout`
+
+Deletes this browser's session (if any), clears the cookie, **200** `{"signed_out": true}` —
+always, with no session, an expired one, or `AUTH_MODE=none`. Subject to the cross-site check
+when proxied.
+
+---
+
 ## `POST /platform/v1/embed`
 
 Embed one or more texts via the core's LLM gateway.  The core resolves the

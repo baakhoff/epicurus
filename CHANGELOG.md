@@ -12,6 +12,30 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Sign in with an OpenID Connect provider** (#969) — epicurus had no sign-in of its own:
+  whoever reached the web shell reached `/platform/v1/*`, which is everything — chats, memory,
+  mail, calendar, files, provider keys — and the documented ways to close that (basic auth in
+  Caddy, oauth2-proxy) all sat outside the app, so it never knew who was using it and a phone PWA
+  met a browser password prompt. The core is now an **OpenID Connect relying party**
+  (`AUTH_MODE=oidc`): authorization code flow with PKCE, a `state` bound to an HttpOnly
+  transaction cookie, a `nonce` bound to an ID token verified against the provider's JWKS with the
+  algorithm pinned to asymmetric ones the provider advertises, userinfo merged in, and an
+  admission rule — allowlisted emails (never an unverified one), allowlisted groups, or an explicit
+  `OIDC_ALLOW_ALL_USERS=true`, because an empty allowlist pointed at a public provider would admit
+  the internet. Four endpoints under `/platform/v1/auth` (`session`, `login`, `callback`,
+  `logout`); every failed sign-in lands back on the shell as `/?auth_error=<code>` from a closed
+  set of ten, never on a JSON page. Sessions are server-side — an opaque 256-bit cookie, only its
+  SHA-256 stored, sliding at most hourly — in two new tables (revision `0007`) that a tenant
+  archive deliberately leaves behind. The enforcement is a **trust boundary**, not a login wall: a
+  request that came through a proxy (the web shell's nginx, an ingress, the Compose gateway)
+  needs a session or gets a 401, and an unsafe one must also pass a cross-site check (403) because
+  `SameSite=Lax` does not stop a sibling subdomain; a module calling the platform API directly on
+  the internal network is untouched, so no module changed. The core **refuses to start**
+  half-configured, naming everything missing in one line, yet never contacts the provider at
+  boot — discovery is lazy, so a provider that is down cannot take the platform with it. Both
+  smoke gates now end with sign-in on and prove the web door answers 401 while module ↔ core
+  traffic still flows, on Compose and on Kubernetes. `AUTH_MODE=none` — the default — is the
+  platform exactly as it was. `core-app` 0.129.0 → 0.130.0 (MINOR).
 - **A hosted-only deployment runs no local runtime** (#962) — running with hosted chat and
   hosted embeddings and *no* Ollama was a documented capability that nothing actually supported.
   The Helm chart refused to render it (`ollama.enabled: false` demanded an external URL), Compose

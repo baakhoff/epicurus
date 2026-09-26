@@ -164,6 +164,9 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 
 ### Sign-in (#969)
 
+How to set these on Compose and on the Helm chart (`auth:` values) is the
+[sign-in guide](../infrastructure/sign-in.md).
+
 `epicurus_core_app.auth.config.load_auth_config(settings)` turns the fields above into the checked
 `AuthConfig` the flow runs on. With `AUTH_MODE=none` it never fails. With `AUTH_MODE=oidc` it
 **fails startup** — one `AuthConfigError` naming everything missing at once — unless:

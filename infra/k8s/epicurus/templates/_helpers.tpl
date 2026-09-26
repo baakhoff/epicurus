@@ -335,8 +335,9 @@ are dropped the way the core drops them.
 {{/*
 Refuse to render a sign-in the core would refuse to start (#969).
 
-With AUTH_MODE=oidc the core fails closed: no issuer, no client id or no admission rule, and it
-does not start. A release that renders anyway only moves the reason from `helm install` into a
+With AUTH_MODE=oidc the core fails closed: no issuer, an issuer or public URL that is not an
+absolute http(s) URL, no client id, no admission rule or a session under a day, and it does not
+start. A release that renders anyway only moves the reason from `helm install` into a
 crash-looping pod's log, so this mirrors the core's rule at render time — it does not replace
 it; the core still checks on its own, which is what covers Compose. The admission rule is the
 one that matters most: an empty allowlist is refused rather than read as "everyone", because a
@@ -364,6 +365,15 @@ saw. So the family has exactly one source, `auth.*`.
 {{- $oidc := $auth.oidc -}}
 {{- if not (trim (toString (default "" $oidc.issuerUrl))) -}}
 {{- fail "auth.mode is \"oidc\" but auth.oidc.issuerUrl is blank — set it to your provider's issuer, e.g. https://id.example.com (the address whose /.well-known/openid-configuration describes it). The core refuses to start without one, so the chart refuses to render it." -}}
+{{- end -}}
+{{- $urlShape := "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]+[^?#]*$" -}}
+{{- $issuer := trim (toString (default "" $oidc.issuerUrl)) -}}
+{{- if not (regexMatch $urlShape $issuer) -}}
+{{- fail (printf "auth.oidc.issuerUrl is %q — it must be an absolute http(s) URL with a host and no query string or fragment, e.g. https://id.example.com. The core refuses to start with anything else, so the chart refuses to render it." $issuer) -}}
+{{- end -}}
+{{- $publicUrl := trim (include "epicurus.oauthRedirectBaseUrl" .) -}}
+{{- if not (regexMatch $urlShape $publicUrl) -}}
+{{- fail (printf "the public URL is %q — set core.oauth.redirectBaseUrl (or ingress.host) so it is an absolute http(s) URL with a host and no query string or fragment, e.g. https://assistant.example.com. Sign-in derives its callback from it and the core refuses to start without one." $publicUrl) -}}
 {{- end -}}
 {{- $clientId := trim (toString (default "" $oidc.clientId)) -}}
 {{- $oidcSecret := trim (toString (default "" $oidc.existingSecret)) -}}

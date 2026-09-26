@@ -63,8 +63,9 @@ deployment must do the same.
 
 With `AUTH_MODE=oidc` the core signs a person in through an OpenID Connect provider and guards the
 **web door**; with `AUTH_MODE=none` (the default) nothing below is enforced. Design, checks and
-configuration: [core-app § Sign-in](../services/core-app.md#sign-in-969). Every response of the
-four endpoints carries `Cache-Control: no-store`.
+configuration: [core-app § Sign-in](../services/core-app.md#sign-in-969); setting it up: the
+[sign-in guide](../infrastructure/sign-in.md). Every response of the four endpoints carries
+`Cache-Control: no-store`.
 
 ### Who must be signed in
 

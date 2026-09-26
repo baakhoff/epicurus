@@ -377,6 +377,46 @@ def test_oidc_without_an_issuer_is_refused() -> None:
 
 
 @pytestmark_helm
+@pytest.mark.parametrize(
+    "issuer",
+    ["id.example.com", "ftp://id.example.com", "https://", "https://id.example.com/?x=1"],
+)
+def test_oidc_with_an_issuer_the_core_cannot_use_is_refused(issuer: str) -> None:
+    # The core's `_url_problem`: an absolute http(s) URL with a host, no query or fragment.
+    err = _refused(
+        *_sets(
+            "auth.mode=oidc",
+            f"auth.oidc.issuerUrl={issuer}",
+            "auth.oidc.clientId=epicurus-client",
+            "auth.oidc.allowAllUsers=true",
+        )
+    )
+    assert "auth.oidc.issuerUrl" in err and "absolute http(s) URL" in err
+
+
+@pytestmark_helm
+def test_oidc_with_a_public_url_the_core_cannot_use_is_refused() -> None:
+    err = _refused(*_sets(*_OIDC, "core.oauth.redirectBaseUrl=assistant.example.com"))
+    assert "core.oauth.redirectBaseUrl" in err and "absolute http(s) URL" in err
+
+
+@pytestmark_helm
+def test_an_issuer_with_a_path_and_the_smoke_gates_issuer_render() -> None:
+    for issuer in ("https://id.example.com/realms/home", "http://127.0.0.1:9/smoke-issuer"):
+        env = _core_env(
+            _rendered(
+                *_sets(
+                    "auth.mode=oidc",
+                    f"auth.oidc.issuerUrl={issuer}",
+                    "auth.oidc.clientId=epicurus-client",
+                    "auth.oidc.allowAllUsers=true",
+                )
+            )
+        )
+        assert env["OIDC_ISSUER_URL"]["value"] == issuer
+
+
+@pytestmark_helm
 def test_oidc_without_a_client_id_source_is_refused() -> None:
     """The chart-generated Secret never holds OIDC keys, so it cannot be the fallback on its own."""
     err = _refused(
@@ -563,3 +603,35 @@ def test_notes_stay_quiet_about_sign_in_for_a_private_release(tmp_path: Path) ->
     notes = _notes(tmp_path)
     assert _OFF_WARNING not in notes
     assert "/platform/v1/auth/callback" not in notes
+
+
+# ── one closed set of failure codes, three places ────────────────────────────────
+
+_CORE_ERRORS = REPO / "services" / "core-app" / "src" / "epicurus_core_app" / "auth" / "errors.py"
+_WEB_AUTH = REPO / "services" / "web" / "src" / "lib" / "auth.ts"
+_GUIDE = REPO / "docs" / "infrastructure" / "sign-in.md"
+
+
+def test_every_auth_error_code_is_spoken_by_the_shell_and_explained_by_the_guide() -> None:
+    """The core's `AuthErrorCode`, the shell's sentences and the guide's table are one set.
+
+    The core redirects with the code, the web shell renders a sentence for it and the operator
+    guide's troubleshooting table says what to do. A code added in one place only reaches a user
+    as a generic sentence — or reaches an operator with no row to look up — so drift fails here.
+    """
+    core_src = _CORE_ERRORS.read_text(encoding="utf-8")
+    literal = re.search(r"AuthErrorCode = Literal\[(.*?)\n\]", core_src, re.DOTALL)
+    assert literal, "AuthErrorCode is no longer a Literal in auth/errors.py"
+    core = re.findall(r'^\s*"([a-z_]+)",', literal.group(1), re.MULTILINE)
+
+    web_src = _WEB_AUTH.read_text(encoding="utf-8")
+    listed = re.search(r"export const AUTH_ERROR_CODES = \[(.*?)\] as const;", web_src, re.DOTALL)
+    assert listed, "AUTH_ERROR_CODES is no longer a const array in services/web/src/lib/auth.ts"
+    web = re.findall(r'"([a-z_]+)"', listed.group(1))
+
+    rows = re.findall(r"^\| `([a-z_]+)` \|", _GUIDE.read_text(encoding="utf-8"), re.MULTILINE)
+    guide = [code for code in rows if code != "auth_error"]  # the table's header cell
+
+    assert len(core) == 10, core
+    assert web == core, "the web shell's AUTH_ERROR_CODES drifted from the core's AuthErrorCode"
+    assert sorted(guide) == sorted(core), "the guide's troubleshooting table drifted from the core"

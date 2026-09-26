@@ -31,7 +31,7 @@ carries `X-Forwarded-For`, `Forwarded`, `X-Forwarded-Host`, `X-Forwarded-Proto` 
 
 A signed-out request there gets **401** (`{"detail": "Sign in to continue.", "code":
 "unauthenticated"}`), and the web shell turns that into the sign-in screen. A state-changing
-request (anything but `GET`/`HEAD`/`OPTIONS`) that comes from another site gets **403** even
+request (`POST`, `PUT`, `PATCH`, `DELETE`) that comes from another site gets **403** even
 with a valid session — the browser's `Sec-Fetch-Site` must say `same-origin` or `none`, or
 its `Origin` must be the deployment's public address. That closes the gap `SameSite=Lax`
 leaves open when several home-lab apps share one domain. `/health` and
@@ -51,7 +51,12 @@ That same rule decides what sign-in **cannot** protect. Anything that reaches a 
 - **The Compose gateway's `<module>.localhost` routes.** The gateway (Traefik, `:8088`)
   routes `echo.localhost`, `mail.localhost`, `storage.localhost`, `grafana.localhost` and the
   rest straight to their services, which have no sign-in of their own. Anyone who can reach
-  the gateway can pick one with a `Host` header.
+  the gateway can pick one with a `Host` header. The gateway's own dashboard (`:8089`, no
+  authentication) is in the same position.
+- **Anything on the `epicurus` network.** A container you attach to it — a Caddy or
+  oauth2-proxy of your own included — reaches `core-app:8080` directly, and a request that
+  does not add a forwarding header is treated as internal. Put your perimeter in front of the
+  web shell, and let it be the only thing you attach.
 
 So on **Compose**, point your perimeter — `tailscale serve`, Caddy, nginx — at the **web
 shell** (`web:8080` on the `epicurus` network, or its published port `8084`), **not** at the
@@ -274,6 +279,13 @@ again, and one left in a drawer for a month does.
 With `OIDC_AUTO_REDIRECT=true` a signed-out visitor skips epicurus's sign-in screen and goes
 straight to the provider; the shell guards against a redirect loop if the provider keeps
 sending it back.
+
+**A device that installed the app before this release** still runs the old offline worker,
+which answers *every* navigation from its cache — the sign-in callback included — so the
+provider's redirect back never reaches the core, and the old app it serves has no sign-in
+screen. Accept the **"A new epicurus is ready" → Refresh** prompt on that device (it appears on
+the next open) before signing in. The same update is what lets connected-account callbacks
+(Google) reach the core on a device with the app installed.
 
 ## Signing out
 

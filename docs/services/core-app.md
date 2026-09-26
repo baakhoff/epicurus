@@ -29,7 +29,9 @@ With `AUTH_MODE=oidc` the core is an **OpenID Connect relying party** — author
 with PKCE (S256, always), a `state` bound to an HttpOnly transaction cookie, a `nonce` bound to the
 ID token — and the platform's **trust boundary**. `AUTH_MODE=none` (the default) is the platform
 exactly as it was before: no sign-in, the perimeter is the operator's (ADR-0008), and every piece
-below is inert. The code is one package, `epicurus_core_app/auth/`.
+below is inert. The code is one package, `epicurus_core_app/auth/`. Turning it on — a Pocket ID
+walkthrough, other providers, Compose and the chart, troubleshooting by `auth_error` code — is the
+operator's [sign-in guide](../infrastructure/sign-in.md).
 
 **The four endpoints** (every response `Cache-Control: no-store`; shapes in the
 [platform-API reference](../reference/platform-api.md#sign-in-969)):

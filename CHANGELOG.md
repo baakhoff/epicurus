@@ -24,9 +24,11 @@ images to GHCR.
   shapes. `oidc` renders every key, the client id from a value or a Secret and the client
   secret only from one (`auth.oidc.existingSecret`, else the shared Secret; optional, since a
   public client has none), and the render **refuses** what the core would refuse to start with:
-  no issuer, no client-id source, or no admission rule — an empty allowlist, a list of blanks
-  and `--set-string …=false` included, because against Google an empty allowlist would admit
-  the internet. A sign-in variable in `core.extraEnv` fails the render too, rather than emit a
+  no issuer, an issuer or public URL that is not an absolute http(s) URL, no client-id source,
+  or no admission rule — an empty allowlist, a list of blanks and `--set-string …=false`
+  included, because against Google an empty allowlist would admit the internet. The Kubernetes
+  smoke gate turns sign-in on through these values (`helm upgrade --reuse-values`), so the
+  chart's own path is what boots. A sign-in variable in `core.extraEnv` fails the render too, rather than emit a
   duplicate env entry that server-side apply (Flux) rejects. `NOTES.txt` prints the callback to
   register, flags a plain-http one, and warns when a release publishes an Ingress with sign-in
   off. The new [sign-in guide](docs/infrastructure/sign-in.md) walks through Pocket ID on both

@@ -43,6 +43,7 @@ from epicurus_core_app.agent.playbooks import _PlaybookBase as _playbooks_base
 from epicurus_core_app.agent.reflection import _ReflectionBase as _reflection_base
 from epicurus_core_app.agent.session_model import _Base as _session_model_base
 from epicurus_core_app.agent.suspended import _Base as _suspended_base
+from epicurus_core_app.auth.store import _Base as _auth_base
 from epicurus_core_app.automations.review import _Base as _automation_review_base
 from epicurus_core_app.automations.store import _Base as _automations_base
 from epicurus_core_app.event_log import _Base as _event_log_base
@@ -85,11 +86,12 @@ SCRIPT_LOCATION: Final[Path] = Path(__file__).resolve().parent
 #: effect of registering those mappers; referenced here so the import cannot read as dead.
 _SHARED_BASE_MODULES: Final = (_extraction_queue_module, _profile_module)
 
-#: Every ``MetaData`` this service owns, one per store module's ``DeclarativeBase`` — 28 of
-#: them, 40 tables. Autogenerate and ``alembic check`` compare the models against the database
+#: Every ``MetaData`` this service owns, one per store module's ``DeclarativeBase`` — 29 of
+#: them, 42 tables. Autogenerate and ``alembic check`` compare the models against the database
 #: through this list, so a store module left out of it is a store whose drift nothing detects.
 METADATAS: Final[tuple[MetaData, ...]] = (
     _agent_instructions_base.metadata,
+    _auth_base.metadata,
     _automation_review_base.metadata,
     _automations_base.metadata,
     _event_log_base.metadata,

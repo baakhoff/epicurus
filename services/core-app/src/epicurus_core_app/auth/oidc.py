@@ -150,7 +150,9 @@ def code_challenge_for(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
-def merge_claims(id_claims: Mapping[str, Any], userinfo: Mapping[str, Any] | None) -> dict[str, Any]:
+def merge_claims(
+    id_claims: Mapping[str, Any], userinfo: Mapping[str, Any] | None
+) -> dict[str, Any]:
     """The ID token's claims with userinfo's profile claims layered over them.
 
     Userinfo is usually the fuller, fresher picture of the person (``groups`` often lives only
@@ -392,7 +394,10 @@ class OidcClient:
             form["client_id"] = config.client_id
         try:
             async with self._client() as client:
-                response = await client.post(meta.token_endpoint, data=form, auth=auth)
+                if auth is None:
+                    response = await client.post(meta.token_endpoint, data=form)
+                else:
+                    response = await client.post(meta.token_endpoint, data=form, auth=auth)
         except httpx.HTTPError as exc:
             self.invalidate()
             raise AuthFlowError(
@@ -444,7 +449,8 @@ class OidcClient:
         except httpx.HTTPError as exc:
             self.invalidate()
             raise AuthFlowError(
-                "provider_unreachable", f"the provider's JWKS could not be fetched: {_describe(exc)}"
+                "provider_unreachable",
+                f"the provider's JWKS could not be fetched: {_describe(exc)}",
             ) from exc
         if response.status_code >= 500:
             self.invalidate()

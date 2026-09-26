@@ -8,7 +8,8 @@ code here without teaching the shell to say it is how a user ends up reading an 
 
 from __future__ import annotations
 
-from typing import Final, Literal, get_args
+from collections.abc import Mapping
+from typing import Any, Final, Literal, get_args
 
 __all__ = ["AUTH_ERROR_CODES", "AuthErrorCode", "AuthFlowError"]
 
@@ -46,7 +47,12 @@ class AuthFlowError(Exception):
     carries a token, a code, a nonce, a verifier or a secret.
     """
 
-    def __init__(self, code: AuthErrorCode, message: str) -> None:
+    def __init__(
+        self, code: AuthErrorCode, message: str, *, claims: Mapping[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.code: AuthErrorCode = code
         self.message = message
+        #: The verified claims, when the refusal came after the provider said who this is —
+        #: so the refusal's log line can name the subject and email the operator must look up.
+        self.claims = claims

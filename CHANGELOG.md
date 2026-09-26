@@ -36,7 +36,20 @@ images to GHCR.
   not cover: the published internal ports and the Compose gateway's `<module>.localhost`
   routes. So the remote-access recipes now point `tailscale serve` and Caddy at the web shell
   (`8084` / `web:8080`) instead of the gateway, and present built-in sign-in as the option to
-  use beside a network perimeter. chart 0.2.0→0.3.0 (MINOR).
+  use beside a network perimeter. chart 0.2.1→0.3.0 (MINOR).
+- **MinIO images now pull from a registry that still serves them anonymously** (#973) — Quay
+  followed Docker Hub (#934) and started refusing anonymous pulls of `quay.io/minio/minio` and
+  `quay.io/minio/mc` — a `401` on the whole repository, not one tag — so every fresh
+  `compose up`, the `quality` gate's testcontainers suites, `runtime-smoke`, and `k8s-smoke`
+  all failed the same way. `docker.io/pgsty/minio` and `docker.io/pgsty/mc` are a
+  **community-maintained fork** of the AGPL MinIO server and client (published by Pigsty — not
+  MinIO Inc. and not a Docker Hub verified publisher) that still serves anonymously with pinned,
+  multi-arch (amd64/arm64) release tags; the Compose fragment, the chart's `minio.image` / `minio.initImage`
+  defaults, the testcontainers pins, and the docs now point there
+  (`RELEASE.2026-08-04T00-00-00Z` / `RELEASE.2026-09-16T00-00-00Z`). Entrypoints, `Cmd`, and
+  environment surface are unchanged from upstream, so nothing else moves. An operator who
+  overrode MinIO to `quay.io` in their own values must switch too — that source is now
+  anonymous-401 for everyone. Chart 0.2.0→0.2.1 (PATCH); no component bump.
 - **A hosted-only deployment runs no local runtime** (#962) — running with hosted chat and
   hosted embeddings and *no* Ollama was a documented capability that nothing actually supported.
   The Helm chart refused to render it (`ollama.enabled: false` demanded an external URL), Compose

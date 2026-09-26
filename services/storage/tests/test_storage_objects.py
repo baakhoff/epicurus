@@ -15,9 +15,10 @@ from testcontainers.minio import MinioContainer
 from epicurus_storage.object_store import ObjectStore
 
 TENANT = "test"
-# Docker Hub no longer serves minio/minio (the testcontainers default); pin the stack's Quay
-# image (infra/compose/docker-compose.yml) so the suite pulls from the same place.
-MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"
+# Neither Docker Hub's minio/minio (404) nor Quay's quay.io/minio/minio (401 on anonymous
+# pulls) serve the testcontainers default anymore; pin the stack's image
+# (infra/compose/docker-compose.yml) so the suite pulls from the same place.
+MINIO_IMAGE = "docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z"
 
 
 @pytest.fixture(scope="module")

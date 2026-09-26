@@ -24,6 +24,8 @@ vi.mock("@/lib/api", async () => {
     ApiError: actual.ApiError,
     api: {
       info: () => mockInfo(),
+      authSession: () =>
+        Promise.resolve({ mode: "none", signed_in: false, auto_redirect: false, user: null }),
       modules: () => mockModules(),
       eventSubscriptions: () => Promise.resolve([]),
       setEventSubscription: vi.fn(),
@@ -141,5 +143,15 @@ describe("SettingsScreen — the Platform card", () => {
     render(<SettingsScreen />, { wrapper });
 
     expect((await screen.findByText("track")).nextElementSibling).toHaveTextContent("—");
+  });
+});
+
+// #969: the Account card belongs to sign-in; with it off, Settings reads as it always did.
+describe("SettingsScreen — the Account card", () => {
+  it("is absent when sign-in is off", async () => {
+    render(<SettingsScreen />, { wrapper });
+    await screen.findByText("core-app");
+    expect(screen.queryByRole("heading", { name: "Account" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /sign out/i })).not.toBeInTheDocument();
   });
 });

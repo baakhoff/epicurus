@@ -6,10 +6,17 @@
  *
  * Reproduces the two behaviors the old `generateSW` config gave for free:
  * - **SPA navigation fallback** (`navigateFallback: "index.html"`): a top-level navigation to
- *   an unknown path serves the shell instead of a raw 404, so client-side routing works on a
- *   reload/deep-link. `/platform/*` is never a `navigate`-mode request (the app's own
- *   fetch/SSE calls to it use `cors`/`same-origin` mode, never a top-level navigation), so it
- *   needs no explicit denylist here the way `generateSW`'s config had one.
+ *   an app path serves the shell instead of a raw 404, so client-side routing works on a
+ *   reload/deep-link. **Except navigations to `/platform/`** (the old config's
+ *   `navigateFallbackDenylist`), which go to the network untouched. They are real top-level
+ *   navigations — the connected-account OAuth callback (`/platform/v1/oauth/callback`) is the
+ *   browser coming back from Google, the sign-in routes (`/platform/v1/auth/login` and
+ *   `…/callback`, #969) are the same dance with the operator's own provider, and anyone can open
+ *   a platform URL in a tab. This file used to claim `/platform/*` was never a `navigate`-mode
+ *   request and answer every navigation with the cached shell; once a device had the worker
+ *   installed, Google's redirect back never reached the core and the account never connected.
+ *   The whole routing decision now lives in `swRoute` (`src/lib/swRoute.ts`), a pure function
+ *   with its own tests.
  * - **The `registerType: "prompt"` update flow**: the shell's `UpdateToast` (`App.tsx`) posts
  *   `{ type: "SKIP_WAITING" }` to the waiting worker when the operator clicks Refresh — this
  *   file must listen for it and call `skipWaiting()` only then, never unconditionally, or
@@ -29,6 +36,7 @@ import { clientsClaim } from "workbox-core";
 import { cleanupOutdatedCaches, precacheAndRoute } from "workbox-precaching";
 
 import { SHARE_CACHE, SHARE_FILE_KEY, SHARE_FILE_NAME_HEADER, SHARE_META_KEY } from "@/lib/shareTarget";
+import { swRoute } from "@/lib/swRoute";
 
 declare const self: ServiceWorkerGlobalScope;
 
@@ -86,16 +94,15 @@ async function handleShareTarget(event: FetchEvent): Promise<Response> {
 }
 
 self.addEventListener("fetch", (event: FetchEvent) => {
-  if (event.request.method === "POST" && new URL(event.request.url).pathname === "/share-target") {
+  const route = swRoute(event.request);
+  if (route === "share-target") {
     event.respondWith(handleShareTarget(event));
-    return;
-  }
-
-  // A share-target POST is itself reported as `navigate` mode by some browsers, so this must
-  // run only after the check above, not before it.
-  if (event.request.mode === "navigate") {
+  } else if (route === "app-shell") {
     event.respondWith(caches.match("/index.html").then((cached) => cached ?? fetch(event.request)));
   }
+  // "pass-through": no respondWith — the browser sends the request to the network itself. That
+  // is every `/platform/` navigation (the OAuth and sign-in callbacks among them) and every
+  // non-navigation request this worker has no reason to touch.
 });
 
 /**

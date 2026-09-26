@@ -1064,7 +1064,9 @@ async def test_mode_none_is_a_strict_no_op(build: Builder) -> None:
 
 
 async def test_mode_none_endpoints(build: Builder) -> None:
-    h = await build(auth_mode="none")
+    # The oidc presentation knobs set beside AUTH_MODE=none stay inert: the documented contract
+    # is `provider_name: null` and `auto_redirect: false` whenever sign-in is off.
+    h = await build(auth_mode="none", oidc_provider_name="Pocket ID", oidc_auto_redirect=True)
     session = await h.client.get("/platform/v1/auth/session")
     assert session.json() == {
         "mode": "none",

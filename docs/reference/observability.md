@@ -55,6 +55,7 @@ same `/metrics` route — no extra wiring. Currently exported beyond the client 
 | `epicurus_knowledge_index_fuse_tripped` | gauge | `tenant`, `source` | knowledge | `1` while a knowledge index source is refusing to de-index (#848). `source` ∈ `knowledge` (the vault), `docs` (bundled platform docs), `module_docs`. |
 | `epicurus_knowledge_index_fuse_trips_total` | counter | `tenant`, `source` | knowledge | Knowledge index passes refused by the fuse, cumulatively. |
 | `epicurus_core_llm_stream_failures_total` | counter | `tenant`, `reason` | core-app | Streaming agent turns that ended in a failure rather than an answer (#944, ADR-0142). `reason` ∈ `paused` · `capability` · `stalled` · `rejected` · `auth` · `rate_limited` · `unavailable` · `unknown` — a closed set, never a provider string, so cardinality stays bounded per tenant. |
+| `epicurus_core_auth_sign_ins_total` | counter | `tenant`, `outcome` | core-app | Finished sign-in attempts through the OpenID Connect provider (#969) — a completed callback, or a login/callback that ended in `/?auth_error=<code>`. `outcome` ∈ `ok` · `provider_unreachable` · `provider_error` · `access_denied` · `state_mismatch` · `token_exchange_failed` · `invalid_token` · `not_allowed` · `groups_claim_missing` · `email_unverified` · `misconfigured` — the closed `auth_error` set. No series while `AUTH_MODE=none`. |
 
 A tripped fuse is worth alerting on: it means derived state is **intact but stale**, and an
 operator has to decide whether the source really lost its contents (see

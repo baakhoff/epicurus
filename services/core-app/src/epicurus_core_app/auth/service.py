@@ -355,11 +355,13 @@ class AuthService:
                 "groups": list(record.groups),
             }
             expires_at = record.expires_at.astimezone(UTC).isoformat()
+        # With sign-in off the presentation knobs are inert whatever the environment says: a
+        # stray OIDC_AUTO_REDIRECT=true beside AUTH_MODE=none must not reach the shell.
         return {
             "mode": config.mode,
             "signed_in": resolved is not None,
-            "provider_name": config.provider_name,
-            "auto_redirect": config.auto_redirect,
+            "provider_name": config.provider_name if config.enabled else None,
+            "auto_redirect": config.auto_redirect if config.enabled else False,
             "user": user,
             "expires_at": expires_at,
         }

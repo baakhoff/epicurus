@@ -872,6 +872,8 @@ async def test_the_401_is_the_documented_json(build: Builder) -> None:
     assert response.status_code == 401
     assert response.json() == {"detail": "Sign in to continue.", "code": "unauthenticated"}
     assert response.headers["cache-control"] == "no-store"
+    # Compact like every FastAPI response — the smoke gates grep for this exact byte form.
+    assert response.content == b'{"detail":"Sign in to continue.","code":"unauthenticated"}'
 
 
 @pytest.mark.parametrize(

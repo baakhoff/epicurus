@@ -345,7 +345,7 @@ smoke_assert_sign_in() {
   code="$(http -o /dev/null -w '%{http_code}' "http://web:8080/platform/v1/modules" || true)"
   [ "$code" = "401" ] || die "the web door answered $code for the platform API with no session (expected 401)"
   body="$(http "http://web:8080/platform/v1/modules" || true)"
-  printf '%s' "$body" | grep -q '"code":"unauthenticated"' \
+  printf '%s' "$body" | grep -q '"code": *"unauthenticated"' \
     || die "the 401 is not the documented JSON: $body"
   ok "the platform API through the web door is 401 unauthenticated"
 

@@ -143,7 +143,8 @@ class AuthMiddleware:
 
 
 async def _json(send: Send, status: int, body: dict[str, str]) -> None:
-    payload = json.dumps(body).encode("utf-8")
+    # Compact, byte-for-byte the way FastAPI's own JSONResponse renders a body.
+    payload = json.dumps(body, separators=(",", ":")).encode("utf-8")
     await send(
         {
             "type": "http.response.start",

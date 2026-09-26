@@ -11,6 +11,7 @@ import {
   sortByPageOrder,
   type ModulePageNav,
 } from "@/app/registry";
+import { AuthGate } from "@/components/AuthGate";
 import { CommandPalette, shortcutLabel } from "@/components/CommandPalette";
 import { CornerStack } from "@/components/CornerStack";
 import { EpsilonMark, Wordmark } from "@/components/Logo";
@@ -19,6 +20,7 @@ import { PanelHost } from "@/components/Panel";
 import { Toaster } from "@/components/Toaster";
 import { Badge, Button, cn } from "@/components/ui";
 import { api } from "@/lib/api";
+import { retryUnlessSignedOut } from "@/lib/auth";
 import { moduleIcon } from "@/lib/icons";
 import { useViewportMirror } from "@/lib/viewport";
 import { useAwayFinishedWatch } from "@/stores/chat";
@@ -163,7 +165,8 @@ export function MobileTabBar({ modulePages }: { modulePages: ModulePageNav[] }) 
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { retry: 1, staleTime: 5_000, refetchOnWindowFocus: false },
+    // One retry, as ever — except a 401, which a retry can only earn again (#969).
+    queries: { retry: retryUnlessSignedOut, staleTime: 5_000, refetchOnWindowFocus: false },
   },
 });
 
@@ -399,9 +402,14 @@ export default function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Shell />
-      </BrowserRouter>
+      {/* The auth gate (#969) sits above the router: the shell — and every request it makes —
+          mounts only once the session check has said this browser may see it. With sign-in
+          off that is at once, and the shell renders exactly as before. */}
+      <AuthGate>
+        <BrowserRouter>
+          <Shell />
+        </BrowserRouter>
+      </AuthGate>
     </QueryClientProvider>
   );
 }

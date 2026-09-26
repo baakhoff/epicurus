@@ -22,6 +22,11 @@ multi-gigabyte archive streams straight to the core, which enforces the only cei
 container (a reverse proxy, a tunnel) has to carry the same exemption, or the upload dies
 there — the card then says the archive never reached the core.
 
+With sign-in on (#969), the core enforces a session on every `/platform/` request that arrives
+through a proxy — which is every request the browser makes, since nginx forwards
+`X-Forwarded-For` — and refuses one without a session with **401**. The shell's side of that is
+[Sign-in](#sign-in-969) below.
+
 ### Screens
 
 | Screen | What it does |
@@ -33,7 +38,7 @@ there — the card then says the archive never reached the core.
 | **Modules** | Every module's manifest-rendered config form, status, and actions. A **Page order** card (#543) lists every left-nav page across all enabled modules in one flat, drag-and-drop-reorderable list (native HTML5 DnD, mirroring the tasks board, #380) with Up/Down buttons alongside as the keyboard-operable path (WCAG AA) — reordering persists server-side (`page_order`, syncs across devices) and the left nav picks it up immediately. |
 | **Files** | The core-owned file space (ADR-0063) rendered through the `browser` archetype's `BrowserView` with a core-backed source (`/platform/v1/files/{page,search,read,download,move,upload}` + the `entry` delete): directory navigation with breadcrumbs + up-nav, name/path search, split-screen text reader, download, drag-to-move/rename for movable entries. **Search (#619):** a query is a global, non-path-scoped lookup (server-side), so submitting one clears the visible path — but the client remembers the directory search interrupted and **restores it** when the search is cleared, rather than stranding the reader at the root. **Upload (#479):** an **Upload** toolbar button puts files **into the directory being viewed** — on phones it opens a bottom-sheet **source menu** (Photo or video → gallery picker, `image/*,video/*` multiple; Camera → `capture="environment"`; Document → bare file input), on wide screens it goes straight to the file dialog, and the listing also accepts **external file drops** — dropped on empty listing space they upload into the current directory, and dropped onto a **folder row** or breadcrumb they upload **into that directory** (#556; the target highlights, and an in-flight internal move-drag is never mistaken for an upload). Multi-file picks upload **sequentially** with a per-file **pill strip** (spinner → done, auto-clearing; a failure pins the server's own 413/415 detail and raises a toast) and the listing refreshes per success, so new entries appear without a reload. Uploads — and moves/renames (#554) — are refused into module-owned folders (`knowledge/…`, `notes/…`): those subtrees stay read-only, the server 400s a move whose destination is a module folder (surfaced as a toast), and a rename typed with a `/` or `\` is rejected inline in the field before it can relocate the file. **Delete (#564):** a **trash** affordance on each deletable row (and in the file preview) removes a file, folder, or object behind the shared **Confirm** — a folder's prompt spells out that everything inside goes (the delete is recursive), and it is a hard delete (no trash/undo). It appears only where the #479 ownership rule allows (`deletable` on the item — broader than `movable`, since directories are deletable too); module-owned subtrees show no button and are refused server-side. |
 | **Automations** | The operator's standing behavior (#668, ADR-0105): a core surface listing every automation with its trigger **in words**, autonomy badge, sink icons, an enabled toggle (no reload), and last-run status — the tenant-wide **kill switch** pinned above. One Sheet editor (create / edit / instantiate-a-template, saved **explicitly** — the fields are interdependent) edits every stored field: instructions, per-automation model (core-default fall-through), an event trigger (type picker from module manifests' declared `events.*` subjects + a free-text escape hatch, matcher builder, active hours) or a schedule (the ADR-0092 cadence/hour/weekday vocabulary), sinks + chat mode, the 4-level autonomy dial with its reach spelled out, and rate cap / digest window; a server-rejected save shows its reason inline and keeps the sheet open. The **Templates** tab groups module presets; *Use* prefills the editor and saving creates an independent `template:<module>` row (enabled on save — the editor pass is the review). Per-row **Run history** reads the ledger, deep-links into the observability runs feed (`?tab=runs&automation=<id>`), and the feed's automation badge links back. **Run now** exercises the real runner (409 surfaces inline when the kill switch is on). The old scheduled-turns Settings card is absorbed here — migrated rows just appear as automations. |
-| **Settings** | Theme (dark/light/system), **connected accounts** (OAuth client credentials + connect/disconnect), **chat bridges** (connect/disconnect external messaging channels like Discord — a write-only bot token, an on/off switch, and live per-bridge status; #369, ADR-0062 — the card itself only renders once the **messaging module is installed and enabled**, #430), **timezone**, **agent cycles**, **assistant instructions** (the editable base system prompt, #497 — the one long-form editor in Settings, so an unsaved draft **guards against an accidental reload/close** dropping it, #536), a **maintenance schedule** (enable/disable + hourly/daily/weekly cadence + hour/weekday, with an effective-schedule and next-planned-run summary — a multi-field draft the operator edits and explicitly **Saves**, since the fields are interdependent and auto-saving per change could persist an invalid combination mid-edit; #621), a **Platform** card (`core-app` · `library` · `track` · `contract` · `tenant`, from `GET /platform/v1/info` — four separate facts since #893, which found the card labelling the *library*'s version "core version"; `track` is the image tag actually pulled, an em dash where nothing set it), memory, and **export & import** (#867 — take the whole tenant to another epicurus, or bring one in; see below). The connected-account and bridge rows keep their credential/disconnect actions **icon-only** (label via the shared `Tooltip` + `aria-label`) so they never overflow a phone (#393); every field uses the one themed field style (#394). |
+| **Settings** | **Account** — only with sign-in on (#969): who is signed in (name · email, graceful when the provider sent neither), through which provider, and **Sign out**; see [Sign-in](#sign-in-969). Theme (dark/light/system), **connected accounts** (OAuth client credentials + connect/disconnect), **chat bridges** (connect/disconnect external messaging channels like Discord — a write-only bot token, an on/off switch, and live per-bridge status; #369, ADR-0062 — the card itself only renders once the **messaging module is installed and enabled**, #430), **timezone**, **agent cycles**, **assistant instructions** (the editable base system prompt, #497 — the one long-form editor in Settings, so an unsaved draft **guards against an accidental reload/close** dropping it, #536), a **maintenance schedule** (enable/disable + hourly/daily/weekly cadence + hour/weekday, with an effective-schedule and next-planned-run summary — a multi-field draft the operator edits and explicitly **Saves**, since the fields are interdependent and auto-saving per change could persist an invalid combination mid-edit; #621), a **Platform** card (`core-app` · `library` · `track` · `contract` · `tenant`, from `GET /platform/v1/info` — four separate facts since #893, which found the card labelling the *library*'s version "core version"; `track` is the image tag actually pulled, an em dash where nothing set it), memory, and **export & import** (#867 — take the whole tenant to another epicurus, or bring one in; see below). The connected-account and bridge rows keep their credential/disconnect actions **icon-only** (label via the shared `Tooltip` + `aria-label`) so they never overflow a phone (#393); every field uses the one themed field style (#394). |
 | **Observability** | System health (`GET /platform/v1/readiness`) above a tab strip over the core's live feeds. **Logs** (ADR-0031) — the structured log console: what core-app is doing, filterable by minimum level and service prefix, each row's `context` expandable (▼). **Events** (ADR-0103) — the module event spine's raw tail: what the *modules* announced happened, filterable by module and event type, each row showing its `entity_ref` title with the `payload` expandable. **Automation runs** (#669) — the engine's ledger as a live tail: fire → filter verdict → outcome (a skip's *why* inline — rate cap, paused) → model, tokens, duration, sinks fired, the triggering events' `EntityRef` hover-card chips, and the run `output` expandable; filterable by automation and outcome (server-side) and by trigger module (client-side over the automations list, so it never tears the stream down). Only the visible tab's console is mounted, so a hidden tab never holds an open SSE subscription. All three reconnect on disconnect (3 s back-off) through the shared `useSseFeed` hook, cap the DOM at 500 entries, and follow the tail **only while the reader is already at it** — scrolling up to read something is never yanked back by the next arriving entry. |
 | **Module pages** | Left-nav pages a module contributes, **core-rendered from a bounded archetype vocabulary** (ADR-0018) — the module supplies data only. |
 | **Right panel** | A core-owned split-screen / bottom-sheet that opens detail views (`entity-detail`, `email-reader`, `doc-reader`) programmatically (ADR-0018). |
@@ -217,7 +222,9 @@ quiet, moonlight-toned banner at the top of the main column:
   or 500 proves the core answered, and **503 is excluded** — the LLM surface uses it for
   the *paused* state). The PowerOrb's existing 15 s `power` poll is the heartbeat that
   trips and clears the banner while the tab is visible; TanStack pauses that poll in
-  hidden tabs, so a backgrounded PWA makes no extra requests.
+  hidden tabs, so a backgrounded PWA makes no extra requests. A **401** is an answer too:
+  it marks epicurus reachable and goes to the auth gate instead ([Sign-in](#sign-in-969)) —
+  a signed-out browser is never shown "can't reach epicurus".
 
 **Debounced, not single-strike (#791).** A loaded self-hosted box (CPU-only inference,
 Docker Desktop VM) throws transient blips that read exactly like outage evidence — a
@@ -267,11 +274,19 @@ POST body before the browser discards it navigating away). `vite.config.ts` sets
 the two behaviors the old declarative config gave for free — its own top comment explains
 both:
 
-- **SPA navigation fallback**: an unknown top-level path serves the cached shell instead of
-  a raw 404, so a reload/deep-link still routes client-side. `/platform/*` needs no explicit
-  denylist the old config had (`navigateFallbackDenylist`) — it's never a `navigate`-mode
-  request (the app's own fetch/SSE calls use `cors`/`same-origin` mode), so the `mode ===
-  "navigate"` check excludes it structurally.
+- **SPA navigation fallback**: a top-level navigation to an app path serves the cached shell
+  instead of a raw 404, so a reload/deep-link still routes client-side — **except navigations
+  to `/platform/`, which go to the network** (the old config's `navigateFallbackDenylist`).
+  Those are real: the connected-account OAuth callback (`/platform/v1/oauth/callback`, the
+  browser coming back from Google), the sign-in `login` and `callback` routes (#969), and any
+  platform URL opened in a tab. Until #969 this file claimed `/platform/*` was never a
+  `navigate`-mode request and answered every navigation with the cached shell — so **once a
+  device had installed the worker, Google's redirect back never reached the core and the
+  account never connected** (the SPA rendered at the callback URL instead). The decision is a
+  pure function, `swRoute` (`src/lib/swRoute.ts`: `share-target` / `app-shell` /
+  `pass-through`), unit-tested in `src/test/swRoute.test.ts`. A device still running the old
+  worker gets the fix through the ordinary update prompt ("A new epicurus is ready" →
+  Refresh).
 - **The `registerType: "prompt"` update flow**: `UpdateToast` (`App.tsx`) posts `{ type:
   "SKIP_WAITING" }` to the waiting worker when the operator clicks Refresh; `src/sw.ts`
   listens for exactly that message before calling `skipWaiting()` — never unconditionally,
@@ -303,6 +318,103 @@ reload of the destination is inert.
 "Calendar" (`/m/calendar/calendar`), "Tasks" (`/m/tasks/board`). The latter two are module
 pages; if that module is off, `ModulePageScreen`'s existing "no such module page" empty
 state is the degrade, not a crash — no new code needed for that half.
+
+### Sign-in (#969)
+
+When the operator turns sign-in on (`AUTH_MODE=oidc` on the core), epicurus is an OpenID
+Connect relying party: the **core** runs the redirect dance with the provider (Pocket ID,
+Authentik, Keycloak, …), owns the HttpOnly session cookie, and refuses any proxied
+`/platform/` request without a session. The **web** only has to notice it is signed out, say
+so, and send the browser to the core's login route with a way back. With sign-in off
+(`mode: "none"`, the default everywhere) none of this shows: no sign-in screen, no Account
+card, and the only difference from before is one session read at boot.
+
+**The contract it consumes** (all core-app; zod mirror `AuthSession` in `src/lib/contracts.ts`,
+parsed tolerantly — extra fields ignored, `mode` read as a plain string so an unfamiliar mode
+still gates):
+
+| Call | Shape | Used for |
+| --- | --- | --- |
+| `GET /platform/v1/auth/session` | always 200: `{mode: "none"\|"oidc", signed_in, provider_name, auto_redirect, user: {subject, email, name, groups} \| null, expires_at}` | the gate at boot; re-checks; the Account card |
+| `GET /platform/v1/auth/login?next=<path>` | a **full-page navigation** (302 to the provider) — never a fetch | the Sign in button and auto-redirect |
+| `/?auth_error=<code>` | where every failed callback lands | the error sentence on the sign-in screen |
+| `POST /platform/v1/auth/logout` | 200 `{"signed_out": true}` | Settings → Account → Sign out |
+| any `/platform/` request | **401** `{"detail": "Sign in to continue.", "code": "unauthenticated"}` without a session | back to the sign-in screen |
+
+**The gate** (`src/components/AuthGate.tsx`, state in `src/stores/auth.ts`) sits above the
+router in `App.tsx`, so the shell — and every request it makes — mounts only after the session
+read has answered: a signed-out browser gets the sign-in screen, never a burst of refused
+requests behind it. `mode: "none"` or `signed_in` → the app, exactly as before. A core that is
+**down or restarting** cannot say whether sign-in is on, so a failed read — or one that has not
+answered within **3 s** (`SESSION_WAIT_MS`; a box off the VPN can leave a request hanging for
+the OS's whole connect timeout) — mounts the app just as an unreachable core always has, with
+the connection banner explaining it; the read keeps running, and the first 401 the core *does*
+send flips the gate. An older core with no auth routes (404) is `mode: "none"` by definition.
+While the read is out the page shows the canvas, and the drawn ε mark only if it takes longer
+than 400 ms.
+
+**The sign-in screen** (`src/screens/SignInScreen.tsx`) replaces the whole shell: the ε mark, a
+serif heading, one sentence, and one button — **"Sign in with {provider_name}"**, or **"Sign
+in"** when the operator gave no name. On a wide screen it is a centred card; on a phone it
+fills the height, clears the notch and home indicator (`pt-safe`/`pb-safe`) and puts a
+48 px-tall, full-width button where a thumb rests. The button re-checks the session first (a
+top-level navigation to a core that is down ends on the proxy's bare error page — in an
+installed PWA, a page with no way back — so it says "Can't reach epicurus right now" instead;
+and a tab signed in from another tab meanwhile simply walks in), then calls
+`window.location.assign("/platform/v1/auth/login?next=" + encodeURIComponent(next))`. **`next`**
+is the current path and query minus `auth_error`, read at the moment of leaving — so a 401
+returns to the screen it interrupted, a share to its composer (`/?share=1`: the chat screen,
+which consumes the stashed payload, never mounted while signed out), a notification's deep link
+to its page. The shell never asks for anything the core would refuse: a protocol-relative
+`//host`, a backslash trick or a `/platform/` path becomes `/` (`safeNext`, `src/lib/auth.ts`).
+Arriving on the screen drops the whole query cache — nothing fetched under an ended session
+outlives it. Returning to the tab re-checks the session quietly (never redirecting), and a tab
+restored from the back-forward cache mid-redirect (Back on the provider's page) un-freezes.
+
+**Errors.** Every `auth_error` code maps to a sentence (`authErrorMessage`, `src/lib/auth.ts`)
+— `not_allowed` says the account isn't allowed and to ask whoever runs it; `groups_claim_missing`
+says the provider sent no group membership and the operator needs the `groups` scope;
+`provider_unreachable` says the provider couldn't be reached; likewise `provider_error`,
+`access_denied`, `state_mismatch`, `token_exchange_failed`, `invalid_token`,
+`email_unverified`, `misconfigured`. Anything else gets one generic sentence: **the raw value is
+never rendered.** The param is read once at boot and removed with a history *replace*, so
+Back and reload never show a stale failure; one that arrives while the browser turns out to be
+signed in (a second tab's losing race) is dropped silently.
+
+**Auto-redirect.** With `auto_redirect` on, a signed-out browser goes straight to the provider —
+except when there is an `auth_error` to show, or the user signed out in this tab. **Loop
+guard:** each automatic redirect stamps sessionStorage; a tab that comes back still signed out
+within **30 s** (`AUTO_REDIRECT_GUARD_MS` — the provider refused silently, the user pressed
+Back, or the session cookie never stuck) shows the button with a "Signing in didn't finish"
+note instead of bouncing again. Both marks are per tab, and survive the round trip to the
+provider (a same-tab navigation).
+
+**401 anywhere.** Every path to `/platform/` reports a 401 to the gate: `epFetch` (so the JSON
+`request` helper, the multipart uploads and both SSE readers) and the archive upload's XHR —
+the one request that is not `fetch`. The core's own `/platform/v1/auth/*` routes are excluded
+(exempt from enforcement, they never mean "session ended"). With a known `oidc` session the
+shell is replaced at once, with a "Your session has ended" note and `next` = where the user
+was; with no session known (the boot read failed) or `mode: "none"` (a 401 can then only come
+from something *in front of* epicurus, or an operator who just turned sign-in on) the gate asks
+the core again and moves only on its answer. TanStack Query never retries a 401
+(`retryUnlessSignedOut` — one retry for everything else, as before), and the connection store
+counts a 401 as reachable. None of this is security — the core enforces every request; the
+gate is what makes a refused request look like a sign-in screen rather than a page of errors.
+
+**Settings → Account** (`src/components/AccountCard.tsx`) renders only with sign-in on and a
+session: "Signed in as {name} · {email}" (either alone when the provider sent only one; "Signed
+in" and the subject when it sent neither), "through {provider}", and **Sign out**, full-width on
+a phone. Sign out posts `logout` and lands on the signed-out screen — "You're signed out.", the
+address reset to `/` — with **auto-redirect held off** in that tab until the user presses Sign
+in, so signing out is not immediately undone. A failed logout keeps the user signed in and says
+why. Sign out ends epicurus's session only: it does not sign you out of the provider, so a
+*new* tab with auto-redirect on may be signed straight back in by a provider that still
+remembers you.
+
+**Local dev.** The core enforces only on requests that arrived through a proxy, so the Vite
+`server.proxy` and `preview.proxy` entries for `/platform` set **`xfwd: true`** (alongside
+`changeOrigin`): dev and preview requests carry `X-Forwarded-*` exactly as production's nginx
+makes them, and an `AUTH_MODE=oidc` core shows its sign-in screen under `npm run dev` too.
 
 ### Web push (#670, ADR-0102)
 
@@ -1070,7 +1182,10 @@ Docker path end-to-end, where a wrong value stops nginx from starting at all.
 ## Data model
 
 None — the web is stateless; conversation state lives in the core (memory). Only display
-preferences (theme, default model) persist, in the browser's `localStorage`.
+preferences (theme, default model) persist, in the browser's `localStorage`. Sign-in (#969)
+keeps two tab-scoped `sessionStorage` marks — `epicurus-auth-auto-redirect-at` (the loop
+guard's timestamp) and `epicurus-auth-signed-out` (auto-redirect held off after Sign out); the
+session itself is the core's HttpOnly cookie, which the web never reads.
 
 ## Dependencies
 
@@ -1083,12 +1198,16 @@ into the build — zero CDN.
 cd services/web && npm ci && npm run dev   # dev server proxies /platform to localhost:8082
 ```
 
+The dev and preview proxies set `xfwd: true`, so the core sees them as proxied and enforces
+sign-in exactly as it does behind nginx ([Sign-in](#sign-in-969)).
+
 Vite + React + TypeScript (strict), Tailwind v4, vendored shadcn-style components, Zustand
 stores, TanStack Query, zod-validated API contracts (`src/lib/contracts.ts` mirrors the
 core's models). The surface registry (`src/app/registry.ts`) is **data, not markup** — new
 screens add an entry, not a restructure. Installable PWA with a custom service worker
-(`src/sw.ts`, injectManifest strategy) — `/platform` is never intercepted, so streams always
-hit the network; see "PWA install surface" above for the share-target/shortcuts mechanism
+(`src/sw.ts`, injectManifest strategy) — `/platform` is never intercepted, fetches and
+navigations alike (#969), so streams, the OAuth callback and the sign-in routes always hit the
+network; see "PWA install surface" above for the share-target/shortcuts mechanism
 and why a production build (`npm run build && npm run preview`) is the only way to check it.
 
 The shared primitive kit is one file — `src/components/ui.tsx` (`Button`, `Badge`, `Card`,

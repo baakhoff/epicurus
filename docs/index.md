@@ -27,7 +27,8 @@ however you expose your own server).
   module↔core contracts (platform API, MCP, NATS, manifest).
 - **[Infrastructure](../infra/README.md)** — the data plane (Postgres, Valkey, NATS,
   Qdrant, OpenBao, MinIO), the edge gateway, observability, and Ollama. Reaching it from
-  outside the box: [Remote access & hardening](infrastructure/remote-access.md). Running
+  outside the box: [Remote access & hardening](infrastructure/remote-access.md), and
+  [Sign-in](infrastructure/sign-in.md) with your own OpenID Connect provider. Running
   it on a cluster instead: [Kubernetes (the Helm chart)](infrastructure/kubernetes.md).
 - **[Developer Guide](developer/index.md)** — architecture, building a module,
   [schema migrations](developer/migrations.md), testing, contributing, releases.

@@ -66,7 +66,9 @@ init container runs.
 
 **Traefik** routes to services by Docker label, with **no authentication baked in** and no
 assumed ingress — the operator layers their own perimeter (Tailscale, a reverse proxy, an
-auth proxy) in front (ADR-0008). Host ports **8088** (web entrypoint) and **8089**
+auth proxy) in front (ADR-0008). Its per-module `<name>.localhost` routes sit outside the
+app's own [sign-in](sign-in.md), so a perimeter should front the web shell (`8084`), not the
+gateway. Host ports **8088** (web entrypoint) and **8089**
 (dashboard). Details: [`infra/edge/README.md`](../../infra/edge/README.md); concrete
 copy-pasteable perimeter recipes in [Remote access & hardening](remote-access.md).
 
@@ -323,9 +325,12 @@ See the [Architecture](../developer/architecture.md) guide for how the pieces fi
 ## Operations
 
 - [Remote access & hardening](remote-access.md) — reach the PWA from outside the box
-  safely: Tailscale, a reverse proxy with basic auth, or oauth2-proxy/OIDC, plus a
-  self-hosting security checklist. The stack has no built-in auth (ADR-0008), so a
-  perimeter is mandatory for any non-loopback exposure.
+  safely: Tailscale, built-in sign-in, a reverse proxy with basic auth, or oauth2-proxy,
+  plus a self-hosting security checklist. Sign-in is off by default and the gateway never
+  authenticates (ADR-0008), so something must authenticate any non-loopback exposure.
+- [Sign-in (OpenID Connect)](sign-in.md) — built-in sign-in with Pocket ID, Authentik,
+  Keycloak, Authelia, Kanidm or Google, on Compose and Kubernetes: the Pocket ID
+  walkthrough, admission rules, what it covers and what it does not, troubleshooting.
 - [Auto-deploy (CD)](auto-deploy.md) — how a released tag rolls out to the box
   automatically (scheduled reconcile script or Watchtower), and how to roll back.
 - [Startup and recovery](startup-and-recovery.md) — configure Docker Desktop

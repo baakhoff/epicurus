@@ -37,8 +37,11 @@ pauses (unloads models, suspends inference), one tap resumes. Its color reflects
   is **same-origin** (no CORS), SSE passes through unbuffered, and the proxy
   resolves the core at request time so the UI stays up while the core restarts.
 - **PWA:** installable manifest + icons, offline-cached shell (service worker),
-  `/platform` explicitly excluded from the service worker so streams always hit
-  the network. Updates are prompt-based, never silent.
+  `/platform` excluded from the service worker — fetches *and* top-level
+  navigations (the OAuth and sign-in callbacks, #969) — so they always hit the
+  network. Updates are prompt-based, never silent.
+- **Sign-in:** with the core's `AUTH_MODE=oidc`, a sign-in screen replaces the
+  shell until the browser has a session; see `docs/services/web.md`.
 
 ## Develop
 

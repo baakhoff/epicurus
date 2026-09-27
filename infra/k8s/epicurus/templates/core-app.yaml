@@ -2,6 +2,10 @@
        (#962, ADR-0144) — see `epicurus.assertHostedOnlyModels`. Evaluated first, so the
        failure names the fix before anything downstream can fail for a vaguer reason. */}}
 {{- include "epicurus.assertHostedOnlyModels" . -}}
+{{- /* Likewise a sign-in the core would refuse to start with (#969) — no issuer, no client
+       id, no admission rule — or one `core.extraEnv` would duplicate. See
+       `epicurus.assertSignIn`. */}}
+{{- include "epicurus.assertSignIn" . -}}
 {{- $files := .Values.core.persistence -}}
 {{- $localFiles := eq .Values.core.filesBackend "local" -}}
 {{- $baoTokenSecret := include "epicurus.openbaoTokenSecret" . -}}
@@ -208,6 +212,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "epicurus.secretName" $ }}
                   key: OAUTH_STATE_SECRET
+            {{- /* Sign-in (#969): AUTH_MODE always — in the default `none` mode, the whole
+                   footprint of the feature — and every OIDC_* key in `oidc` mode. See
+                   `epicurus.signInEnv`. A template comment, not a YAML one, so a release
+                   that sets nothing renders exactly one entry more than before. */}}
+            {{- include "epicurus.signInEnv" $ | nindent 12 }}
             - name: FILES_BACKEND
               value: {{ .Values.core.filesBackend | quote }}
             {{- if $localFiles }}

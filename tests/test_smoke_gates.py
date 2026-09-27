@@ -228,9 +228,10 @@ def test_both_gates_run_the_sign_in_phase_last() -> None:
 def test_the_sign_in_phase_turns_oidc_on_without_colliding_with_the_chart_or_compose() -> None:
     """The mechanisms survive the core-app fragment and the chart both carrying AUTH_MODE.
 
-    Compose merges an override onto core-app's ``environment`` by key; Kubernetes uses
-    ``kubectl set env``, which updates by name — never ``core.extraEnv``, which would render a
-    second ``AUTH_MODE`` entry beside the one the chart's ``auth:`` block emits.
+    Compose merges an override onto core-app's ``environment`` by key; Kubernetes runs a
+    ``helm upgrade`` with the chart's own ``auth:`` values, so the render-time guard and the env
+    it emits are what the phase proves — never ``core.extraEnv``, which the guard refuses for
+    the sign-in family (it would render a second ``AUTH_MODE`` beside the ``auth:`` block's).
     """
     override = _load(CI / "compose.auth.yaml")
     env = override["services"]["core-app"]["environment"]
@@ -243,5 +244,16 @@ def test_the_sign_in_phase_turns_oidc_on_without_colliding_with_the_chart_or_com
     )
 
     k8s = (CI / "k8s-smoke.sh").read_text(encoding="utf-8")
-    assert "kc set env deployment/core-app" in k8s and "AUTH_MODE=oidc" in k8s
-    assert "extraEnv.AUTH_MODE" not in k8s
+    enable = k8s[k8s.index("enable_sign_in() {") :]
+    enable = enable[: enable.index("\n}\n")]
+    assert "helm upgrade" in enable and "--reuse-values" in enable
+    for value in (
+        "auth.mode=oidc",
+        "auth.oidc.issuerUrl=",
+        "auth.oidc.clientId=",
+        "allowAllUsers=true",
+    ):
+        assert value in enable, f"k8s-smoke's enable_sign_in no longer sets {value!r}"
+    # The removal assertion scaled echo to zero; the upgrade must not quietly restore it.
+    assert "modules.echo.replicas=0" in enable
+    assert "extraEnv.AUTH_MODE" not in k8s and "set env" not in k8s

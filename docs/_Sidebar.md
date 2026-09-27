@@ -48,6 +48,7 @@
 
 - [Overview](infrastructure/index.md)
 - [Remote access & hardening](infrastructure/remote-access.md)
+- [Sign-in (OpenID Connect)](infrastructure/sign-in.md)
 - [Auto-deploy (CD)](infrastructure/auto-deploy.md)
 - [Secrets (OpenBao)](infrastructure/secrets.md)
 - [Startup and recovery](infrastructure/startup-and-recovery.md)

@@ -98,16 +98,27 @@ settle_llm_runtime() { # the shared KV-cache assertion rolls it; wait for the ne
   kc rollout status statefulset/ollama --timeout=180s >/dev/null
 }
 
-# The sign-in phase (#969): `kubectl set env` on the Deployment, which updates each variable
-# by name — so it composes with a chart that already renders AUTH_MODE (its `auth:` block)
-# instead of adding a duplicate the way `core.extraEnv` would. Then wait for the rollout.
+# The sign-in phase (#969): turned on the way an operator turns it on — `helm upgrade` with
+# the chart's `auth:` values — so what this phase proves is the chart's own path: the render-
+# time guard (`epicurus.assertSignIn`) accepts the values and the env it emits is what the core
+# starts with. `--reuse-values` keeps everything the release already carries (the CI values and
+# the hosted-only upgrade). `modules.echo.replicas=0` keeps the module the removal assertion
+# scaled down where it is: Helm's three-way merge would otherwise restore the chart's replica
+# count and quietly undo that assertion's end state.
 enable_sign_in() {
-  kc set env deployment/core-app \
-    AUTH_MODE=oidc \
-    OIDC_ISSUER_URL=http://127.0.0.1:9/smoke-issuer \
-    OIDC_CLIENT_ID=epicurus-smoke \
-    OIDC_ALLOW_ALL_USERS=true >/dev/null
+  helm upgrade "$RELEASE" "$CHART" \
+    --namespace "$NS" \
+    --reuse-values \
+    --set auth.mode=oidc \
+    --set auth.oidc.issuerUrl=http://127.0.0.1:9/smoke-issuer \
+    --set auth.oidc.clientId=epicurus-smoke \
+    --set auth.oidc.allowAllUsers=true \
+    --set modules.echo.replicas=0 \
+    --wait --timeout 8m >/dev/null
   kc rollout status deployment/core-app --timeout=300s >/dev/null
+  mode="$(kc get deployment/core-app \
+    -o jsonpath='{.spec.template.spec.containers[*].env[?(@.name=="AUTH_MODE")].value}')"
+  [ "$mode" = "oidc" ] || die "helm upgrade with auth.mode=oidc rendered AUTH_MODE='$mode'"
 }
 
 dump_diagnostics() {

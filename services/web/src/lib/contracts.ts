@@ -1500,6 +1500,44 @@ export const PlatformInfo = z.object({
 });
 export type PlatformInfo = z.infer<typeof PlatformInfo>;
 
+/* ── Sign-in (#969) ──────────────────────────────────────────────────────── */
+
+/** The person a session belongs to, as the OpenID Connect provider described them. Only
+ *  `subject` is guaranteed — a provider may withhold the email or the display name (the scopes
+ *  decide), so both are nullish and every surface renders without them. */
+export const AuthUser = z.object({
+  subject: z.string(),
+  email: z.string().nullish(),
+  name: z.string().nullish(),
+  groups: z.array(z.string()).nullish(),
+});
+export type AuthUser = z.infer<typeof AuthUser>;
+
+/**
+ * `GET /platform/v1/auth/session` — always a 200, signed in or not, which is what lets the
+ * shell ask *before* it mounts anything that would be refused.
+ *
+ * `mode` is `"none"` (no sign-in: the default, and today's behaviour) or `"oidc"`; it is read as
+ * a plain string so a mode this build has never heard of still gates the app (anything but
+ * `"none"` means sign-in is on). `auto_redirect` sends a signed-out visitor straight to the
+ * provider. Defaults are for tolerance, never invention: an absent `auto_redirect` is off.
+ */
+export const AuthSession = z.object({
+  mode: z.string(),
+  signed_in: z.boolean(),
+  provider_name: z.string().nullish(),
+  auto_redirect: z.boolean().default(false),
+  user: AuthUser.nullish(),
+  expires_at: z.string().nullish(),
+});
+export type AuthSession = z.infer<typeof AuthSession>;
+
+/** Whether a session answer means "show the sign-in screen": sign-in is on and this browser
+ *  has no session. */
+export function signInRequired(session: AuthSession): boolean {
+  return session.mode !== "none" && !session.signed_in;
+}
+
 /* ── OAuth ───────────────────────────────────────────────────────────────── */
 
 export const OAuthConnectResponse = z.object({ auth_url: z.string() });

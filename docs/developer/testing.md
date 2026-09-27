@@ -236,7 +236,8 @@ gate supplies the runtime-specific half as shell functions (`http`,
 Each gate then runs a **sign-in phase** last (`smoke_assert_sign_in`, #969): its
 `enable_sign_in` restarts core-app with `AUTH_MODE=oidc`, an unreachable issuer, a dummy client
 id and `OIDC_ALLOW_ALL_USERS=true` — an override file merged onto the service under Compose
-(`infra/ci/compose.auth.yaml`), `kubectl set env` on the Deployment in a cluster — and the shared
+(`infra/ci/compose.auth.yaml`), a `helm upgrade --reuse-values` with the chart's own `auth:`
+values in a cluster (so the chart's guard and env are what boots) — and the shared
 function asserts that the core still starts (discovery is lazy), that the web door reports the
 session as signed out, 401s the platform API and bounces a sign-in attempt to
 `/?auth_error=provider_unreachable`, and that the core's own port and module ↔ core traffic (a

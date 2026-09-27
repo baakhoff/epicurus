@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import field_validator
+from pydantic import SecretStr, ValidationInfo, field_validator
 
 from epicurus_core import CoreSettings, get_logger
 from epicurus_core.files import FileStoreBackend
 
 log = get_logger(__name__)
+
+AuthMode = Literal["none", "oidc"]
+"""``AUTH_MODE``: ``none`` (no sign-in — the perimeter is the operator's, ADR-0008) or ``oidc``."""
 
 
 class CoreAppSettings(CoreSettings):
@@ -356,6 +360,65 @@ class CoreAppSettings(CoreSettings):
     # HMAC key for signing the OAuth ``state`` parameter (CSRF protection).
     # Change this before first use; rotating it invalidates in-flight connect flows.
     oauth_state_secret: str = "change-this-before-use"
+
+    # ── Sign-in (#969) ──────────────────────────────────────────────────────────
+    # "none" (the default) is today's behaviour: no sign-in, the perimeter is the operator's
+    # (ADR-0008). "oidc" makes the core an OpenID Connect relying party: a request that came
+    # through a proxy (the web shell's nginx, an ingress) needs a session; a module calling
+    # the platform API directly on the internal network is untouched. The redirect URI is
+    # derived — <OAUTH_REDIRECT_BASE_URL>/platform/v1/auth/callback — so the two OAuth flows
+    # share one public address. With "oidc" the core refuses to start without an issuer, a
+    # client id and an admission rule (see epicurus_core_app.auth.config); the provider being
+    # down never blocks startup, because discovery is fetched lazily.
+    auth_mode: AuthMode = "none"
+    # The provider's issuer; discovery is <issuer>/.well-known/openid-configuration.
+    oidc_issuer_url: str = ""
+    oidc_client_id: str = ""
+    # Blank = a public client (PKCE only). Never logged, never returned by any route.
+    oidc_client_secret: SecretStr = SecretStr("")
+    # Space- or comma-separated; `openid` is always requested. Add `groups` for group rules.
+    oidc_scopes: str = "openid email profile"
+    # The button label ("Sign in with <name>"); blank lets the shell say "Sign in".
+    oidc_provider_name: str = ""
+    # Admission — comma-separated. Emails match case-insensitively (and never an address the
+    # provider says is unverified); groups match the `groups` claim exactly. An empty allowlist
+    # never means "everyone": that takes OIDC_ALLOW_ALL_USERS=true, said out loud.
+    oidc_allowed_emails: str = ""
+    oidc_allowed_groups: str = ""
+    oidc_allow_all_users: bool = False
+    # A signed-out visitor goes straight to the provider instead of the sign-in screen.
+    oidc_auto_redirect: bool = False
+    # Sliding session lifetime, renewed at most once an hour while the session is in use.
+    auth_session_days: int = 30
+
+    @field_validator("auth_mode", mode="before")
+    @classmethod
+    def _normalise_auth_mode(cls, value: object) -> object:
+        """``AUTH_MODE=OIDC`` means ``oidc``, and a blank value means unset (``none``).
+
+        Anything else that is not one of the two modes still fails validation — and so fails
+        startup. An unrecognised mode silently read as ``none`` would be the fail-open reading
+        of a typo in exactly the setting that decides whether the platform has a door.
+        """
+        if isinstance(value, str):
+            value = value.strip().lower()
+            return value or "none"
+        return value
+
+    @field_validator(
+        "oidc_allow_all_users", "oidc_auto_redirect", "auth_session_days", mode="before"
+    )
+    @classmethod
+    def _blank_auth_to_default(cls, value: object, info: ValidationInfo) -> object:
+        """Treat a blank ``OIDC_ALLOW_ALL_USERS=`` / ``AUTH_SESSION_DAYS=`` as the default.
+
+        Compose passes every sign-in key through as ``${KEY:-…}``; a blank value would
+        otherwise fail bool/int parsing and take the whole core down on a key the operator
+        never meant to set.
+        """
+        if isinstance(value, str) and value.strip() == "" and info.field_name is not None:
+            return cls.model_fields[info.field_name].default
+        return value
 
     @field_validator("llm_temperature", "llm_top_p", "llm_num_ctx", mode="before")
     @classmethod

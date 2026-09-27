@@ -72,16 +72,23 @@ export default defineConfig({
   },
   server: {
     // Local dev against a running stack: the core is published on :8082.
+    //
+    // `xfwd` adds the X-Forwarded-* headers, so a dev request looks *proxied* to the core —
+    // exactly as production's nginx makes it look. The core enforces sign-in (#969) only on
+    // requests that arrived through a proxy (direct calls on the internal network are module
+    // traffic), so without it an `AUTH_MODE=oidc` core would wave every dev request through and
+    // the sign-in screen could never be seen from `npm run dev`.
     proxy: {
-      "/platform": { target: "http://localhost:8082", changeOrigin: true },
+      "/platform": { target: "http://localhost:8082", changeOrigin: true, xfwd: true },
     },
   },
   // `vite preview` doesn't inherit `server.proxy` — it needs its own. Without this, checking
   // a production build locally (`npm run build && npm run preview`, the only way the real
   // generated service worker — injectManifest, #493 — ever runs) has no path to the core.
+  // Same `xfwd` reasoning as above.
   preview: {
     proxy: {
-      "/platform": { target: "http://localhost:8082", changeOrigin: true },
+      "/platform": { target: "http://localhost:8082", changeOrigin: true, xfwd: true },
     },
   },
   // Vitest (https://vitest.dev/config/)

@@ -305,6 +305,32 @@ jobs:
             || { echo "the refusal did not name the fix:"; cat err.txt; exit 1; }
           echo "the guard refuses a half-working hosted-only release"
 
+      # Sign-in (#969): an `oidc` release renders every key the core reads, with the client
+      # secret from a Secret, and validates; and the fail-closed guard refuses a release the
+      # core would refuse to start — no admission rule is the one that must never render.
+      - name: Render and validate — sign-in on (OpenID Connect)
+        run: |
+          rendered="$(helm template epicurus "$CHART" \
+            --set auth.mode=oidc,auth.oidc.issuerUrl=https://id.example.com \
+            --set auth.oidc.existingSecret=epicurus-oidc \
+            --set 'auth.oidc.allowedEmails={you@example.com}' \
+            --set ingress.enabled=true,ingress.host=ai.example.com,ingress.tls.enabled=true)"
+          printf '%s' "$rendered" | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" -
+          printf '%s' "$rendered" | grep -A1 'name: AUTH_MODE' | grep -q 'value: "oidc"' \
+            || { echo "AUTH_MODE is not oidc on a sign-in release"; exit 1; }
+          echo "a sign-in release renders and validates"
+
+      - name: Render — sign-in with no admission rule must be refused
+        run: |
+          if helm template epicurus "$CHART" \
+              --set auth.mode=oidc,auth.oidc.issuerUrl=https://id.example.com,auth.oidc.clientId=x \
+              >/dev/null 2>err.txt; then
+            echo "the chart rendered a sign-in that admits nobody by rule"; exit 1
+          fi
+          grep -q 'no admission rule' err.txt \
+            || { echo "the refusal did not name the missing rule:"; cat err.txt; exit 1; }
+          echo "the guard refuses a sign-in with no admission rule"
+
   # Validates Prometheus and Alertmanager configs without booting the
   # observability stack. The runtime-smoke gate skips that stack, so a bad rule
   # (e.g. an undefined template function) would otherwise reach production

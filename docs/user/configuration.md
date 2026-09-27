@@ -79,6 +79,13 @@ deliberate choice:
   network, with your own perimeter — VPN, reverse proxy, auth proxy — in front
   (ADR-0008: access is the operator's choice).
 
+Either way, turn on **[sign-in](../infrastructure/sign-in.md)** once the stack is reached
+from more than this machine: `AUTH_MODE=oidc` plus an OpenID Connect provider (Pocket ID,
+Authentik, Keycloak, …), set in `.env` — the keys are listed, commented, in
+[`.env.example`](../../.env.example). Sign-in guards the web shell, not the published
+module or core ports, which is one more reason to keep `BIND_ADDRESS` on loopback and put
+the perimeter in front of the web shell.
+
 Which `.env` applies depends on **how you start the stack**:
 
 - **Full stack** — `docker compose up` from the repo root reads the **root `.env`**.

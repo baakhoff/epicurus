@@ -4,6 +4,7 @@ import { CheckCircle2, KeyRound, Link, Moon, RefreshCw, Sun, Unlink, XCircle } f
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
+import { AccountCard } from "@/components/AccountCard";
 import { ChatBridgesCard } from "@/components/ChatBridgesCard";
 import { EventAlertsCard } from "@/components/EventAlertsCard";
 import { ExportImportCard } from "@/components/ExportImportCard";
@@ -878,6 +879,9 @@ export function SettingsScreen() {
         {oauthNotice && (
           <OAuthNotice message={oauthNotice.message} tone={oauthNotice.tone} />
         )}
+
+        {/* Who is signed in, and Sign out (#969) — absent unless sign-in is on. */}
+        <AccountCard />
 
         <Card>
           <h3 className="mb-2 font-serif text-base text-ink">Appearance</h3>

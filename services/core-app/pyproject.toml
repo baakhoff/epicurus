@@ -1,6 +1,6 @@
 [project]
 name = "epicurus-core-app"
-version = "0.129.0"
+version = "0.130.0"
 description = "The epicurus core runtime: hosts the agent loop, LLM gateway, memory, power states, and the module-facing platform API."
 requires-python = ">=3.11"
 dependencies = [
@@ -41,6 +41,11 @@ dependencies = [
     # Mass de-index fuse metrics (#848). Already present transitively via epicurus-core
     # (which owns the /metrics route); declared directly because we import it.
     "prometheus-client>=0.20",
+    # Sign in with an OpenID Connect provider (#969): ID-token signature validation against the
+    # provider's JWKS (RSA / EC / EdDSA need the crypto extra). Already in the lock through
+    # mcp; declared because the core imports it. Its sync PyJWKClient is never used — JWKS is
+    # fetched over async httpx so the event loop never blocks on the provider.
+    "pyjwt[crypto]>=2.10",
 ]
 
 [build-system]

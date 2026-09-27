@@ -48,6 +48,23 @@ Images: tag {{ default .Chart.AppVersion .Values.image.tag }} from {{ .Values.im
 
      kubectl -n {{ .Release.Namespace }} port-forward svc/core-app 8082:8080
 {{- end }}
+{{- if eq (toString .Values.auth.mode) "oidc" }}
+
+   Sign-in is ON{{ with .Values.auth.oidc.providerName }} ({{ . }}){{ end }}. Register exactly this callback
+   URL with the provider — sign-in works at this one address only:
+
+     {{ include "epicurus.signInCallbackUrl" $ }}
+{{- if not (hasPrefix "https://" (include "epicurus.oauthRedirectBaseUrl" $)) }}
+
+   That address is plain http, so the session cookie cannot be marked Secure.
+   Fine for a port-forward to localhost; for anything else set
+   `ingress.tls.enabled=true` or `core.oauth.redirectBaseUrl` to your https address.
+{{- end }}
+{{- else if .Values.ingress.enabled }}
+
+   WARNING: sign-in is off (auth.mode=none) — anyone who can reach this host has
+   full access. Turn it on: docs/infrastructure/sign-in.md
+{{- end }}
 
 {{ if $bootstrapped }}4{{ else }}3{{ end }}. FIRST THINGS TO CHECK
 

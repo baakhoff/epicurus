@@ -12,6 +12,95 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Sign-in on Compose and Kubernetes, and how to set it up** (#969) — the core's new OpenID
+  Connect sign-in only helps if every way of running epicurus can turn it on, and if an operator
+  can find out how. On **Compose** the core-app fragment now passes `AUTH_MODE`,
+  `AUTH_SESSION_DAYS` and every `OIDC_*` key through from `.env`, with the core's own defaults —
+  and the switches and the day count arrive as `false` / `30`, never blank, because a blank
+  boolean is a start-up error, not "unset"; `.env.example` gains a commented Pocket ID block.
+  On **Kubernetes** the chart gains an `auth:` block. A release that says nothing about it
+  renders exactly one env entry more than before — `AUTH_MODE=none` — and a test proves it
+  against the chart with the sign-in wiring cut out, on the default, published and hosted-only
+  shapes. `oidc` renders every key, the client id from a value or a Secret and the client
+  secret only from one (`auth.oidc.existingSecret`, else the shared Secret; optional, since a
+  public client has none), and the render **refuses** what the core would refuse to start with:
+  no issuer, an issuer or public URL that is not an absolute http(s) URL, no client-id source,
+  or no admission rule — an empty allowlist, a list of blanks and `--set-string …=false`
+  included, because against Google an empty allowlist would admit the internet. The Kubernetes
+  smoke gate turns sign-in on through these values (`helm upgrade --reuse-values`), so the
+  chart's own path is what boots. A sign-in variable in `core.extraEnv` fails the render too, rather than emit a
+  duplicate env entry that server-side apply (Flux) rejects. `NOTES.txt` prints the callback to
+  register, flags a plain-http one, and warns when a release publishes an Ingress with sign-in
+  off. The new [sign-in guide](docs/infrastructure/sign-in.md) walks through Pocket ID on both
+  platforms (the Secret created without touching shell history, SOPS for GitOps), the admission
+  rules, Authentik / Keycloak / Authelia / Kanidm / Google, the phone PWA, sign-out and a
+  troubleshooting table keyed by every `auth_error` code — and says plainly what sign-in does
+  not cover: the published internal ports and the Compose gateway's `<module>.localhost`
+  routes. So the remote-access recipes now point `tailscale serve` and Caddy at the web shell
+  (`8084` / `web:8080`) instead of the gateway, and present built-in sign-in as the option to
+  use beside a network perimeter. chart 0.2.1→0.3.0 (MINOR).
+- **A sign-in screen for OpenID Connect sign-in — and the OAuth callback reaches the core
+  again** (#969) — with the core's sign-in on, the web shell now asks `GET
+  /platform/v1/auth/session` before it mounts anything, so a signed-out browser sees a sign-in
+  screen instead of a page of refused requests: the ε mark and one button, "Sign in with
+  {provider}" (or "Sign in"), a centred card on a desktop and a full-height screen with a tall,
+  thumb-reach button and safe-area insets on a phone. The button sends the window to the core's
+  login route with a `next` that brings it back to exactly where it was — the screen a session
+  ran out on, a share waiting at `/?share=1`, a notification's deep link. A failed sign-in comes
+  back as `auth_error`, and every code reads as a sentence that says what to do ("your account
+  isn't allowed to use this epicurus — ask whoever runs it to add you"; "the operator needs the
+  `groups` scope"); the raw value is never shown, and the parameter is removed from the address
+  bar. The operator's auto-redirect sends a signed-out visitor straight to the provider, with a
+  30-second loop guard that shows the button instead of bouncing a browser that came back still
+  signed out. Any 401 from the platform — every fetch, both stream readers, the archive upload —
+  returns to the sign-in screen, is never retried, and never lights the "can't reach epicurus"
+  banner. Settings gains an **Account** card with who is signed in and **Sign out**, which holds
+  auto-redirect off in that tab so signing out sticks. With sign-in off — the default — none of
+  it shows, and a core that is down or predates sign-in opens the app exactly as before. The
+  change also fixes a real bug: the service worker answered **every** top-level navigation with
+  the cached app shell, `/platform/` included, so on any device that had installed the PWA the
+  **connected-account OAuth callback** (`/platform/v1/oauth/callback`, Google's redirect back)
+  never reached the core and connecting Google silently failed; navigations to `/platform/` now
+  go to the network, which the sign-in routes need too. The dev and preview proxies add
+  `X-Forwarded-*` (`xfwd`), so `npm run dev` sees the core's enforcement as production does.
+  `web` 0.151.0 → 0.152.0 (MINOR).
+- **Sign in with an OpenID Connect provider** (#969) — epicurus had no sign-in of its own:
+  whoever reached the web shell reached `/platform/v1/*`, which is everything — chats, memory,
+  mail, calendar, files, provider keys — and the documented ways to close that (basic auth in
+  Caddy, oauth2-proxy) all sat outside the app, so it never knew who was using it and a phone PWA
+  met a browser password prompt. The core is now an **OpenID Connect relying party**
+  (`AUTH_MODE=oidc`): authorization code flow with PKCE, a `state` bound to an HttpOnly
+  transaction cookie, a `nonce` bound to an ID token verified against the provider's JWKS with the
+  algorithm pinned to asymmetric ones the provider advertises, userinfo merged in, and an
+  admission rule — allowlisted emails (never an unverified one), allowlisted groups, or an explicit
+  `OIDC_ALLOW_ALL_USERS=true`, because an empty allowlist pointed at a public provider would admit
+  the internet. Four endpoints under `/platform/v1/auth` (`session`, `login`, `callback`,
+  `logout`); every failed sign-in lands back on the shell as `/?auth_error=<code>` from a closed
+  set of ten, never on a JSON page. Sessions are server-side — an opaque 256-bit cookie, only its
+  SHA-256 stored, sliding at most hourly — in two new tables (revision `0007`) that a tenant
+  archive deliberately leaves behind. The enforcement is a **trust boundary**, not a login wall: a
+  request that came through a proxy (the web shell's nginx, an ingress, the Compose gateway)
+  needs a session or gets a 401, and an unsafe one must also pass a cross-site check (403) because
+  `SameSite=Lax` does not stop a sibling subdomain; a module calling the platform API directly on
+  the internal network is untouched, so no module changed. The core **refuses to start**
+  half-configured, naming everything missing in one line, yet never contacts the provider at
+  boot — discovery is lazy, so a provider that is down cannot take the platform with it. Both
+  smoke gates now end with sign-in on and prove the web door answers 401 while module ↔ core
+  traffic still flows, on Compose and on Kubernetes. `AUTH_MODE=none` — the default — is the
+  platform exactly as it was. `core-app` 0.129.0 → 0.130.0 (MINOR).
+- **MinIO images now pull from a registry that still serves them anonymously** (#973) — Quay
+  followed Docker Hub (#934) and started refusing anonymous pulls of `quay.io/minio/minio` and
+  `quay.io/minio/mc` — a `401` on the whole repository, not one tag — so every fresh
+  `compose up`, the `quality` gate's testcontainers suites, `runtime-smoke`, and `k8s-smoke`
+  all failed the same way. `docker.io/pgsty/minio` and `docker.io/pgsty/mc` are a
+  **community-maintained fork** of the AGPL MinIO server and client (published by Pigsty — not
+  MinIO Inc. and not a Docker Hub verified publisher) that still serves anonymously with pinned,
+  multi-arch (amd64/arm64) release tags; the Compose fragment, the chart's `minio.image` / `minio.initImage`
+  defaults, the testcontainers pins, and the docs now point there
+  (`RELEASE.2026-08-04T00-00-00Z` / `RELEASE.2026-09-16T00-00-00Z`). Entrypoints, `Cmd`, and
+  environment surface are unchanged from upstream, so nothing else moves. An operator who
+  overrode MinIO to `quay.io` in their own values must switch too — that source is now
+  anonymous-401 for everyone. Chart 0.2.0→0.2.1 (PATCH); no component bump.
 - **A hosted-only deployment runs no local runtime** (#962) — running with hosted chat and
   hosted embeddings and *no* Ollama was a documented capability that nothing actually supported.
   The Helm chart refused to render it (`ollama.enabled: false` demanded an external URL), Compose

@@ -253,6 +253,10 @@ EXCLUSIONS: tuple[ExclusionEntry, ...] = (
         reason="operational — background-job cursors and history",
     ),
     ExclusionEntry(
+        component="auth_sessions / auth_login_states",
+        reason="operational — this installation's sign-ins and logins in flight; sign in again",
+    ),
+    ExclusionEntry(
         component="secrets (provider API keys, OAuth tokens)",
         reason="never exported — held in OpenBao; the report names what to re-enter",
     ),

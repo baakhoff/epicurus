@@ -229,7 +229,9 @@ services:
     networks: [epicurus]
 
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    # Community-maintained fork of the AGPL MinIO server (pgsty, not MinIO Inc.):
+    # upstream no longer serves anonymous pulls on Docker Hub (#934) or Quay (#973).
+    image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -256,7 +258,7 @@ services:
   minio-init:
     # NOTE: the mc client is versioned SEPARATELY from the minio server — its
     # release tags do not match the server's, so they are pinned independently.
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: docker.io/pgsty/mc:RELEASE.2026-09-16T00-00-00Z
     restart: "no"
     depends_on:
       minio:

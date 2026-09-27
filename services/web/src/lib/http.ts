@@ -17,7 +17,15 @@
  * network-tab archaeology. Deciding whether that evidence is enough to actually trip the
  * banner is not this function's job: it stays pure evidence reporting, and the store
  * (`useConnection`) owns the debounce.
+ *
+ * **A 401 is sign-in evidence, not outage evidence (#969).** With sign-in on, the core refuses
+ * a proxied `/platform/` request that carries no session with a 401 — and nothing else in the
+ * platform answers 401 — so it proves two things at once: epicurus is up (reachable, like any
+ * other answer), and this browser is signed out. The second goes to the auth gate
+ * (`reportUnauthenticated`), which replaces the app with the sign-in screen. The core's own
+ * sign-in routes are excluded: they are exempt from enforcement and never mean "session ended".
  */
+import { isSignInEnforcedPath, reportUnauthenticated } from "@/lib/auth";
 import { useConnection, type UnreachableKind } from "@/stores/connection";
 
 /** The path epicurus actually routes on — no origin, no query string (the latter can
@@ -57,6 +65,9 @@ export async function epFetch(
     useConnection.getState().reportUnreachable(evidence(response.status === 502 ? "502" : "504"));
   } else {
     useConnection.getState().reportReachable();
+    if (response.status === 401 && isSignInEnforcedPath(requestPath(input))) {
+      reportUnauthenticated();
+    }
   }
   return response;
 }

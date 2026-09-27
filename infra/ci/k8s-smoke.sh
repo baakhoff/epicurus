@@ -98,6 +98,29 @@ settle_llm_runtime() { # the shared KV-cache assertion rolls it; wait for the ne
   kc rollout status statefulset/ollama --timeout=180s >/dev/null
 }
 
+# The sign-in phase (#969): turned on the way an operator turns it on — `helm upgrade` with
+# the chart's `auth:` values — so what this phase proves is the chart's own path: the render-
+# time guard (`epicurus.assertSignIn`) accepts the values and the env it emits is what the core
+# starts with. `--reuse-values` keeps everything the release already carries (the CI values and
+# the hosted-only upgrade). `modules.echo.replicas=0` keeps the module the removal assertion
+# scaled down where it is: Helm's three-way merge would otherwise restore the chart's replica
+# count and quietly undo that assertion's end state.
+enable_sign_in() {
+  helm upgrade "$RELEASE" "$CHART" \
+    --namespace "$NS" \
+    --reuse-values \
+    --set auth.mode=oidc \
+    --set auth.oidc.issuerUrl=http://127.0.0.1:9/smoke-issuer \
+    --set auth.oidc.clientId=epicurus-smoke \
+    --set auth.oidc.allowAllUsers=true \
+    --set modules.echo.replicas=0 \
+    --wait --timeout 8m >/dev/null
+  kc rollout status deployment/core-app --timeout=300s >/dev/null
+  mode="$(kc get deployment/core-app \
+    -o jsonpath='{.spec.template.spec.containers[*].env[?(@.name=="AUTH_MODE")].value}')"
+  [ "$mode" = "oidc" ] || die "helm upgrade with auth.mode=oidc rendered AUTH_MODE='$mode'"
+}
+
 dump_diagnostics() {
   log "Diagnostics (k8s smoke failed)"
   kc get pods -o wide 2>&1 || true
@@ -349,5 +372,10 @@ printf '%s' "$rm_body" | grep -q '"containers":1' \
 replicas="$(kc get deployment echo -o jsonpath='{.spec.replicas}' 2>/dev/null || true)"
 [ "$replicas" = "0" ] || die "echo's Deployment has $replicas replicas after removal (expected 0)"
 ok "a confirmed removal scaled the module's Deployment to zero through the scoped Role (#891)"
+
+# ── sign-in on, last: the web door closes, module <-> core stays open (#969) ───
+# After the seam's removal of `echo` on purpose: the phase proves module <-> core through the
+# storage module, and nothing after it may assume the web door is open.
+smoke_assert_sign_in
 
 log "ALL K8S SMOKE CHECKS PASSED"

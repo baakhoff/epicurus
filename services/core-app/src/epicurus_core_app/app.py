@@ -70,6 +70,7 @@ from epicurus_core_app.agent.routes import create_agent_router
 from epicurus_core_app.agent.session_delete import SessionDeleteCascade
 from epicurus_core_app.agent.session_model import SessionModelStore
 from epicurus_core_app.agent.suspended import SuspendedRunStore
+from epicurus_core_app.auth import AuthConfigError, AuthMiddleware, build_auth
 from epicurus_core_app.automations.document_sinks import make_kb_sink, make_notes_sink
 from epicurus_core_app.automations.feed import RunFeed
 from epicurus_core_app.automations.migration import migrate_scheduled_turns
@@ -211,6 +212,15 @@ def create_app() -> FastAPI:
     power = PowerController()
     secrets = SecretStore.from_settings(settings)
     engine = create_async_engine(settings.database_url)
+    # Sign-in (#969) is validated first, before anything else is built: with AUTH_MODE=oidc a
+    # missing issuer, client id or admission rule fails startup with one line naming all of
+    # them, rather than bringing up a platform whose door is not configured. Nothing here
+    # contacts the provider — discovery is lazy, so a provider that is down never blocks boot.
+    try:
+        auth = build_auth(settings, engine)
+    except AuthConfigError as exc:
+        log.error("sign-in is misconfigured; refusing to start", error=str(exc))
+        raise
     qdrant = AsyncQdrantClient(url=settings.qdrant_url)
 
     prefs = LlmPrefsStore(engine)
@@ -507,6 +517,9 @@ def create_app() -> FastAPI:
         docker,
         env_path=settings.ollama_runtime_env_path,
         service=settings.ollama_service_name,
+        # A hosted-only deployment has no Ollama workload on either runtime arm (#962,
+        # ADR-0144), so the KV-cache apply neither writes nor restarts anything.
+        local_runtime_enabled=settings.local_runtime_enabled,
     )
     # Agent tool discovery scans only enabled modules (#126); wired after the registry
     # exists (the host needs the registry and the registry needs the host).
@@ -1137,6 +1150,11 @@ def create_app() -> FastAPI:
     # Instruments every router below (agent loop, LLM gateway, platform API, files);
     # EventBus publish/handle spans link in over NATS for one trace across the stack.
     setup_tracing(app, settings, version=_service_version())
+    # The trust boundary (#969): with AUTH_MODE=oidc a request that came through a proxy (the
+    # web shell, an ingress) needs a session; a module calling this API directly does not.
+    # Pure ASGI, so SSE streams pass through unbuffered; a strict no-op with AUTH_MODE=none.
+    app.add_middleware(AuthMiddleware, service=auth.service)
+    app.include_router(auth.router)
     app.include_router(
         create_platform_router(
             settings,

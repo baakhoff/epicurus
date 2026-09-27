@@ -10,6 +10,7 @@ import {
   ActiveSessions,
   AgentInstructions,
   AttachmentUploaded,
+  AuthSession,
   Automation,
   type AutomationDraft,
   AutomationKillSwitch,
@@ -31,6 +32,7 @@ import {
   FileText,
   HoverCard,
   LlmPrefs,
+  LocalRuntimeStatus,
   LogEntry,
   MaintenanceCurrentRun,
   MaintenanceRunPage,
@@ -73,6 +75,7 @@ import {
   type PowerState,
   type SavedModelOverrideInput,
 } from "@/lib/contracts";
+import { AUTH_LOGOUT_PATH, AUTH_SESSION_PATH, reportUnauthenticated } from "@/lib/auth";
 import { epFetch } from "@/lib/http";
 import { parseFrame, sseRequest } from "@/lib/sse";
 import { useConnection } from "@/stores/connection";
@@ -126,7 +129,8 @@ const PORTABILITY_IMPORT_PATH = "/platform/v1/portability/imports";
  *  is exactly the call most likely to be the first to notice a box that has gone away. Losing
  *  that evidence because the request needed upload progress would be a silent regression in a
  *  feature that has nothing to do with portability, so it is reproduced here rather than
- *  forgotten. */
+ *  forgotten — and so is its sign-in evidence (#969): a 401 here means the session ended, the
+ *  same as anywhere else. */
 function uploadEvidence(status: number | null): void {
   const connection = useConnection.getState();
   if (status === null) {
@@ -139,6 +143,7 @@ function uploadEvidence(status: number | null): void {
     });
   } else {
     connection.reportReachable();
+    if (status === 401) reportUnauthenticated();
   }
 }
 
@@ -211,6 +216,10 @@ export const api = {
       z.array(ModelInfo),
       `/platform/v1/llm/models${withCapabilities ? "?capabilities=true" : ""}`,
     ),
+  // Whether this deployment runs a local runtime at all (#962) — `absent` (deliberately none),
+  // `unreachable` (one is configured and down), or `ok`. Its own endpoint rather than an
+  // envelope around the model list, which stays a bare array for its five web consumers.
+  localRuntime: () => request(LocalRuntimeStatus, "/platform/v1/llm/local-runtime"),
   // The browsable model catalog the core parses from upstream on a schedule (#269).
   catalog: () => request(CatalogResponse, "/platform/v1/llm/catalog"),
   deleteModel: (name: string) =>
@@ -1014,6 +1023,15 @@ export const api = {
   },
 
   info: () => request(PlatformInfo, "/platform/v1/info"),
+
+  // Sign-in (#969). The session read is always a 200 — signed in or not — so the shell can ask
+  // before mounting anything that would be refused; `no-store` because the answer changes the
+  // moment the cookie does, and a heuristically cached copy would gate on a stale one. Login is
+  // a full-page navigation (`loginUrl` in lib/auth), never a fetch. Logout's body is read
+  // loosely: any JSON object is a success — the session is gone once the core answered 2xx.
+  authSession: () => request(AuthSession, AUTH_SESSION_PATH, { cache: "no-store" }),
+  authLogout: () =>
+    request(z.record(z.string(), z.unknown()), AUTH_LOGOUT_PATH, { method: "POST" }),
 
   // Host system + GPU snapshot backing the Models page's context-window suggestion.
   systemInfo: () => request(SystemInfo, "/platform/v1/system/info"),

@@ -110,11 +110,73 @@ http://openbao:8200
 {{- end -}}
 {{- end -}}
 
+{{/*
+The local LLM runtime's URL — **and the empty string is a valid answer** (#962, ADR-0144).
+
+Three deployments, not two: the chart's own Ollama, an external one, and *none at all* —
+hosted chat and hosted embeddings, no local runtime anywhere. The third was unreachable
+because this helper was written by copying `epicurus.qdrantUrl` / `epicurus.openbaoUrl`,
+components the core genuinely cannot run without, where `required` is right. Ollama is not
+one of them, and `epicurus.minioUrl` three definitions down already shows the other shape.
+An empty `OLLAMA_URL` is how the core is told there is no local runtime, and it then refuses
+every local-runtime action with a reason instead of timing out against a placeholder.
+*/}}
 {{- define "epicurus.ollamaUrl" -}}
 {{- if .Values.ollama.enabled -}}
 http://ollama:11434
 {{- else -}}
-{{- required "ollama.external.url is required when ollama.enabled is false" .Values.ollama.external.url -}}
+{{- default "" .Values.ollama.external.url -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Whether this deployment has a local LLM runtime at all — "true" or "" (Helm's falsy string).
+The one place the question is answered, so the env, the bootstrap default and the guard below
+cannot disagree about what "hosted-only" means.
+*/}}
+{{- define "epicurus.localRuntimeEnabled" -}}
+{{- if include "epicurus.ollamaUrl" . -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+`LLM_BOOTSTRAP_MODELS` for this deployment.
+
+With no local runtime there is nothing to pull into, so the chart's default (`auto`) becomes
+blank on its own rather than making every hosted-only operator discover the setting. An
+operator who set the value themselves is left alone — an explicit list is a stated pin, and
+the core answers a pull with a clean refusal now, not a three-minute poll.
+*/}}
+{{- define "epicurus.bootstrapModels" -}}
+{{- if and (not (include "epicurus.localRuntimeEnabled" .)) (eq .Values.core.llm.bootstrapModels "auto") -}}
+{{- else -}}
+{{- .Values.core.llm.bootstrapModels -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Refuse to render the half-working stack (#962, ADR-0144).
+
+With no local runtime, a **bare** model name — `llama3.2`, `nomic-embed-text`, the chart's own
+defaults — routes to a runtime that does not exist. Chat would work through whatever hosted
+provider the operator configured while memory recall and every module index failed at call
+time. That is exactly the deployment we refuse to ship elsewhere, so it fails at render time
+with the fix in the message. The old guard (`required` on `ollama.external.url`) refused a
+*legitimate* deployment; this one refuses a broken one.
+
+A hosted id is `<known-alias>/<model>`, mirroring `providers.is_hosted` in the core —
+`local/…` is deliberately not on the list, and neither is an unknown prefix, because both
+route to the local runtime there too.
+*/}}
+{{- define "epicurus.assertHostedOnlyModels" -}}
+{{- if not (include "epicurus.localRuntimeEnabled" .) -}}
+{{- $hosted := list "claude" "gpt" "grok" "deepseek" "gemini" "openrouter" "custom" -}}
+{{- $checks := dict "core.llm.defaultModel" .Values.core.llm.defaultModel "core.memoryEmbedModel" .Values.core.memoryEmbedModel -}}
+{{- range $key, $model := $checks -}}
+{{- $alias := (splitList "/" ($model | toString)) | first -}}
+{{- if not (and (contains "/" ($model | toString)) (has $alias $hosted)) -}}
+{{- fail (printf "this release has no local LLM runtime (ollama.enabled is false and ollama.external.url is blank), but %s is %q — a local model name, which nothing here can run. Set %s to a hosted alias, e.g. core.memoryEmbedModel=gpt/text-embedding-3-small and core.llm.defaultModel=claude/claude-sonnet-4-6, or enable Ollama." $key ($model | toString) $key) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -219,6 +281,165 @@ http://{{ .Values.ingress.host }}
 {{- else -}}
 http://localhost:8084
 {{- end -}}
+{{- end -}}
+
+{{/* ── Sign-in (#969) ───────────────────────────────────────────────────────── */}}
+
+{{/*
+Every env var the chart renders from `auth`, comma-separated. The one list both the env
+template and the `core.extraEnv` guard below read, so they cannot disagree about the family.
+*/}}
+{{- define "epicurus.signInEnvNames" -}}
+AUTH_MODE,AUTH_SESSION_DAYS,OIDC_ISSUER_URL,OIDC_PROVIDER_NAME,OIDC_CLIENT_ID,OIDC_CLIENT_SECRET,OIDC_SCOPES,OIDC_ALLOWED_EMAILS,OIDC_ALLOWED_GROUPS,OIDC_ALLOW_ALL_USERS,OIDC_AUTO_REDIRECT
+{{- end -}}
+
+{{/*
+A list — or a single comma-separated string, which is what `--set key=a,b` hands a template —
+as the comma-joined, trimmed, blank-free string the core parses. `[""]` and `" , "` both come
+out empty, which is what keeps the admission check honest: a list of blanks is not a rule.
+*/}}
+{{- define "epicurus.csv" -}}
+{{- $raw := . -}}
+{{- if kindIs "string" $raw -}}{{- $raw = splitList "," $raw -}}{{- end -}}
+{{- $items := list -}}
+{{- range $raw -}}
+{{- $item := trim (toString .) -}}
+{{- if $item -}}{{- $items = append $items $item -}}{{- end -}}
+{{- end -}}
+{{- join "," $items -}}
+{{- end -}}
+
+{{/*
+A switch as the core reads it: "true" or "false", nothing else. `--set-string x=false` hands a
+template the *string* "false", which is truthy — read naively, that would count as an admission
+rule the operator explicitly turned off.
+*/}}
+{{- define "epicurus.flag" -}}
+{{- if eq (lower (toString (default "" .))) "true" -}}true{{- else -}}false{{- end -}}
+{{- end -}}
+
+{{/* Where the OIDC client credentials live: `auth.oidc.existingSecret`, else the shared Secret. */}}
+{{- define "epicurus.oidcSecretName" -}}
+{{- default (include "epicurus.secretName" .) (trim (toString (default "" .Values.auth.oidc.existingSecret))) -}}
+{{- end -}}
+
+{{/*
+The URL the provider must have registered — derived, never configured, from the same public
+base the connected-account OAuth flow already uses, so the two cannot drift. Trailing slashes
+are dropped the way the core drops them.
+*/}}
+{{- define "epicurus.signInCallbackUrl" -}}
+{{- printf "%s/platform/v1/auth/callback" (regexReplaceAll "/+$" (include "epicurus.oauthRedirectBaseUrl" .) "") -}}
+{{- end -}}
+
+{{/*
+Refuse to render a sign-in the core would refuse to start (#969).
+
+With AUTH_MODE=oidc the core fails closed: no issuer, an issuer or public URL that is not an
+absolute http(s) URL, no client id, no admission rule or a session under a day, and it does not
+start. A release that renders anyway only moves the reason from `helm install` into a
+crash-looping pod's log, so this mirrors the core's rule at render time — it does not replace
+it; the core still checks on its own, which is what covers Compose. The admission rule is the
+one that matters most: an empty allowlist is refused rather than read as "everyone", because a
+release pointed at a public provider (Google) would then admit anyone with an account there.
+
+`core.extraEnv` may not name any variable in the family. It is applied after the chart's own
+env, and Kubernetes keys a container's env list by name: two entries under one name is a
+duplicate that server-side apply (Flux, `kubectl apply --server-side`) rejects outright —
+`duplicate entries for key [name=…]` — while client-side apply quietly keeps the last. For
+sign-in the second failure is the worse one: the pod would run a configuration this guard never
+saw. So the family has exactly one source, `auth.*`.
+*/}}
+{{- define "epicurus.assertSignIn" -}}
+{{- $auth := .Values.auth -}}
+{{- $mode := toString (default "" $auth.mode) -}}
+{{- if not (has $mode (list "none" "oidc")) -}}
+{{- fail (printf "auth.mode is %q — set it to \"none\" (no sign-in: anyone who reaches the web shell has full access) or \"oidc\" (sign in with an OpenID Connect provider; see docs/infrastructure/sign-in.md)." $mode) -}}
+{{- end -}}
+{{- range $name := splitList "," (include "epicurus.signInEnvNames" .) -}}
+{{- if hasKey (default (dict) $.Values.core.extraEnv) $name -}}
+{{- fail (printf "core.extraEnv sets %s, one of the sign-in variables this chart renders from auth.* — remove it and set the matching auth value instead (auth.mode, auth.sessionDays, auth.oidc.*). Sign-in has one source so that no variable appears twice in the pod's env (server-side apply rejects a duplicate) and the pod never runs sign-in settings the chart did not check." $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if eq $mode "oidc" -}}
+{{- $oidc := $auth.oidc -}}
+{{- if not (trim (toString (default "" $oidc.issuerUrl))) -}}
+{{- fail "auth.mode is \"oidc\" but auth.oidc.issuerUrl is blank — set it to your provider's issuer, e.g. https://id.example.com (the address whose /.well-known/openid-configuration describes it). The core refuses to start without one, so the chart refuses to render it." -}}
+{{- end -}}
+{{- $urlShape := "^[Hh][Tt][Tt][Pp][Ss]?://[^/?#]+[^?#]*$" -}}
+{{- $issuer := trim (toString (default "" $oidc.issuerUrl)) -}}
+{{- if not (regexMatch $urlShape $issuer) -}}
+{{- fail (printf "auth.oidc.issuerUrl is %q — it must be an absolute http(s) URL with a host and no query string or fragment, e.g. https://id.example.com. The core refuses to start with anything else, so the chart refuses to render it." $issuer) -}}
+{{- end -}}
+{{- $publicUrl := trim (include "epicurus.oauthRedirectBaseUrl" .) -}}
+{{- if not (regexMatch $urlShape $publicUrl) -}}
+{{- fail (printf "the public URL is %q — set core.oauth.redirectBaseUrl (or ingress.host) so it is an absolute http(s) URL with a host and no query string or fragment, e.g. https://assistant.example.com. Sign-in derives its callback from it and the core refuses to start without one." $publicUrl) -}}
+{{- end -}}
+{{- $clientId := trim (toString (default "" $oidc.clientId)) -}}
+{{- $oidcSecret := trim (toString (default "" $oidc.existingSecret)) -}}
+{{- if not (or $clientId $oidcSecret .Values.secrets.existingSecret) -}}
+{{- fail "auth.mode is \"oidc\" but nothing supplies the client id — set auth.oidc.clientId (an identifier, not a secret), or auth.oidc.existingSecret to a Secret carrying OIDC_CLIENT_ID (and OIDC_CLIENT_SECRET for a confidential client). The chart-generated Secret epicurus-secrets holds no OIDC keys, so it cannot be the source." -}}
+{{- end -}}
+{{- $emails := include "epicurus.csv" $oidc.allowedEmails -}}
+{{- $groups := include "epicurus.csv" $oidc.allowedGroups -}}
+{{- $allowAll := eq (include "epicurus.flag" $oidc.allowAllUsers) "true" -}}
+{{- if not (or $emails $groups $allowAll) -}}
+{{- fail "auth.mode is \"oidc\" but no admission rule is set — set auth.oidc.allowedEmails (who may sign in), auth.oidc.allowedGroups (matched against the provider's groups claim; add `groups` to auth.oidc.scopes), or auth.oidc.allowAllUsers=true. An empty allowlist is refused, never read as \"everyone\": pointed at a public provider such as Google, that would admit anyone with an account there. Use allowAllUsers only when the provider itself limits who can use this client (e.g. Pocket ID's Allowed User Groups)." -}}
+{{- end -}}
+{{- if lt (int64 (default 0 $auth.sessionDays)) 1 -}}
+{{- fail (printf "auth.sessionDays is %v — set it to a whole number of days, 1 or more (default 30). It is how long an idle browser stays signed in." $auth.sessionDays) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+The core's sign-in env. `AUTH_MODE` is always rendered — in the default `none` mode it is the
+whole footprint of the feature, one entry. In `oidc` mode, every key the core reads: the client
+id in the clear when `auth.oidc.clientId` is set (it is an identifier, not a secret), else from
+the Secret; the client secret only ever from a Secret, and `optional`, because a public client
+(PKCE only) has none. Lists are comma-joined and switches normalised to "true"/"false", so the
+pod receives exactly what `epicurus.assertSignIn` checked.
+*/}}
+{{- define "epicurus.signInEnv" -}}
+{{- $auth := .Values.auth -}}
+- name: AUTH_MODE
+  value: {{ $auth.mode | quote }}
+{{- if eq (toString $auth.mode) "oidc" }}
+{{- $oidc := $auth.oidc }}
+{{- $clientId := trim (toString (default "" $oidc.clientId)) }}
+{{- $secret := include "epicurus.oidcSecretName" . }}
+- name: AUTH_SESSION_DAYS
+  value: {{ int64 $auth.sessionDays | toString | quote }}
+- name: OIDC_ISSUER_URL
+  value: {{ trim (toString (default "" $oidc.issuerUrl)) | quote }}
+- name: OIDC_PROVIDER_NAME
+  value: {{ trim (toString (default "" $oidc.providerName)) | quote }}
+- name: OIDC_CLIENT_ID
+{{- if $clientId }}
+  value: {{ $clientId | quote }}
+{{- else }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: OIDC_CLIENT_ID
+{{- end }}
+- name: OIDC_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secret }}
+      key: OIDC_CLIENT_SECRET
+      optional: true
+- name: OIDC_SCOPES
+  value: {{ default "openid email profile" (trim (toString (default "" $oidc.scopes))) | quote }}
+- name: OIDC_ALLOWED_EMAILS
+  value: {{ include "epicurus.csv" $oidc.allowedEmails | quote }}
+- name: OIDC_ALLOWED_GROUPS
+  value: {{ include "epicurus.csv" $oidc.allowedGroups | quote }}
+- name: OIDC_ALLOW_ALL_USERS
+  value: {{ include "epicurus.flag" $oidc.allowAllUsers | quote }}
+- name: OIDC_AUTO_REDIRECT
+  value: {{ include "epicurus.flag" $oidc.autoRedirect | quote }}
+{{- end }}
 {{- end -}}
 
 {{/* Scrape annotations for the pods that actually serve /metrics. */}}

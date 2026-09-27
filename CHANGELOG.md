@@ -12,6 +12,144 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Sign-in on Compose and Kubernetes, and how to set it up** (#969) — the core's new OpenID
+  Connect sign-in only helps if every way of running epicurus can turn it on, and if an operator
+  can find out how. On **Compose** the core-app fragment now passes `AUTH_MODE`,
+  `AUTH_SESSION_DAYS` and every `OIDC_*` key through from `.env`, with the core's own defaults —
+  and the switches and the day count arrive as `false` / `30`, never blank, because a blank
+  boolean is a start-up error, not "unset"; `.env.example` gains a commented Pocket ID block.
+  On **Kubernetes** the chart gains an `auth:` block. A release that says nothing about it
+  renders exactly one env entry more than before — `AUTH_MODE=none` — and a test proves it
+  against the chart with the sign-in wiring cut out, on the default, published and hosted-only
+  shapes. `oidc` renders every key, the client id from a value or a Secret and the client
+  secret only from one (`auth.oidc.existingSecret`, else the shared Secret; optional, since a
+  public client has none), and the render **refuses** what the core would refuse to start with:
+  no issuer, an issuer or public URL that is not an absolute http(s) URL, no client-id source,
+  or no admission rule — an empty allowlist, a list of blanks and `--set-string …=false`
+  included, because against Google an empty allowlist would admit the internet. The Kubernetes
+  smoke gate turns sign-in on through these values (`helm upgrade --reuse-values`), so the
+  chart's own path is what boots. A sign-in variable in `core.extraEnv` fails the render too, rather than emit a
+  duplicate env entry that server-side apply (Flux) rejects. `NOTES.txt` prints the callback to
+  register, flags a plain-http one, and warns when a release publishes an Ingress with sign-in
+  off. The new [sign-in guide](docs/infrastructure/sign-in.md) walks through Pocket ID on both
+  platforms (the Secret created without touching shell history, SOPS for GitOps), the admission
+  rules, Authentik / Keycloak / Authelia / Kanidm / Google, the phone PWA, sign-out and a
+  troubleshooting table keyed by every `auth_error` code — and says plainly what sign-in does
+  not cover: the published internal ports and the Compose gateway's `<module>.localhost`
+  routes. So the remote-access recipes now point `tailscale serve` and Caddy at the web shell
+  (`8084` / `web:8080`) instead of the gateway, and present built-in sign-in as the option to
+  use beside a network perimeter. chart 0.2.1→0.3.0 (MINOR).
+- **A sign-in screen for OpenID Connect sign-in — and the OAuth callback reaches the core
+  again** (#969) — with the core's sign-in on, the web shell now asks `GET
+  /platform/v1/auth/session` before it mounts anything, so a signed-out browser sees a sign-in
+  screen instead of a page of refused requests: the ε mark and one button, "Sign in with
+  {provider}" (or "Sign in"), a centred card on a desktop and a full-height screen with a tall,
+  thumb-reach button and safe-area insets on a phone. The button sends the window to the core's
+  login route with a `next` that brings it back to exactly where it was — the screen a session
+  ran out on, a share waiting at `/?share=1`, a notification's deep link. A failed sign-in comes
+  back as `auth_error`, and every code reads as a sentence that says what to do ("your account
+  isn't allowed to use this epicurus — ask whoever runs it to add you"; "the operator needs the
+  `groups` scope"); the raw value is never shown, and the parameter is removed from the address
+  bar. The operator's auto-redirect sends a signed-out visitor straight to the provider, with a
+  30-second loop guard that shows the button instead of bouncing a browser that came back still
+  signed out. Any 401 from the platform — every fetch, both stream readers, the archive upload —
+  returns to the sign-in screen, is never retried, and never lights the "can't reach epicurus"
+  banner. Settings gains an **Account** card with who is signed in and **Sign out**, which holds
+  auto-redirect off in that tab so signing out sticks. With sign-in off — the default — none of
+  it shows, and a core that is down or predates sign-in opens the app exactly as before. The
+  change also fixes a real bug: the service worker answered **every** top-level navigation with
+  the cached app shell, `/platform/` included, so on any device that had installed the PWA the
+  **connected-account OAuth callback** (`/platform/v1/oauth/callback`, Google's redirect back)
+  never reached the core and connecting Google silently failed; navigations to `/platform/` now
+  go to the network, which the sign-in routes need too. The dev and preview proxies add
+  `X-Forwarded-*` (`xfwd`), so `npm run dev` sees the core's enforcement as production does.
+  `web` 0.151.0 → 0.152.0 (MINOR).
+- **Sign in with an OpenID Connect provider** (#969) — epicurus had no sign-in of its own:
+  whoever reached the web shell reached `/platform/v1/*`, which is everything — chats, memory,
+  mail, calendar, files, provider keys — and the documented ways to close that (basic auth in
+  Caddy, oauth2-proxy) all sat outside the app, so it never knew who was using it and a phone PWA
+  met a browser password prompt. The core is now an **OpenID Connect relying party**
+  (`AUTH_MODE=oidc`): authorization code flow with PKCE, a `state` bound to an HttpOnly
+  transaction cookie, a `nonce` bound to an ID token verified against the provider's JWKS with the
+  algorithm pinned to asymmetric ones the provider advertises, userinfo merged in, and an
+  admission rule — allowlisted emails (never an unverified one), allowlisted groups, or an explicit
+  `OIDC_ALLOW_ALL_USERS=true`, because an empty allowlist pointed at a public provider would admit
+  the internet. Four endpoints under `/platform/v1/auth` (`session`, `login`, `callback`,
+  `logout`); every failed sign-in lands back on the shell as `/?auth_error=<code>` from a closed
+  set of ten, never on a JSON page. Sessions are server-side — an opaque 256-bit cookie, only its
+  SHA-256 stored, sliding at most hourly — in two new tables (revision `0007`) that a tenant
+  archive deliberately leaves behind. The enforcement is a **trust boundary**, not a login wall: a
+  request that came through a proxy (the web shell's nginx, an ingress, the Compose gateway)
+  needs a session or gets a 401, and an unsafe one must also pass a cross-site check (403) because
+  `SameSite=Lax` does not stop a sibling subdomain; a module calling the platform API directly on
+  the internal network is untouched, so no module changed. The core **refuses to start**
+  half-configured, naming everything missing in one line, yet never contacts the provider at
+  boot — discovery is lazy, so a provider that is down cannot take the platform with it. Both
+  smoke gates now end with sign-in on and prove the web door answers 401 while module ↔ core
+  traffic still flows, on Compose and on Kubernetes. `AUTH_MODE=none` — the default — is the
+  platform exactly as it was. `core-app` 0.129.0 → 0.130.0 (MINOR).
+- **MinIO images now pull from a registry that still serves them anonymously** (#973) — Quay
+  followed Docker Hub (#934) and started refusing anonymous pulls of `quay.io/minio/minio` and
+  `quay.io/minio/mc` — a `401` on the whole repository, not one tag — so every fresh
+  `compose up`, the `quality` gate's testcontainers suites, `runtime-smoke`, and `k8s-smoke`
+  all failed the same way. `docker.io/pgsty/minio` and `docker.io/pgsty/mc` are a
+  **community-maintained fork** of the AGPL MinIO server and client (published by Pigsty — not
+  MinIO Inc. and not a Docker Hub verified publisher) that still serves anonymously with pinned,
+  multi-arch (amd64/arm64) release tags; the Compose fragment, the chart's `minio.image` / `minio.initImage`
+  defaults, the testcontainers pins, and the docs now point there
+  (`RELEASE.2026-08-04T00-00-00Z` / `RELEASE.2026-09-16T00-00-00Z`). Entrypoints, `Cmd`, and
+  environment surface are unchanged from upstream, so nothing else moves. An operator who
+  overrode MinIO to `quay.io` in their own values must switch too — that source is now
+  anonymous-401 for everyone. Chart 0.2.0→0.2.1 (PATCH); no component bump.
+- **A hosted-only deployment runs no local runtime** (#962) — running with hosted chat and
+  hosted embeddings and *no* Ollama was a documented capability that nothing actually supported.
+  The Helm chart refused to render it (`ollama.enabled: false` demanded an external URL), Compose
+  could not express it (an unconditional fragment and a hard `depends_on`), and an operator who
+  forced it with a placeholder URL met a core that collapsed three different facts into one:
+  **absent** (no runtime configured — a deliberate choice), **unreachable** (one is configured
+  and does not answer) and **ok**. `GET /platform/v1/llm/models` **500ed**, on a page that polls
+  it every ten seconds; pull and delete 500ed the same way; the chat warm-up indicator reported
+  the model "warming" forever, on every turn, for the life of the deployment; and startup spent
+  180 seconds polling an address that was never going to answer. Absence is now a first-class
+  mode, spelled `OLLAMA_URL=""`: the model list answers **200 and an empty array** in both
+  non-serving states, the new `GET /platform/v1/llm/local-runtime` says which one applies, the
+  local-only actions (pull, delete, unload, the KV-cache setting) refuse with **409** and a
+  sentence naming the mode — and pull and delete answer **502** when a configured runtime is
+  unreachable, never a bare 500 — readiness reports the model as **n/a** instead of warming,
+  and the bootstrap logs one line
+  and returns. A local model id asked to serve is refused before any provider call with the
+  capability error the rest of the gateway already speaks (ADR-0140), so a hosted embedding model
+  keeps working while a bare one fails with the fix in the message instead of a connection error.
+  On **Kubernetes** the chart renders an empty `OLLAMA_URL`, blanks `LLM_BOOTSTRAP_MODELS` on its
+  own, and gains the guard actually worth having — it refuses to render a runtime-less release
+  whose chat or embedding default is still a bare local name, naming the hosted alias to set. On
+  **Compose** it is an opt-out overlay — `task hosted-only-up` — which removes the Ollama
+  services *and* blanks `OLLAMA_URL` in one step, the same idiom as the Docker-socket and
+  external-mount opt-ins; the documented install (`git clone`, `docker compose up -d`, no
+  `.env`) is byte-identical and still starts the local runtime, which a compose profile on
+  those services would have quietly stopped doing. Three gates cover it: `compose-validate`
+  proves both the default stack and the overlay resolve, `chart-validate` renders the
+  hosted-only release *and* proves the guard refuses the half-working one, and `k8s-smoke`
+  upgrades a live release into the mode and asserts the core answers. `core-app`
+  0.128.0→0.129.0 (MINOR), chart 0.1.2→0.2.0 (MINOR).
+- **A deployment with no local AI says so once, instead of warning forever** (#962) — the web
+  shell had two inline strings for a dead local runtime ("The local runtime is unreachable — is
+  the ollama service up?", "local runtime unreachable") and rendered every other Ollama control —
+  the pull card, the catalog, the KV-cache card, the context-window card, the `Local (Ollama)`
+  optgroup — as though a runtime existed. On a deployment that deliberately runs **none** (hosted
+  chat, hosted embeddings, `OLLAMA_URL=""`) that reads as a fault the operator is supposed to fix,
+  when in fact nothing is wrong and there is nothing to fix. The shell now reads the runtime's
+  state from `GET /platform/v1/llm/local-runtime` — never from a failing model list, which since
+  this change answers `[]` with a 200 in *both* unhappy states and so carries no information at
+  all — and when that state is `absent` the local half of the Models page collapses into one
+  line: local AI is not configured on this deployment, hosted models are unaffected. The five
+  Ollama cards are removed rather than disabled, the embedding picker drops its local group so an
+  unrunnable model cannot be chosen, the chat picker drops its `Local` heading while keeping the
+  core-default row (that default may itself be hosted), the first-run welcome stops offering a
+  pull, and a module's model slot with nothing left to offer says why instead of looking broken.
+  `unreachable` keeps today's warning, because that state *is* an error and must still look like
+  one, and an older core with no such endpoint keeps today's behaviour exactly.
+  `web` 0.150.0→0.151.0 (MINOR).
 - **The bound on a turn is the operator's; runaway is caught by behaviour** (#925) — the
   **Agent cycles** setting stopped at 12, and the route enforced it *silently*: type 40 and 12 was
   stored. A genuinely long task — search → read → read → summarize → write — ran out of rounds and

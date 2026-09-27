@@ -74,7 +74,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 
 | Field | Env var | Type | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `ollama_url` | `OLLAMA_URL` | `str` | `http://localhost:11434` | Local LLM runtime (the stack reaches it at `http://ollama:11434`). |
+| `ollama_url` | `OLLAMA_URL` | `str` | `http://localhost:11434` | Local LLM runtime (the stack reaches it at `http://ollama:11434`). **Blank means this deployment has no local runtime at all** (#962, ADR-0144) — a deliberate hosted-only install, not a misconfiguration; whitespace counts as blank. The derived `local_runtime_enabled` is what every call site asks. With no runtime: `GET /llm/models` answers 200 and `[]`, `GET /llm/local-runtime` reports `absent`, pull / delete / unload / the KV-cache setting answer **409**, a local model id is refused with a capability error before any provider call, readiness reports the model `n/a`, and the first-boot bootstrap returns at once. See [Hosted-only deployments](../infrastructure/index.md#hosted-only-no-local-llm-runtime). |
 | `ollama_runtime_env_path` | `OLLAMA_RUNTIME_ENV_PATH` | `str` | `/etc/epicurus/ollama.env` | Where the core writes Ollama's start-up env file (KV-cache type) for it to source on restart (#307). A shared volume; override only if you remap the mount. |
 | `ollama_service_name` | `OLLAMA_SERVICE_NAME` | `str` | `ollama` | Compose service the core restarts to apply a KV-cache change (#307). |
 | `llm_default_model` | `LLM_DEFAULT_MODEL` | `str` | `llama3.2` | Model used when a request names none. |
@@ -85,7 +85,7 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `llm_temperature` | `LLM_TEMPERATURE` | `float \| None` | `None` | Sampling temperature passed to each chat completion (local + hosted). A blank env value means unset. |
 | `llm_top_p` | `LLM_TOP_P` | `float \| None` | `None` | Nucleus-sampling `top_p` passed to each chat completion (local + hosted). |
 | `llm_num_ctx` | `LLM_NUM_CTX` | `int \| None` | `None` | Ollama context-window size (`num_ctx`); applied to local models only. |
-| `llm_bootstrap_models` | `LLM_BOOTSTRAP_MODELS` | `str` | `auto` | First-boot model bootstrap (#773, ADR-0118, amended #923), pulled in the background (never blocking readiness). `auto` = seed an *empty* runtime with the effective chat + embedding defaults, then no-op on every later start once anything is installed (a deleted default stays deleted); blank = disabled (air-gapped / hosted-only builds; the CI smoke gate sets this); an explicit comma-separated list is a standing pin — ensured on *every* start regardless of what else is installed. Hosted-prefixed ids are skipped. |
+| `llm_bootstrap_models` | `LLM_BOOTSTRAP_MODELS` | `str` | `auto` | First-boot model bootstrap (#773, ADR-0118, amended #923), pulled in the background (never blocking readiness). `auto` = seed an *empty* runtime with the effective chat + embedding defaults, then no-op on every later start once anything is installed (a deleted default stays deleted); blank = disabled (air-gapped builds; the CI smoke gate sets this). A **hosted-only** deployment needs no setting here since #962: a blank `OLLAMA_URL` makes the bootstrap return in one log line whatever this says, and the Helm chart blanks it for you when it is left at `auto`; an explicit comma-separated list is a standing pin — ensured on *every* start regardless of what else is installed. Hosted-prefixed ids are skipped. |
 | `llm_catalog_url` | `LLM_CATALOG_URL` | `str` | `https://ollama.com/library` | Source the core parses the browsable model catalog from (#269). Point at a mirror for an air-gapped deployment. |
 | `llm_catalog_refresh_seconds` | `LLM_CATALOG_REFRESH_SECONDS` | `int` | `21600` (6h) | How often the background loop re-parses the catalog source. Floored to 60s. |
 | `llm_catalog_max_models` | `LLM_CATALOG_MAX_MODELS` | `int` | `0` | Cap on model families kept (the most-popular survive); `0` = unlimited. |
@@ -140,6 +140,19 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 | `push_vapid_subject` | `PUSH_VAPID_SUBJECT` | `str` | `mailto:admin@example.com` | Contact identity in the VAPID JWT (RFC 8292) — a `mailto:`/`https:` URL a push service can use to reach the operator. Set it for a real deployment (#670, ADR-0102); the default is a neutral placeholder, not a working inbox. |
 | `push_rate_cap_per_hour` | `PUSH_RATE_CAP_PER_HOUR` | `int` | `30` | Max push notifications delivered per tenant per hour, across every category/device — in-memory, single-instance v1 (ADR-0102 §3). `0` disables the cap. |
 | `push_quiet_poll_interval_s` | `PUSH_QUIET_POLL_INTERVAL_S` | `int` | `60` | How often the quiet-hours digest scheduler checks whether a tenant's quiet window just ended (a plain poll, mirroring maintenance/scheduled-turns). |
+| `oauth_redirect_base_url` | `OAUTH_REDIRECT_BASE_URL` | `str` | `http://localhost:8084` | The deployment's **public URL** — what a browser has in its address bar. Both OAuth flows derive their callback from it, so they cannot drift: connected accounts use `<base>/platform/v1/oauth/callback`, sign-in `<base>/platform/v1/auth/callback` (#969). With `AUTH_MODE=oidc` it must be an absolute http(s) URL; its scheme decides whether the session cookie is `Secure`, and its origin is what the cross-site check compares `Origin` against. Plain http on a non-loopback host starts with a warning. |
+| `oauth_state_secret` | `OAUTH_STATE_SECRET` | `str` | `change-this-before-use` | HMAC key signing the connected-account flow's `state`; the flow refuses to run while it is the placeholder. (Sign-in does not use it — its `state` is a random value stored server-side.) |
+| `auth_mode` | `AUTH_MODE` | `none` \| `oidc` | `none` | `none` = no sign-in, exactly the platform before #969; `oidc` = sign in with an OpenID Connect provider — see [Sign-in](#sign-in-969) below. Case-insensitive; blank means `none`; any other value **fails startup** rather than reading as `none`. |
+| `oidc_issuer_url` | `OIDC_ISSUER_URL` | `str` | `""` | The provider's issuer; discovery is `<issuer>/.well-known/openid-configuration`, and the document's `issuer` must match (modulo one trailing slash). Required with `oidc`; an absolute http(s) URL. |
+| `oidc_client_id` | `OIDC_CLIENT_ID` | `str` | `""` | The client registered at the provider. Required with `oidc`. |
+| `oidc_client_secret` | `OIDC_CLIENT_SECRET` | `SecretStr` | `""` | Blank = a **public client** (PKCE only). Set = a confidential client, authenticating with `client_secret_basic` (or `client_secret_post` when that is all the provider advertises). Never logged or returned. |
+| `oidc_scopes` | `OIDC_SCOPES` | `str` | `openid email profile` | Space- or comma-separated; `openid` is always requested and de-duplicated. Add `groups` for a groups rule. Blank = the default. |
+| `oidc_provider_name` | `OIDC_PROVIDER_NAME` | `str` | `""` | The button label — "Sign in with Pocket ID". Blank lets the shell say "Sign in". |
+| `oidc_allowed_emails` | `OIDC_ALLOWED_EMAILS` | `str` | `""` | Comma-separated; case-insensitive. Admits an address the provider has not explicitly marked unverified (`email_verified: false`). |
+| `oidc_allowed_groups` | `OIDC_ALLOWED_GROUPS` | `str` | `""` | Comma-separated; matched **exactly** against the `groups` claim (a list, or a single string). |
+| `oidc_allow_all_users` | `OIDC_ALLOW_ALL_USERS` | `bool` | `false` | Admit everyone the provider authenticates for this client — right for a private provider, wrong for a public one. The allowlists are ignored (with a warning) when this is on. Blank = `false`. |
+| `oidc_auto_redirect` | `OIDC_AUTO_REDIRECT` | `bool` | `false` | A signed-out visitor goes straight to the provider instead of the sign-in screen. Blank = `false`. |
+| `auth_session_days` | `AUTH_SESSION_DAYS` | `int` | `30` | Sliding session lifetime: the session's expiry and the cookie's `Max-Age`, renewed at most once an hour while it is used. At least 1 with `oidc`. Blank = `30`. |
 
 ### Properties
 
@@ -148,6 +161,32 @@ in `CoreSettings` plus the LLM-gateway, agent, module, and memory knobs.
 - **`module_mcp_urls -> list[str]`** — each module's `<base>/mcp` endpoint.
 - **`attachment_allowed_type_list -> list[str]`** — the `attachment_allowed_types`, parsed + lowercased.
 - **`defer_extraction -> bool`** — whether fact extraction is deferred to the nightly runner (`memory_extraction_mode` is anything but `immediate`).
+
+### Sign-in (#969)
+
+How to set these on Compose and on the Helm chart (`auth:` values) is the
+[sign-in guide](../infrastructure/sign-in.md).
+
+`epicurus_core_app.auth.config.load_auth_config(settings)` turns the fields above into the checked
+`AuthConfig` the flow runs on. With `AUTH_MODE=none` it never fails. With `AUTH_MODE=oidc` it
+**fails startup** — one `AuthConfigError` naming everything missing at once — unless:
+
+- `OIDC_ISSUER_URL` is set and is an absolute http(s) URL (no query or fragment);
+- `OIDC_CLIENT_ID` is set;
+- an **admission rule** is set: `OIDC_ALLOWED_EMAILS`, `OIDC_ALLOWED_GROUPS`, or
+  `OIDC_ALLOW_ALL_USERS=true` — an empty allowlist never means everyone;
+- `OAUTH_REDIRECT_BASE_URL` is an absolute http(s) URL;
+- `AUTH_SESSION_DAYS` is at least 1.
+
+It **warns** and starts when the public URL or the issuer is plain http on a non-loopback host
+(cookies cannot be `Secure`; codes and tokens cross the network in clear), when the public URL
+carries a path (sign-in assumes epicurus is served at the root of its origin), and when
+`OIDC_ALLOW_ALL_USERS=true` makes an allowlist moot. The provider itself is never contacted at
+startup: discovery is lazy, so a provider that is down never blocks boot.
+
+**The redirect URI is derived, never configured:** `<OAUTH_REDIRECT_BASE_URL>/platform/v1/auth/callback`
+(a trailing slash on the base is dropped). Register exactly that at the provider — the core logs
+it at startup.
 
 ## Shared file space (per-module storage roots)
 

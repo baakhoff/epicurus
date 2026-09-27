@@ -1,0 +1,20 @@
+# Smoke / CI override — the runtime-smoke gate's sign-in phase (#969).
+#
+# Merged onto compose.yaml + infra/ci/compose.ci.yaml for a core-app-only recreate, *after*
+# every other assertion has passed (infra/ci/smoke.sh `enable_sign_in`). It turns sign-in on
+# the way an operator does — by environment — and merges by key onto core-app's own
+# `environment:` map, so it composes with whatever the core-app fragment passes through
+# (an `AUTH_MODE: ${AUTH_MODE:-none}` line there is simply overridden here).
+#
+# The issuer is deliberately unreachable: discovery is lazy, so the core must start anyway,
+# and the phase asserts exactly that — plus that the web door answers 401 while a module
+# talking to the core directly is untouched. `OIDC_ALLOW_ALL_USERS=true` is the admission
+# rule only because the fail-closed startup check requires one; nobody signs in here.
+
+services:
+  core-app:
+    environment:
+      AUTH_MODE: oidc
+      OIDC_ISSUER_URL: http://127.0.0.1:9/smoke-issuer
+      OIDC_CLIENT_ID: epicurus-smoke
+      OIDC_ALLOW_ALL_USERS: "true"

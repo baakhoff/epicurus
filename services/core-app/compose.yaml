@@ -20,7 +20,13 @@ services:
       NATS_URL: nats://nats:4222
       NATS_USER: core
       NATS_PASSWORD: ${NATS_CORE_PASSWORD:-epicurus-dev}
-      OLLAMA_URL: http://ollama:11434
+      # The local LLM runtime. **Blank means there is none** (#962, ADR-0144) — the
+      # hosted-only overlay (infra/ollama/compose.hosted-only.yaml, `task hosted-only-up`)
+      # sets it blank and drops the ollama service in one step. Single-dash `-`, not `:-`:
+      # `:-` would substitute the default back in for a deliberately *empty* value, which is
+      # precisely what an operator sets to say "there is no local runtime here" — so the
+      # env-var route (`OLLAMA_URL=` in .env) works too.
+      OLLAMA_URL: ${OLLAMA_URL-http://ollama:11434}
       # ── LLM gateway tuning (all optional; blank/unset = provider default) ──
       # Set any of these and restart — no code edit needed (issue #114).
       LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-llama3.2}
@@ -54,6 +60,24 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       OAUTH_REDIRECT_BASE_URL: ${OAUTH_REDIRECT_BASE_URL:-http://localhost:8084}
       OAUTH_STATE_SECRET: ${OAUTH_STATE_SECRET:-change-this-before-use}
+      # Sign-in with an OpenID Connect provider (#969) — off unless AUTH_MODE=oidc, and then
+      # the core refuses to start without an issuer, a client id and an admission rule. The
+      # callback is derived from OAUTH_REDIRECT_BASE_URL above (<base>/platform/v1/auth/callback),
+      # so that must be the one public https address you sign in at. The switches and the day
+      # count carry their real defaults rather than blanks — a blank would fail the core's
+      # parsing. Walkthrough: docs/infrastructure/sign-in.md.
+      AUTH_MODE: ${AUTH_MODE:-none}
+      AUTH_SESSION_DAYS: ${AUTH_SESSION_DAYS:-30}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+      OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      # A secret — keep it in .env (gitignored), never in a committed file. Blank = a public client.
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+      OIDC_ALLOWED_EMAILS: ${OIDC_ALLOWED_EMAILS:-}
+      OIDC_ALLOWED_GROUPS: ${OIDC_ALLOWED_GROUPS:-}
+      OIDC_ALLOW_ALL_USERS: ${OIDC_ALLOW_ALL_USERS:-false}
+      OIDC_AUTO_REDIRECT: ${OIDC_AUTO_REDIRECT:-false}
       # Scopes confirmed module removal (#127) to this stack's containers only, so a
       # co-located stack (e.g. the CI smoke run beside a dev stack) is never touched.
       COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-epicurus}
@@ -82,6 +106,10 @@ services:
         condition: service_started
       ollama:
         condition: service_started
+        # Not required (#962, ADR-0144): the hosted-only overlay removes the ollama service
+        # altogether, and without this the whole `up` would fail on a dependency that is
+        # absent on purpose. With local AI on (the default) the ordering is unchanged.
+        required: false
       openbao:
         condition: service_healthy
       postgres:

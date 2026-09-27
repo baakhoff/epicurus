@@ -13,8 +13,13 @@ services and the edge (a gateway and private ingress) are layered on separately.
 | qdrant | `qdrant/qdrant:v1.12.4` | 6333, 6334 | Vector DB (RAG + memory) |
 | openbao | `openbao/openbao:2.2.0` | 8200 | Secrets — persistent file storage; bootstrap once, auto-unseals on restart |
 | openbao-unseal | `openbao/openbao:2.2.0` | — | Sidecar: polls seal status and unseals on every stack start |
-| minio | `quay.io/minio/minio:RELEASE.*` | 9000 (S3 API), 9001 (console) | S3-compatible object store for app-managed objects |
-| minio-init | `quay.io/minio/mc:RELEASE.*` | — | One-shot: seeds the default `epicurus` bucket on first run |
+| minio | `docker.io/pgsty/minio:RELEASE.*` | 9000 (S3 API), 9001 (console) | S3-compatible object store for app-managed objects |
+| minio-init | `docker.io/pgsty/mc:RELEASE.*` | — | One-shot: seeds the default `epicurus` bucket on first run |
+
+The MinIO images come from `docker.io/pgsty/*`, a **community-maintained fork** of the AGPL
+MinIO server and client (not MinIO Inc.): upstream stopped serving anonymous pulls on Docker
+Hub (#934) and then on Quay (#973). Same entrypoints and env surface as upstream; operators who
+prefer another source override the image.
 
 ## Bring up
 

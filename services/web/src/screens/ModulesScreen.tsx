@@ -32,6 +32,7 @@ import type {
   ToolSpec,
   UiAction,
 } from "@/lib/contracts";
+import { useLocalRuntime } from "@/lib/useLocalRuntime";
 
 /**
  * Reorder card (#543): drag-and-drop (mirroring the tasks board's native HTML5 pattern, #380)
@@ -293,6 +294,9 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
   // Saved hosted ids (#496) are assignable to a chat slot too — a module can run on a hosted
   // model, not only a local one (ADR-0029).
   const saved = useQuery({ queryKey: ["savedModels"], queryFn: () => api.savedModels() });
+  // With no local runtime (#962) the local half of every slot's list is permanently empty. A
+  // slot left with nothing but "Core default" has to say why, or it just looks broken.
+  const runtime = useLocalRuntime();
   const save = useMutation({
     mutationFn: (next: Record<string, string>) => api.setModuleModels(name, next),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["module-models", name] }),
@@ -338,6 +342,12 @@ function ModuleModels({ snapshot }: { snapshot: ModuleSnapshot }) {
                 </optgroup>
               )}
             </Select>
+            {runtime.absent && !(slot.role === "chat" && hosted.length > 0) && (
+              <span className="mt-1 block text-xs text-ink-faint">
+                No local AI on this deployment and no hosted model available for this slot — it
+                uses the core&apos;s default.
+              </span>
+            )}
           </label>
         ))}
       </div>

@@ -23,16 +23,26 @@ bind address in the root `.env`.
 baked in and no ingress is assumed. You decide how to reach and protect this entry
 point; layer your choice **in front** of the gateway:
 
-- **Tailscale** — e.g. `tailscale serve` proxies the loopback-bound gateway port
-  onto your tailnet (what the maintainer uses).
+- **Tailscale** — e.g. `tailscale serve` proxies a loopback-bound port onto your
+  tailnet (what the maintainer uses) — the web shell's `8084`, not this gateway's
+  `8088`, when anyone but you can reach it (see below).
 - **A VPN / LAN binding** — set `BIND_ADDRESS` to a specific private interface
   (it defaults to loopback) and route over your VPN.
 - **A reverse proxy** (Caddy/nginx) for TLS + your own rules.
 - **An auth proxy / IdP** — put **Keycloak**, oauth2-proxy, Authelia, etc. in front
   to require login before traffic reaches the gateway.
 
-epicurus neither requires nor provides any of these by default. (This is separate
-from epicurus's own user/sub-user identity — the Identity component, Phase 5.)
+epicurus neither requires nor provides any of these by default.
+
+**The gateway still does not authenticate — the app now can.** epicurus has built-in
+sign-in with an OpenID Connect provider (off by default; see
+[Sign-in](../../docs/infrastructure/sign-in.md)). It guards requests that reach the core
+through the web shell — and through this gateway's `core-app.localhost` route — but **not**
+the gateway's other `Host` routes (`echo.localhost`, `mail.localhost`, `grafana.localhost`,
+…), which go straight to services with no sign-in of their own. So when you put a perimeter
+in front, point it at the web shell (`web:8080`, or its published port `8084`) rather than
+at this gateway, and keep `BIND_ADDRESS` on loopback. The gateway stays the handy local
+front door for `*.localhost` on the box itself.
 
 ## Routing a new module
 

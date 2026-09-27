@@ -33,7 +33,11 @@ from epicurus_core_app.llm.compaction import (
     estimate_tools_tokens,
     reply_reserve,
 )
-from epicurus_core_app.llm.errors import ModelCapabilityError
+from epicurus_core_app.llm.errors import (
+    LocalRuntimeState,
+    LocalRuntimeUnavailableError,
+    ModelCapabilityError,
+)
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
 from epicurus_core_app.llm.models import (
     ChatMessage,
@@ -42,6 +46,7 @@ from epicurus_core_app.llm.models import (
     ModelDetails,
     ModelInfo,
     ModelRole,
+    ModelWarmth,
     ProviderInfo,
     StreamEvent,
     ToolCallFragment,
@@ -259,7 +264,11 @@ class LlmGateway:
         model_settings: ModelSettingsStore | None = None,
         saved_models: SavedHostedModelStore | None = None,
     ) -> None:
-        self._ollama_url = ollama_url.rstrip("/")
+        # Blank (after stripping) is the *absent* state, not a bad URL: this deployment runs no
+        # local runtime at all (#962, ADR-0144). Stored normalised so every call site can ask
+        # one cheap question — :attr:`local_runtime_enabled` — instead of guessing from a
+        # caught connection error.
+        self._ollama_url = ollama_url.strip().rstrip("/")
         self._default_model = default_model
         self._default_embed_model = default_embed_model
         self._keep_alive = keep_alive
@@ -296,6 +305,56 @@ class LlmGateway:
         # cached: that is usually an unreachable runtime, and pinning it would keep the gate
         # blind for the rest of the process. Bounded, like ``_unmapped_models``.
         self._local_roles: dict[str, ModelRole] = {}
+
+    # ── the local runtime: present, absent, or unreachable (#962, ADR-0144) ──────
+
+    @property
+    def local_runtime_enabled(self) -> bool:
+        """Whether this deployment has a local LLM runtime configured at all.
+
+        False is *absent*: a deliberate hosted-only deployment (``OLLAMA_URL`` blank). It is a
+        fact about the configuration, costs no I/O, and is therefore what every hot path asks
+        — the role gate on each call, the readiness probe, the model list — before it considers
+        touching the network.
+        """
+        return bool(self._ollama_url)
+
+    def require_local_runtime(self, action: str) -> None:
+        """Refuse ``action`` when there is no local runtime to perform it on.
+
+        The single place the *absent* refusal is worded, so the 409 an operator sees names the
+        deployment mode rather than leaking a connection error from four different call sites.
+        Public because two callers cannot rely on the in-method guard: the SSE pull route (an
+        async generator's body does not run until it is iterated, by which time the response
+        has started) and the KV-cache route (which must refuse *before* persisting the choice).
+        """
+        if self._ollama_url:
+            return
+        raise LocalRuntimeUnavailableError(
+            state="absent",
+            message=(
+                f"cannot {action}: this deployment runs no local LLM runtime "
+                "(OLLAMA_URL is blank — hosted models only)"
+            ),
+        )
+
+    async def local_runtime_state(self) -> LocalRuntimeState:
+        """Probe the local runtime and report which of the three states applies.
+
+        ``absent`` costs nothing (no URL, no call). Otherwise ``/api/tags`` is asked with a
+        short timeout — the same endpoint :meth:`models` uses, so "the list is empty because
+        the runtime is down" and "the state is unreachable" can never disagree.
+        """
+        if not self._ollama_url:
+            return "absent"
+        try:
+            async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
+                response = await client.get("/api/tags")
+                response.raise_for_status()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("local runtime unreachable", error=str(exc))
+            return "unreachable"
+        return "ok"
 
     async def effective_default(self, tenant_id: str | None = None) -> str:
         """The active default model: the stored pref if set, else the env default."""
@@ -371,29 +430,36 @@ class LlmGateway:
 
     async def model_readiness(
         self, model: str | None = None, *, tenant_id: str | None = None
-    ) -> tuple[str, bool | None]:
+    ) -> ModelWarmth:
         """Report whether a model is ready to answer *now* (ADR-0027).
 
-        Returns ``(resolved_model, warm)``. ``warm`` is ``None`` for hosted providers — they
-        need no local warm-up, so they are always ready; for the local runtime it is ``True``
-        only when the model is already loaded in memory (``False`` while paused, or cold).
-        Best-effort: a runtime probe failure reports the model as cold rather than raising.
+        Returns ``(resolved_model, warm, runtime)``. ``warm`` is ``None`` whenever local
+        warm-up is not a question that applies, and ``runtime`` says why: ``hosted`` (a
+        provider needs no warm-up, so it is always ready) or ``absent`` (this deployment runs
+        no local runtime, #962 — the model can never warm up, and saying "warming" forever is
+        what made the chat progress bar lie on every turn of a hosted-only install). For a
+        local model on a real runtime it is ``True`` only when the model is already loaded in
+        memory (``False`` while paused, or cold). Best-effort: a probe failure reports the
+        model as cold rather than raising — *unreachable* is an error, unlike *absent*, and
+        cold is the honest reading of it.
         """
         resolved = model or await self.effective_default(tenant_id)
         _, provider = registry.resolve(resolved)
         if not provider.is_local:
-            return resolved, None
+            return ModelWarmth(resolved, None, "hosted")
+        if not self._ollama_url:
+            return ModelWarmth(resolved, None, "absent")
         if self._power.paused:
-            return resolved, False
+            return ModelWarmth(resolved, False, "local")
         target = resolved.split("/", 1)[-1]  # a bare local name has no prefix; this is a no-op
         try:
             loaded = {info.name for info in await self.models(tenant_id) if info.loaded}
         except Exception:  # runtime unreachable — treat as cold, never raise into readiness
             log.warning("model readiness probe failed; reporting cold", model=resolved)
-            return resolved, False
+            return ModelWarmth(resolved, False, "local")
         # The runtime tags loaded models (e.g. "llama3.2:latest"); match the bare name too.
         warm = target in loaded or any(name.split(":", 1)[0] == target for name in loaded)
-        return resolved, warm
+        return ModelWarmth(resolved, warm, "local")
 
     def _candidates(self, model: str) -> list[str]:
         """The chosen model followed by the configured fallback chain (deduped)."""
@@ -404,12 +470,18 @@ class LlmGateway:
         return ordered
 
     def _is_available(self, model: str) -> bool:
-        """Unavailable only if local while paused — running it would wake the GPU.
+        """Whether ``model`` can be *tried* — the filter the chat fallback chain applies.
 
-        Hosted providers stay available when paused (they use no local GPU).
+        A local model is unavailable while the runtime is paused (running it would wake the
+        GPU) and on a deployment that runs no local runtime at all (#962) — there is nothing
+        to run it on, and a fallback chain that walked into one would trade a clean refusal
+        for a connection error. Hosted providers are available in both cases: they use no
+        local GPU and need no local runtime.
         """
         _, provider = registry.resolve(model)
-        return not (self._power.paused and provider.is_local)
+        if not provider.is_local:
+            return True
+        return bool(self._ollama_url) and not self._power.paused
 
     async def _ensure_can_serve(
         self,
@@ -421,10 +493,18 @@ class LlmGateway:
     ) -> None:
         """The one gate every inference entry point passes through (ADR-0140).
 
-        Two rules today, and the place the third goes — the system-level Local AI / Hosted AI
-        switches (#945) add a clause *here*, not a fourth copy scattered across the call sites:
+        Three rules today, and the place the fourth goes — the system-level Local AI / Hosted
+        AI switches (#945) add a clause *here*, not a fifth copy scattered across the call
+        sites:
 
         * **Paused** (ADR-0005): a local model cannot run while the runtime is paused.
+        * **No local runtime** (#962, ADR-0144): a *local* model id on a deployment that runs
+          no local runtime is refused here, before any provider call. This is the rule the
+          quiet degradation of :meth:`show` used to defeat — an unreachable ``/api/show``
+          returns empty details, the role reads ``unknown``, and ``unknown`` is waved through
+          to fail at the provider with a connection error instead of a sentence. Absence is a
+          fact about the deployment, not a catalogue miss, so it is asked first and answered
+          definitively.
         * **Role** (#944): a model whose role is *known* and is not ``want`` is refused before
           any provider call, with a :class:`ModelCapabilityError` naming the one action that
           fixes it. ``unknown`` is refused nothing — a catalogue miss must never lock the
@@ -437,6 +517,19 @@ class LlmGateway:
         :meth:`embed` has no fallback chain, so it takes the whole gate — which is what retires
         the inline copy of the pause rule that used to live there.
         """
+        # Absence is asked **before** the pause rule, and the order is load-bearing: both make
+        # a local model unavailable, but "resume to run inference" is an instruction an
+        # operator with no runtime cannot follow. The more specific fact answers first.
+        if not self._ollama_url and registry.resolve(model)[1].is_local:
+            raise ModelCapabilityError(
+                model=model,
+                capability=want,
+                message=(
+                    f"{model} runs on the local LLM runtime, and this deployment has none "
+                    "configured."
+                ),
+                hint="No local runtime is configured — choose a hosted model.",
+            )
         if check_pause and not self._is_available(model):
             raise GatewayPausedError("LLM gateway is paused; resume to run inference")
         role = await self.model_role(model, tenant_id)
@@ -1111,18 +1204,31 @@ class LlmGateway:
         model, concurrently. It costs one extra call per model, so it is **opt-in** — the chat
         picker lists without it; the Models page asks for it to badge what each model can do
         and show its context window.
+
+        **Never raises for a runtime that cannot answer** (#962, ADR-0144). An empty list is
+        the truthful answer to "which models does the local runtime hold" in both non-serving
+        states: *absent* (there is no runtime, and no call is made at all) and *unreachable*
+        (one is configured and did not answer). This is the regression fix for the 500 the
+        Models page collected every ten seconds; *which* state applies is a different
+        question, answered by :meth:`local_runtime_state` and its own endpoint.
         """
-        async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
-            response = await client.get("/api/tags")
-            response.raise_for_status()
-            payload = response.json()
-            loaded: set[str] = set()
-            try:  # /api/ps lists running models; best-effort decoration only
-                ps = await client.get("/api/ps")
-                ps.raise_for_status()
-                loaded = {m["name"] for m in ps.json().get("models", [])}
-            except (httpx.HTTPError, KeyError):
-                log.warning("ollama /api/ps failed; loaded-state unknown")
+        if not self._ollama_url:
+            return []
+        try:
+            async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
+                response = await client.get("/api/tags")
+                response.raise_for_status()
+                payload = response.json()
+                loaded: set[str] = set()
+                try:  # /api/ps lists running models; best-effort decoration only
+                    ps = await client.get("/api/ps")
+                    ps.raise_for_status()
+                    loaded = {m["name"] for m in ps.json().get("models", [])}
+                except (httpx.HTTPError, KeyError):
+                    log.warning("ollama /api/ps failed; loaded-state unknown")
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("ollama /api/tags failed; reporting no local models", error=str(exc))
+            return []
         hidden: set[str] = set()
         if self._prefs is not None:
             hidden = set(await self._prefs.get_hidden(tenant_id or self._default_tenant))
@@ -1241,6 +1347,10 @@ class LlmGateway:
         unreachable, so the model-settings sheet degrades to "unknown". The trained context
         length lives under ``model_info`` keyed by the architecture (e.g.
         ``llama.context_length``); fall back to any ``*.context_length`` if the arch is absent.
+        With **no** local runtime the same empty answer is returned without a call — but note
+        that empty details are not a licence to run the model: absence is refused by
+        :meth:`_ensure_can_serve` before any role question is asked (#962), precisely because
+        "no reported capabilities" and "no runtime to report them" used to look identical here.
 
         Hosted: LiteLLM's cost/context map is the source of truth for both capabilities and
         context length — no provider call, and no fake default when the model isn't in the map
@@ -1250,6 +1360,9 @@ class LlmGateway:
         _, provider = registry.resolve(model)
         if not provider.is_local:
             return await self._hosted_details(model, tenant_id)
+        if not self._ollama_url:
+            log.debug("no local runtime; reporting empty model details", model=model)
+            return ModelDetails()
         try:
             async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:
                 response = await client.post("/api/show", json={"model": model})
@@ -1376,7 +1489,13 @@ class LlmGateway:
         self._local_roles.pop(model, None)
 
     async def pull(self, model: str) -> None:
-        """Pull a model into the local runtime (blocks until complete)."""
+        """Pull a model into the local runtime (blocks until complete).
+
+        Raises :class:`LocalRuntimeUnavailableError` (``absent``) when there is no local
+        runtime to pull into — the route turns that into a 409 naming the mode, rather than
+        the 500 a connection error to a blank URL used to produce (#962).
+        """
+        self.require_local_runtime("pull a model")
         self._forget_local_role(model)
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=None) as client:
             response = await client.post("/api/pull", json={"model": model, "stream": False})
@@ -1387,7 +1506,11 @@ class LlmGateway:
 
         Each item is Ollama's progress shape (``status``, and ``total``/``completed``
         while a layer downloads) — the model-manager UI renders these directly.
+
+        Refuses before the response starts when there is no local runtime (#962), so the
+        caller gets a 409 rather than an SSE stream whose only event is an error.
         """
+        self.require_local_runtime("pull a model")
         self._forget_local_role(model)
         async with (
             httpx.AsyncClient(base_url=self._ollama_url, timeout=None) as client,
@@ -1400,7 +1523,11 @@ class LlmGateway:
                     yield item
 
     async def delete_model(self, model: str) -> None:
-        """Remove a model from the local runtime."""
+        """Remove a model from the local runtime.
+
+        Raises :class:`LocalRuntimeUnavailableError` (``absent``) with no runtime (#962).
+        """
+        self.require_local_runtime("delete a model")
         self._forget_local_role(model)
         async with httpx.AsyncClient(base_url=self._ollama_url, timeout=30) as client:
             response = await client.request("DELETE", "/api/delete", json={"model": model})
@@ -1411,8 +1538,16 @@ class LlmGateway:
 
         With ``model`` set, unload just that one (the on-demand per-model Unload, #331);
         otherwise unload every installed model (the power-pause path). Never raises — a
-        runtime hiccup is logged, not surfaced.
+        runtime hiccup is logged, not surfaced, and with **no** local runtime there is
+        nothing loaded to drop, so it returns at once (#962). That silence is deliberate and
+        is why the *route* checks for absence itself and answers 409: this method is also on
+        the power-pause path (``PUT /platform/v1/power``), which must keep working on a
+        hosted-only deployment — pausing there is about the GPU it does not have, and
+        refusing it would break a control that has nothing to do with the local runtime.
         """
+        if not self._ollama_url:
+            log.debug("no local runtime; nothing to unload", model=model)
+            return
         try:
             targets = [model] if model is not None else [info.name for info in await self.models()]
             async with httpx.AsyncClient(base_url=self._ollama_url, timeout=10) as client:

@@ -71,11 +71,12 @@ another machine until you opt in. To expose the stack more widely, set
 `BIND_ADDRESS` (e.g. `0.0.0.0`) in your `.env` and put your own perimeter (VPN,
 reverse proxy, auth proxy) in front — see [Configuration](configuration.md).
 
-> **Before you expose anything:** the stack ships with **no authentication** (ADR-0008),
-> so reaching the web UI off-box also reaches `/platform/v1/*` (agent, files, OAuth) with
-> no login in front. Follow [Remote access & hardening](../infrastructure/remote-access.md)
-> — copy-pasteable Tailscale / reverse-proxy / OIDC recipes and a security checklist —
-> before setting `BIND_ADDRESS` to anything but loopback.
+> **Before you expose anything:** sign-in is **off by default**, so reaching the web UI
+> off-box also reaches `/platform/v1/*` (agent, files, OAuth) with no login in front. Turn
+> on [built-in sign-in](../infrastructure/sign-in.md) (an OpenID Connect provider such as
+> Pocket ID) and follow [Remote access & hardening](../infrastructure/remote-access.md) —
+> Tailscale / reverse-proxy recipes and a security checklist — before setting
+> `BIND_ADDRESS` to anything but loopback.
 
 The core, web shell, and every module (`docker compose up`) each publish a **host** port in
 the `8080`–`8093` band; the [edge gateway](../infrastructure/index.md) fronts them all at

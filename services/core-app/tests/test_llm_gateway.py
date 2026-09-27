@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
+import httpx
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import StaticPool
-from structlog.testing import capture_logs
 
 from epicurus_core import EventBus, SecretError, SecretNotFoundError, SecretStore
-from epicurus_core_app.llm.errors import ModelCapabilityError
+from epicurus_core_app.llm.errors import (
+    LocalRuntimeUnavailableError,
+    ModelCapabilityError,
+)
 from epicurus_core_app.llm.gateway import (
     _CONNECT_TIMEOUT_S,
     _UNBOUNDED_READ_S,
@@ -24,7 +27,7 @@ from epicurus_core_app.llm.gateway import (
     with_no_tools_note,
 )
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
-from epicurus_core_app.llm.models import ChatMessage, ModelInfo, PowerState
+from epicurus_core_app.llm.models import ChatMessage, ModelInfo, ModelWarmth, PowerState
 from epicurus_core_app.llm.power import GatewayPausedError, PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.saved_models import SavedHostedModelStore, SavedModelOverride
@@ -96,9 +99,10 @@ def _gateway(
     prefs: LlmPrefsStore | None = None,
     model_settings: ModelSettingsStore | None = None,
     saved_models: SavedHostedModelStore | None = None,
+    ollama_url: str = "http://ollama:11434",
 ) -> LlmGateway:
     return LlmGateway(
-        ollama_url="http://ollama:11434",
+        ollama_url=ollama_url,
         default_model="llama3.2",
         keep_alive="5m",
         power=power or PowerController(),
@@ -203,11 +207,13 @@ async def test_api_key_is_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
     secrets = _FakeSecrets({"llm/anthropic": {"api_key": "fixture-redaction-sentinel"}})
-    with capture_logs() as logs:
-        await _gateway(secrets=secrets).chat(
-            [ChatMessage(role="user", content="hi")], model="claude/c"
-        )
-    assert not any("fixture-redaction-sentinel" in str(entry) for entry in logs)
+    # Recorded, not captured — see ``_RecordingLog``. A ``capture_logs`` block that silently
+    # intercepts nothing makes this particular assertion *vacuously* true, which is the worst
+    # possible failure mode for a test whose whole job is to prove a key never gets logged.
+    recorder = _RecordingLog()
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.log", recorder)
+    await _gateway(secrets=secrets).chat([ChatMessage(role="user", content="hi")], model="claude/c")
+    assert not any("fixture-redaction-sentinel" in str(call) for call in recorder.calls)
 
 
 async def test_providers_reports_configured() -> None:
@@ -1284,7 +1290,7 @@ async def test_model_readiness_local_warm_matches_tagged_name(
         ]
 
     monkeypatch.setattr(gw, "models", fake_models)
-    assert await gw.model_readiness("llama3.2") == ("llama3.2", True)
+    assert await gw.model_readiness("llama3.2") == ModelWarmth("llama3.2", True, "local")
 
 
 async def test_model_readiness_local_cold(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1294,21 +1300,22 @@ async def test_model_readiness_local_cold(monkeypatch: pytest.MonkeyPatch) -> No
         return [ModelInfo(name="llama3.2:latest", loaded=False)]
 
     monkeypatch.setattr(gw, "models", fake_models)
-    assert await gw.model_readiness("llama3.2") == ("llama3.2", False)
+    assert await gw.model_readiness("llama3.2") == ModelWarmth("llama3.2", False, "local")
 
 
 async def test_model_readiness_hosted_is_always_ready() -> None:
     # Hosted providers need no local warm-up — warm is None (always ready), no runtime probe.
-    name, warm = await _gateway().model_readiness("claude/claude-sonnet-4-6")
-    assert name == "claude/claude-sonnet-4-6" and warm is None
+    warmth = await _gateway().model_readiness("claude/claude-sonnet-4-6")
+    assert warmth.model == "claude/claude-sonnet-4-6"
+    assert warmth.warm is None and warmth.runtime == "hosted"
 
 
 async def test_model_readiness_paused_local_is_cold_without_probing() -> None:
     power = PowerController()
     power.pause()
     # While paused the runtime is never probed (that would wake the GPU): cold by definition.
-    name, warm = await _gateway(power=power).model_readiness("llama3.2")
-    assert name == "llama3.2" and warm is False
+    warmth = await _gateway(power=power).model_readiness("llama3.2")
+    assert warmth.model == "llama3.2" and warmth.warm is False
 
 
 async def test_model_readiness_runtime_error_reports_cold(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1318,7 +1325,7 @@ async def test_model_readiness_runtime_error_reports_cold(monkeypatch: pytest.Mo
         raise RuntimeError("ollama unreachable")
 
     monkeypatch.setattr(gw, "models", boom)
-    assert await gw.model_readiness("llama3.2") == ("llama3.2", False)
+    assert await gw.model_readiness("llama3.2") == ModelWarmth("llama3.2", False, "local")
 
 
 async def test_model_readiness_defaults_to_effective_default(
@@ -1330,7 +1337,7 @@ async def test_model_readiness_defaults_to_effective_default(
         return [ModelInfo(name="llama3.2:latest", loaded=True)]
 
     monkeypatch.setattr(gw, "models", fake_models)
-    assert await gw.model_readiness() == ("llama3.2", True)
+    assert await gw.model_readiness() == ModelWarmth("llama3.2", True, "local")
 
 
 # ── context window (num_ctx) pref resolution ──────────────────────────────────────
@@ -2079,8 +2086,20 @@ class _RecordingLog:
     def debug(self, event: str, **fields: Any) -> None:
         self.calls.append(("debug", event, fields))
 
+    def info(self, event: str, **fields: Any) -> None:
+        self.calls.append(("info", event, fields))
+
+    def error(self, event: str, **fields: Any) -> None:
+        self.calls.append(("error", event, fields))
+
     def levels(self) -> list[str]:
         return [level for level, _, _ in self.calls]
+
+    def find(self, prefix: str) -> tuple[str, str, dict[str, Any]]:
+        """The first call whose event starts with ``prefix`` — asserts that there is one."""
+        found = next((call for call in self.calls if call[1].startswith(prefix)), None)
+        assert found is not None, f"no log line starting {prefix!r}; recorded {self.calls}"
+        return found
 
 
 async def test_an_unmapped_model_warns_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2433,19 +2452,23 @@ async def test_the_learn_warning_names_the_cause_and_no_account_id(
     _hosted_map(monkeypatch, {})
     store = await _saved_store({"openrouter/some/model": SavedModelOverride()})
     gw = _gateway(secrets=_FakeSecrets({"llm/openrouter": {"api_key": "k"}}), saved_models=store)
-    with capture_logs() as logs:
-        await gw.chat(
-            [ChatMessage(role="user", content="hi")],
-            model="openrouter/some/model",
-            tools=[{"type": "function", "function": {"name": "now"}}],
-        )
-    learned = next(e for e in logs if e["event"].startswith("model rejected the tool list"))
-    assert learned["log_level"] == "warning"
-    assert learned["provider"] == "openrouter"
-    assert learned["upstream"] == "NextBit"  # the aggregator's readable provider name
-    assert learned["matched"] == "tool choice requires"
+    # Recorded directly rather than through ``capture_logs`` — see ``_RecordingLog``: once any
+    # test in the run has booted the app, the gateway's module logger is frozen and a capture
+    # here intercepts nothing, so this assertion passed alone and failed in a full run.
+    recorder = _RecordingLog()
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.log", recorder)
+    await gw.chat(
+        [ChatMessage(role="user", content="hi")],
+        model="openrouter/some/model",
+        tools=[{"type": "function", "function": {"name": "now"}}],
+    )
+    level, _, fields = recorder.find("model rejected the tool list")
+    assert level == "warning"
+    assert fields["provider"] == "openrouter"
+    assert fields["upstream"] == "NextBit"  # the aggregator's readable provider name
+    assert fields["matched"] == "tool choice requires"
     # The raw body — and the account identifier riding in it — never reaches the log line.
-    assert "user_2abcDEF" not in json.dumps(learned, default=str)
+    assert "user_2abcDEF" not in json.dumps(fields, default=str)
 
 
 async def test_a_learned_no_disables_tools_on_the_next_turn(
@@ -2494,3 +2517,237 @@ def test_the_no_tools_note_lands_inside_the_protected_system_prefix() -> None:
     assert [m.role for m in noted] == ["system", "system", "system", "user"]
     assert noted[2].content == NO_TOOLS_SYSTEM_NOTE
     assert convo[0].content == "base prompt"  # the input list is not mutated
+
+
+# ── no local runtime at all (#962, ADR-0144) ─────────────────────────────────────
+#
+# Three states, not two: *absent* (OLLAMA_URL blank — a deliberate hosted-only deployment),
+# *unreachable* (one is configured and does not answer) and *ok*. Every test below pins a
+# place that used to collapse them — into a 500, into a forever-"warming" readiness, into a
+# connection error where a sentence belonged.
+
+
+class _StubOllama:
+    """An httpx.AsyncClient stand-in that records every request path it is asked for.
+
+    Constructed with ``boom=True`` it raises the transport error a refused connection gives,
+    which is how "unreachable" is expressed; the recorded paths are how "absent" is proven —
+    a deployment with no runtime must make **no call at all**, not a call that fails quietly.
+    """
+
+    paths: ClassVar[list[str]] = []
+
+    def __init__(self, *args: Any, boom: bool = False, **kwargs: Any) -> None:
+        self._boom = boom
+
+    async def __aenter__(self) -> _StubOllama:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+    def _answer(self, path: str) -> Any:
+        type(self).paths.append(path)
+        if self._boom:
+            raise httpx.ConnectError("connection refused")
+
+        class _Resp:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {"models": [{"name": "llama3.2:latest", "size": 1}]}
+
+        return _Resp()
+
+    async def get(self, path: str) -> Any:
+        return self._answer(path)
+
+    async def post(self, path: str, **kwargs: Any) -> Any:
+        return self._answer(path)
+
+    async def request(self, method: str, path: str, **kwargs: Any) -> Any:
+        return self._answer(path)
+
+
+def _stub_runtime(monkeypatch: pytest.MonkeyPatch, *, boom: bool = False) -> list[str]:
+    """Point the gateway's httpx client at :class:`_StubOllama`; return the recorded paths."""
+    _StubOllama.paths = []
+
+    def factory(*args: Any, **kwargs: Any) -> _StubOllama:
+        return _StubOllama(boom=boom)
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.httpx.AsyncClient", factory)
+    return _StubOllama.paths
+
+
+def test_a_blank_url_is_the_absent_state() -> None:
+    assert _gateway(ollama_url="").local_runtime_enabled is False
+    assert _gateway(ollama_url="   ").local_runtime_enabled is False
+    assert _gateway().local_runtime_enabled is True
+
+
+async def test_local_runtime_state_reports_absent_without_touching_the_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _stub_runtime(monkeypatch)
+    assert await _gateway(ollama_url="").local_runtime_state() == "absent"
+    assert paths == []  # no URL, no call — absence is a configuration fact, not a probe result
+
+
+async def test_local_runtime_state_reports_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_runtime(monkeypatch, boom=True)
+    assert await _gateway().local_runtime_state() == "unreachable"
+
+
+async def test_local_runtime_state_reports_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = _stub_runtime(monkeypatch)
+    assert await _gateway().local_runtime_state() == "ok"
+    assert paths == ["/api/tags"]
+
+
+async def test_models_is_empty_and_quiet_when_the_runtime_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Half of the regression test for the 500 the Models page collected every 10 seconds."""
+    paths = _stub_runtime(monkeypatch)
+    assert await _gateway(ollama_url="").models() == []
+    assert paths == []
+
+
+async def test_models_is_empty_when_the_runtime_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half: a configured runtime that refuses the connection must not raise."""
+    _stub_runtime(monkeypatch, boom=True)
+    assert await _gateway().models() == []
+
+
+async def test_show_reports_nothing_without_a_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    paths = _stub_runtime(monkeypatch)
+    details = await _gateway(ollama_url="").show("llama3.2")
+    assert details.role == "unknown" and details.capabilities == []
+    assert paths == []
+
+
+async def test_pull_and_delete_refuse_when_there_is_no_runtime() -> None:
+    gw = _gateway(ollama_url="")
+    with pytest.raises(LocalRuntimeUnavailableError) as pulled:
+        await gw.pull("llama3.2")
+    with pytest.raises(LocalRuntimeUnavailableError) as deleted:
+        await gw.delete_model("llama3.2")
+    for excinfo in (pulled, deleted):
+        assert excinfo.value.state == "absent"
+        assert "no local LLM runtime" in str(excinfo.value)
+
+
+async def test_pull_stream_refuses_on_the_first_step() -> None:
+    """The refusal must be reachable before any progress event — the route turns it into 409."""
+    stream = _gateway(ollama_url="").pull_stream("llama3.2")
+    with pytest.raises(LocalRuntimeUnavailableError):
+        await anext(stream)
+
+
+async def test_unload_is_a_quiet_no_op_without_a_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`unload` is on the power-pause path, which must keep working on a hosted-only box."""
+    paths = _stub_runtime(monkeypatch)
+    await _gateway(ollama_url="").unload()
+    await _gateway(ollama_url="").unload("llama3.2")
+    assert paths == []
+
+
+async def test_model_readiness_reports_n_a_when_there_is_no_runtime() -> None:
+    warmth = await _gateway(ollama_url="").model_readiness("llama3.2")
+    assert warmth == ModelWarmth("llama3.2", None, "absent")
+
+
+async def test_a_hosted_model_still_embeds_while_the_runtime_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner's directive, pinned: with Ollama off, embeddings go straight to the provider."""
+    captured: dict[str, Any] = {}
+
+    class _EmbedResp:
+        def model_dump(self) -> dict[str, Any]:
+            return {"data": [{"embedding": [0.1, 0.2]}]}
+
+    async def fake_aembedding(**kwargs: Any) -> _EmbedResp:
+        captured.update(kwargs)
+        return _EmbedResp()
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.aembedding", fake_aembedding)
+    _hosted_map(monkeypatch, {"openai/text-embedding-3-small": {"mode": "embedding"}})
+    gw = _gateway(ollama_url="", secrets=_FakeSecrets({"llm/openai": {"api_key": "k"}}))
+    vectors = await gw.embed(["hello"], model="gpt/text-embedding-3-small")
+
+    assert vectors == [[0.1, 0.2]]
+    assert captured["model"] == "openai/text-embedding-3-small"
+    assert captured["api_key"] == "k"
+    assert "api_base" not in captured  # no Ollama endpoint anywhere near a hosted embedding
+
+
+async def test_a_local_embedding_model_refuses_with_a_reason_when_absent() -> None:
+    """Not a connection error to a blank URL — a capability refusal naming the fix."""
+    with pytest.raises(ModelCapabilityError) as excinfo:
+        await _gateway(ollama_url="").embed(["hi"], model="nomic-embed-text")
+    assert excinfo.value.capability == "embedding"
+    assert "no local runtime" in excinfo.value.hint.lower()
+    assert "hosted" in excinfo.value.hint.lower()
+
+
+async def test_the_default_embedding_model_refuses_when_it_is_local_and_absent() -> None:
+    """The out-of-the-box hosted-only install: a bare env default with nothing to run it."""
+    with pytest.raises(ModelCapabilityError):
+        await _gateway(ollama_url="").embed(["hi"])
+
+
+async def test_a_hosted_model_still_chats_while_the_runtime_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        captured.update(kwargs)
+        return _Response({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {"anthropic/c": {"mode": "chat"}})
+    gw = _gateway(ollama_url="", secrets=_FakeSecrets({"llm/anthropic": {"api_key": "k"}}))
+    result = await gw.chat([ChatMessage(role="user", content="hi")], model="claude/c")
+
+    assert result.content == "ok"
+    assert captured["model"] == "anthropic/c"
+
+
+async def test_a_local_chat_model_refuses_with_the_hint_when_absent() -> None:
+    with pytest.raises(ModelCapabilityError) as excinfo:
+        await _gateway(ollama_url="").chat([ChatMessage(role="user", content="hi")])
+    assert excinfo.value.capability == "chat"
+    assert "no local runtime" in excinfo.value.hint.lower()
+
+
+async def test_a_local_fallback_is_skipped_when_there_is_no_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hosted primary must never fall back into a runtime that is not there."""
+    calls: list[str] = []
+
+    async def fake_acompletion(**kwargs: Any) -> _Response:
+        calls.append(str(kwargs["model"]))
+        if kwargs["model"] == "anthropic/c":
+            raise RuntimeError("provider down")
+        return _Response({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("epicurus_core_app.llm.gateway.litellm.acompletion", fake_acompletion)
+    _hosted_map(monkeypatch, {"anthropic/c": {"mode": "chat"}, "openai/g": {"mode": "chat"}})
+    gw = _gateway(
+        ollama_url="",
+        fallbacks=["llama3.2", "gpt/g"],
+        secrets=_FakeSecrets({"llm/anthropic": {"api_key": "k"}, "llm/openai": {"api_key": "k"}}),
+    )
+    result = await gw.chat([ChatMessage(role="user", content="hi")], model="claude/c")
+
+    assert result.content == "ok"
+    assert calls == ["anthropic/c", "openai/g"]  # the local fallback was never tried

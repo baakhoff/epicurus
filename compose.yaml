@@ -1,5 +1,14 @@
 # Top-level stack (ADR-0006): the data plane plus enabled modules, assembled from
-# fragments. `docker compose up -d` (or `task up`) brings up everything.
+# fragments. `docker compose up -d` (or `task up`) brings up everything — the local AI
+# runtime included, with no `.env`, no profile and no flags. That is the install the README
+# and docs/user/installation.md publish, and nothing added here may quietly ask more of it:
+# anything optional is layered *over* this file as an overlay the operator opts into.
+#
+#   services/core-app/compose.docker-socket.yaml    the raw Docker socket (#708)
+#   services/core-app/compose.external-mounts.yaml  extra Files roots from the host (#731)
+#   infra/ollama/compose.hosted-only.yaml           no local AI runtime at all (#962)
+#
+# (`--profile observability` is the one profile the stack uses, and it *adds* services.)
 #
 # Each module contributes its own services/<name>/compose.yaml fragment; add a
 # module by including its fragment here (the installer does this dynamically

@@ -21,6 +21,13 @@
 # Compose gate, which boots Ollama but never pulls weights). Pointing the endpoint
 # at loopback inside the core pod means an accidental inference call is refused in
 # microseconds instead of hanging the gate on a DNS or connect timeout.
+#
+# A URL is set here *on purpose*, even though nothing serves it: the install phase has to run
+# with a local runtime **configured**, because that is what the shared KV-cache assertion
+# needs — it restarts the Ollama workload (the stand-in, infra/ci/ollama-stub.yaml) through
+# the container seam. The third state — no local runtime at all (#962, ADR-0144) — is
+# asserted in the gate's **upgrade** phase, which blanks this value and re-points both model
+# defaults at hosted ids. One boot covers both, and neither ends up proven only in a unit test.
 ollama:
   enabled: false
   external:

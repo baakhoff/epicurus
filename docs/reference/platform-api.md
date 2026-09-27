@@ -59,6 +59,93 @@ deployment must do the same.
 
 ---
 
+## Sign-in (#969)
+
+With `AUTH_MODE=oidc` the core signs a person in through an OpenID Connect provider and guards the
+**web door**; with `AUTH_MODE=none` (the default) nothing below is enforced. Design, checks and
+configuration: [core-app § Sign-in](../services/core-app.md#sign-in-969); setting it up: the
+[sign-in guide](../infrastructure/sign-in.md). Every response of the four endpoints carries
+`Cache-Control: no-store`.
+
+### Who must be signed in
+
+A request is **proxied** when it carries any of `X-Forwarded-For`, `Forwarded`,
+`X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` (the web shell's nginx, an ingress, the
+Compose gateway). With `AUTH_MODE=oidc`:
+
+| Request | Result |
+| --- | --- |
+| Proxied, valid `epicurus_session` cookie | Passes; the identity is on `request.state.auth`. A session last renewed over an hour ago slides, and the response re-issues the cookie. |
+| Proxied, no or invalid/expired session | **401** `{"detail": "Sign in to continue.", "code": "unauthenticated"}` |
+| Proxied, to `/health` or `/platform/v1/auth/…` | Passes without a session. |
+| Proxied **unsafe** method (POST/PUT/PATCH/DELETE — logout included) whose `Sec-Fetch-Site` is not `same-origin`/`none`, or — with no `Sec-Fetch-Site` — whose `Origin` is not the public URL's origin | **403** `{"detail": "Cross-site request refused.", "code": "cross_site"}` |
+| Not proxied (a module on the internal network, a probe, Prometheus) | Passes untouched — the module ↔ core contract is unchanged. |
+
+Both refusals carry `Cache-Control: no-store`. The public origin is the scheme, host and port of
+`OAUTH_REDIRECT_BASE_URL`.
+
+### `GET /platform/v1/auth/session`
+
+Always **200**.
+
+```json
+{
+  "mode": "oidc",
+  "signed_in": true,
+  "provider_name": "Pocket ID",
+  "auto_redirect": false,
+  "user": {
+    "subject": "0b8f…",
+    "email": "me@example.com",
+    "name": "Me",
+    "groups": ["family"]
+  },
+  "expires_at": "2026-10-26T12:00:00+00:00"
+}
+```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `mode` | `"none"` \| `"oidc"` | `AUTH_MODE`. |
+| `signed_in` | `bool` | Whether this request's cookie names a live session. Always `false` with `mode: "none"`. |
+| `provider_name` | `str \| null` | `OIDC_PROVIDER_NAME` — the button label; `null` when unset (and always with `mode: "none"`). |
+| `auto_redirect` | `bool` | `OIDC_AUTO_REDIRECT` — send a signed-out visitor straight to `/login`. Always `false` with `mode: "none"`. |
+| `user` | `object \| null` | `subject` (the provider's `sub`), `email` (lowercased, or `null`), `name` (`name`, else `preferred_username`, or `null`), `groups` (list of strings, possibly empty). `null` when signed out. |
+| `expires_at` | ISO 8601 `str \| null` | When the session ends unless used again (it slides while in use). |
+
+### `GET /platform/v1/auth/login?next=<path>`
+
+**302** to the provider's authorization endpoint with `response_type=code`, `client_id`,
+`redirect_uri` (`<OAUTH_REDIRECT_BASE_URL>/platform/v1/auth/callback`), `scope`, `state`, `nonce`,
+`code_challenge` and `code_challenge_method=S256`, and sets the transaction cookie
+`epicurus_auth_tx` (HttpOnly, `SameSite=Lax`, `Path=/platform/v1/auth`, `Max-Age=600`, `Secure`
+when the public URL is https). `next` is where the callback lands afterwards; it must be a
+same-origin path — starting with `/` but not `//` or `/\`, no scheme or host, not under
+`/platform/v1/auth/` — or it becomes `/`. If the provider cannot be discovered: **302**
+`/?auth_error=provider_unreachable` (or `misconfigured` if its metadata does not fit). With
+`AUTH_MODE=none`: **404** `{"detail": "Sign-in is not enabled on this deployment.", "code":
+"auth_disabled"}`.
+
+### `GET /platform/v1/auth/callback`
+
+The provider's redirect back (`code`, `state`, optionally `iss`, or `error`). On success: a new
+session, the `epicurus_session` cookie (HttpOnly, `SameSite=Lax`, `Path=/`, `Max-Age` =
+`AUTH_SESSION_DAYS` × 86400, `Secure` when https), the transaction cookie cleared, **302** →
+`next`. On **any** failure: **302** `/?auth_error=<code>`, the transaction cookie cleared, no
+session. The codes are a closed set — `provider_unreachable`, `provider_error`, `access_denied`,
+`state_mismatch`, `token_exchange_failed`, `invalid_token`, `not_allowed`,
+`groups_claim_missing`, `email_unverified`, `misconfigured` — each explained in
+[core-app § Sign-in](../services/core-app.md#sign-in-969). With `AUTH_MODE=none`: the **404**
+above.
+
+### `POST /platform/v1/auth/logout`
+
+Deletes this browser's session (if any), clears the cookie, **200** `{"signed_out": true}` —
+always, with no session, an expired one, or `AUTH_MODE=none`. Subject to the cross-site check
+when proxied.
+
+---
+
 ## `POST /platform/v1/embed`
 
 Embed one or more texts via the core's LLM gateway.  The core resolves the
@@ -343,6 +430,66 @@ tenant-scoped (both mirror a public registry).
   `size_gb` the tag row's real on-disk size (#571; `null` when upstream shows none, e.g. a
   cloud alias). Best-effort: any failure returns an empty list. A successful lookup also folds
   the family's sizes into the catalog snapshot (the same per-family cache feeds both).
+
+---
+
+## `GET /platform/v1/llm/local-runtime`
+
+Whether this deployment has a **local** LLM runtime, and whether it is answering (#962,
+ADR-0144). Shell-facing; no body, no query params.
+
+**Response**
+
+```json
+{ "state": "absent", "url_configured": false }
+```
+
+| `state` | meaning | what a surface should do |
+| --- | --- | --- |
+| `absent` | `OLLAMA_URL` is blank — a deliberate hosted-only deployment | collapse the local half: no pull card, no catalog, no KV-cache or context-window card, no `Local (Ollama)` group in a model picker |
+| `unreachable` | a runtime **is** configured and did not answer | show today's warning — this state *is* an error and should look like one |
+| `ok` | it answered | the full local UI |
+
+`url_configured` is the *why* behind the state, and is `false` exactly when `state` is
+`absent`.
+
+**A client that cannot get an answer reads it as `ok`.** A 404 (an older core, which has no
+such route), a non-2xx, or an unparseable body all mean *keep doing what you did before this
+endpoint existed* — render the full local UI. The alternative default, `absent`, would have a
+shell collapse every local-runtime control against a core that is serving one perfectly well,
+which is a worse failure than showing a control that then refuses. The state is an
+optimisation on what the surface shows, never the authority on what the core will do: the
+core refuses for itself, with a status and a sentence, whatever the shell believed.
+
+Three facts that used to be one, which is why this endpoint exists rather than an envelope
+around the model list. `GET /platform/v1/llm/models` stays a bare `list[ModelInfo]` (twelve
+consumers read that array) and **never 500s again**: it answers `200` with `[]` when the
+runtime is absent *and* when it is unreachable. Everything that genuinely needs a runtime
+refuses with a reason and never a bare 500: **409** when it is absent, with a `detail` naming
+the mode, and **502** when it is configured but unreachable — except on the three paths whose
+own shape rules the second half out, which are called out below:
+
+- `POST /platform/v1/llm/pull` · `DELETE /platform/v1/llm/models` — the full pair, 409 and 502;
+- `POST /platform/v1/llm/pull/stream` — **409 when absent only**, refused *before* the stream
+  starts so the caller sees a real status rather than a 200 whose only event is an error. Once
+  the stream has begun it cannot take its status back, so an *unreachable* runtime is still
+  reported the way it always was: a `200` whose last frame is `event: error`;
+- `POST /platform/v1/llm/unload` — **409 when absent only**. The gateway's `unload` never
+  raises (it is also on the power-pause path, which must keep working on a hosted-only
+  deployment), so an unreachable runtime answers `200` with nothing unloaded, exactly as
+  before this change;
+- `PUT /platform/v1/llm/prefs/kv-cache-type` — **409 when absent only**. This path never talks
+  to Ollama (it writes the start-up env file and asks the container runtime to bounce the
+  workload), so "unreachable" is not something it can observe, and setting the value while the
+  server is down is legitimate: `applied`/`staged` already report how far it got (#709).
+
+Inference itself is refused one layer earlier: a **local** model id on a runtime-less
+deployment raises the same `ModelCapabilityError` shape as every other capability refusal
+(ADR-0140) → **400** with `{"error": "wrong_model_role", …}` and the hint *"No local runtime is
+configured — choose a hosted model."* A hosted model — chat **or** embedding — is untouched, so
+memory recall and module indexing keep working with `gpt/text-embedding-3-small` and friends.
+`GET /platform/v1/readiness` reports the model component as `<model> · n/a` and **ready**, not
+"warming" forever.
 
 ---
 

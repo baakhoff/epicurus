@@ -101,16 +101,30 @@ class ReadinessProbe:
         )
 
     async def _model(self, model: str | None, tenant: str) -> ReadinessComponent:
-        """Whether the turn's model is warm; hosted models report ready (no local warm-up)."""
+        """Whether the turn's model is warm; hosted models report ready (no local warm-up).
+
+        Three ways to be ready without warming up, and they must not be confused (#962):
+        a hosted model (``· hosted``), a deployment with no local runtime at all
+        (``· n/a``), and a local model already loaded (``· warm``). Before ADR-0144 the
+        second reported ``warming`` forever — the probe asked a runtime that was not there,
+        caught the failure, and read it as "cold" — so the chat progress bar never completed
+        on a single turn of a hosted-only install. None of these drags ``ready`` to false:
+        readiness is advisory and never blocks a turn, and a component that can never become
+        ready has no business claiming the system is not.
+        """
         try:
-            name, warm = await self._gateway.model_readiness(model, tenant_id=tenant)
+            warmth = await self._gateway.model_readiness(model, tenant_id=tenant)
         except Exception as exc:  # gateway trouble must not block the chat
             log.warning("model readiness probe failed", error=str(exc))
             return ReadinessComponent(name="model", ready=True, detail="unknown")
-        if warm is None:
-            return ReadinessComponent(name="model", ready=True, detail=f"{name} · hosted")
+        if warmth.runtime == "absent":
+            return ReadinessComponent(name="model", ready=True, detail=f"{warmth.model} · n/a")
+        if warmth.warm is None:
+            return ReadinessComponent(name="model", ready=True, detail=f"{warmth.model} · hosted")
         return ReadinessComponent(
-            name="model", ready=warm, detail=f"{name} · {'warm' if warm else 'warming'}"
+            name="model",
+            ready=warmth.warm,
+            detail=f"{warmth.model} · {'warm' if warmth.warm else 'warming'}",
         )
 
 

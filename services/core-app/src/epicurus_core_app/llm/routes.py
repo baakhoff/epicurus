@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
+from typing import TypeVar
 
+import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from epicurus_core_app.llm.catalog import CatalogResponse, ModelCatalog
+from epicurus_core_app.llm.errors import LocalRuntimeUnavailableError
 from epicurus_core_app.llm.gateway import LlmGateway, UnknownProviderError
 from epicurus_core_app.llm.model_settings import ModelSettings, ModelSettingsStore
-from epicurus_core_app.llm.models import ModelDetails, ModelInfo, PowerState, ProviderInfo
+from epicurus_core_app.llm.models import (
+    LocalRuntimeStatus,
+    ModelDetails,
+    ModelInfo,
+    PowerState,
+    ProviderInfo,
+)
 from epicurus_core_app.llm.ollama_runtime import KvCacheApplyResult, OllamaRuntime
 from epicurus_core_app.llm.power import PowerController
 from epicurus_core_app.llm.prefs import LlmPrefsStore
@@ -33,6 +42,61 @@ SSE_HEADERS = {
     # Tell buffering proxies (the web container's nginx) to pass events through.
     "X-Accel-Buffering": "no",
 }
+
+_T = TypeVar("_T")
+
+# What a local-runtime state means as an HTTP status (#962, ADR-0144). `absent` is **409**,
+# not 503 or 404: the deployment is in a state that makes the request meaningless, nothing is
+# broken, and retrying will never help — the operator either configures a runtime or stops
+# asking. `unreachable` is **502**: one *is* configured and did not answer, which is an error,
+# and the core is a gateway in front of it. Neither is ever a bare 500 again. Read with a
+# default rather than indexed: `LocalRuntimeState` also has an `ok`, which cannot reach here
+# (nothing raises the error for a runtime that is serving) and must not become a KeyError —
+# a 500 — if a later change ever makes it.
+_LOCAL_RUNTIME_STATUS = {"absent": 409, "unreachable": 502}
+
+
+async def _through_local_runtime(action: str, call: Awaitable[_T]) -> _T:
+    """Await a local-runtime call, mapping both non-serving states onto their status.
+
+    One wrapper so the four local-only write paths (pull, delete, unload, the KV-cache apply)
+    cannot each invent their own answer — which is exactly how three of them came to 500 and
+    one to succeed silently. ``httpx.RequestError`` is *unreachable* (we never got an answer);
+    an ``HTTPStatusError`` means the runtime answered and refused, which is still a 502 from
+    the core's position in front of it, but its detail names the status so a typo'd model name
+    reads as one rather than as an outage.
+    """
+    try:
+        return await call
+    except LocalRuntimeUnavailableError as exc:
+        raise HTTPException(
+            status_code=_LOCAL_RUNTIME_STATUS.get(exc.state, 502), detail=exc.message
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=(f"the local LLM runtime refused to {action} (HTTP {exc.response.status_code})"),
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"the local LLM runtime is unreachable, so it cannot {action}: {exc}",
+        ) from exc
+
+
+def _refuse_without_local_runtime(gateway: LlmGateway, action: str) -> None:
+    """409 before doing anything when this deployment runs no local runtime (#962).
+
+    For the two callers that cannot let the gateway raise from inside the call: the SSE pull
+    (the response has already started by the time an async generator's body runs) and the
+    KV-cache apply (the preference must not be persisted for a runtime that does not exist).
+    """
+    try:
+        gateway.require_local_runtime(action)
+    except LocalRuntimeUnavailableError as exc:
+        raise HTTPException(
+            status_code=_LOCAL_RUNTIME_STATUS.get(exc.state, 502), detail=exc.message
+        ) from exc
 
 
 class PullRequest(BaseModel):
@@ -199,8 +263,29 @@ def create_llm_router(
     async def list_models(capabilities: bool = False) -> list[ModelInfo]:
         """List local models. ``?capabilities=true`` additionally fills each model's reported
         capabilities (tools/vision/…) from ``/api/show`` — opt-in, one call per model, so the
-        Models page can badge them while the chat picker stays light."""
+        Models page can badge them while the chat picker stays light.
+
+        **Always 200** (#962, ADR-0144). An empty list is the answer when the runtime is
+        absent *or* unreachable; this used to 500, and the Models page polls it every ten
+        seconds. The shape is deliberately still a bare ``list[ModelInfo]`` — the state lives
+        at ``GET /llm/local-runtime`` rather than in an envelope here."""
         return await gateway.models(with_capabilities=capabilities)
+
+    @router.get("/local-runtime", response_model=LocalRuntimeStatus)
+    async def local_runtime() -> LocalRuntimeStatus:
+        """Whether this deployment has a local LLM runtime, and whether it answers (#962).
+
+        ``absent`` — none is configured (``OLLAMA_URL`` blank): a deliberate hosted-only
+        deployment, and every local-runtime control should be collapsed rather than shown
+        broken. ``unreachable`` — one is configured and did not answer: an error, and it
+        should still look like one. ``ok`` — it answered.
+
+        Separate from ``GET /llm/models`` on purpose (ADR-0144): that list has twelve
+        consumers and stays a bare array, so nothing has to be rewritten to learn the state.
+        Costs one ``/api/tags`` round trip when a runtime is configured, none when it is not.
+        """
+        state = await gateway.local_runtime_state()
+        return LocalRuntimeStatus(state=state, url_configured=gateway.local_runtime_enabled)
 
     @router.get("/catalog", response_model=CatalogResponse)
     async def get_catalog() -> CatalogResponse:
@@ -234,8 +319,11 @@ def create_llm_router(
     async def delete_model(name: str) -> dict[str, str]:
         """Remove a local model. ``name`` is a query param — model names contain
         ``:`` and ``/`` (e.g. ``hf.co/org/model:tag``), which proxies may mangle
-        in a path."""
-        await gateway.delete_model(name)
+        in a path.
+
+        **409** when this deployment runs no local runtime, **502** when one is configured
+        and does not answer (#962) — never a bare 500."""
+        await _through_local_runtime("delete a model", gateway.delete_model(name))
         return {"status": "ok", "model": name}
 
     @router.get("/models/details", response_model=ModelDetails)
@@ -249,7 +337,13 @@ def create_llm_router(
     async def unload_models(request: UnloadRequest) -> dict[str, str]:
         """Drop model(s) from memory now (``keep_alive=0``) **without** changing power state
         (#331) — the standalone unload the Models page calls. ``model`` omitted unloads every
-        loaded model; the ``loaded`` badge refreshes on success / the next poll."""
+        loaded model; the ``loaded`` badge refreshes on success / the next poll.
+
+        **409** with no local runtime (#962). The gateway's own ``unload`` stays silent there
+        — it is on the power-pause path, which must keep working on a hosted-only deployment —
+        so the refusal is made here, where the caller is an operator clicking Unload and
+        deserves to be told why nothing happened."""
+        _refuse_without_local_runtime(gateway, "unload a model")
         await gateway.unload(request.model)
         return {"status": "ok", "model": request.model or "all"}
 
@@ -280,12 +374,20 @@ def create_llm_router(
 
     @router.post("/pull")
     async def pull(request: PullRequest) -> dict[str, str]:
-        await gateway.pull(request.model)
+        """Pull a model into the local runtime.
+
+        **409** with no local runtime, **502** when one is configured and unreachable (#962)."""
+        await _through_local_runtime("pull a model", gateway.pull(request.model))
         return {"status": "ok", "model": request.model}
 
     @router.post("/pull/stream")
     async def pull_stream(request: PullRequest) -> StreamingResponse:
-        """Pull a model, streaming the runtime's progress as SSE."""
+        """Pull a model, streaming the runtime's progress as SSE.
+
+        The no-runtime refusal is made **before** the response starts (#962), so the caller
+        gets a real 409 instead of a 200 whose single event is an error — the one thing an
+        SSE endpoint cannot say once it has begun."""
+        _refuse_without_local_runtime(gateway, "pull a model")
 
         async def events() -> AsyncIterator[str]:
             try:
@@ -398,9 +500,18 @@ def create_llm_router(
         that's left — the usual case without Docker access, since the entrypoint re-sources the
         file on every start. Only ``staged: false`` calls for editing environment variables by
         hand, which is what the UI used to say in every degraded case.
+
+        **409** when this deployment runs no local runtime (#962): the setting describes how
+        Ollama *starts*, so there is nothing to stage and nothing to restart, and the refusal
+        comes before the write so a hosted-only deployment cannot accumulate a preference for
+        a server it will never run. A runtime that is merely **unreachable** is deliberately
+        not refused: this path never talks to Ollama — it writes an env file and asks the
+        container runtime to bounce the workload — so setting the value while the server is
+        down is legitimate, and ``applied``/``staged`` already says how far it got.
         """
         if prefs is None:
             raise HTTPException(status_code=503, detail="preferences store not available")
+        _refuse_without_local_runtime(gateway, "apply a KV-cache setting")
         await prefs.set_kv_cache_type(default_tenant, request.value)
         result = (
             ollama_runtime.apply_kv_cache_type(request.value)

@@ -9,19 +9,22 @@ gateway-internal.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel
 
 from epicurus_core import ChatMessage, ChatResult, Role
+from epicurus_core_app.llm.errors import LocalRuntimeState
 
 __all__ = [
     "ChatMessage",
     "ChatResult",
     "KeyState",
+    "LocalRuntimeStatus",
     "ModelDetails",
     "ModelInfo",
     "ModelRole",
+    "ModelWarmth",
     "PowerState",
     "ProviderInfo",
     "Role",
@@ -29,6 +32,37 @@ __all__ = [
     "ToolCallFragment",
     "UsageEvent",
 ]
+
+
+class LocalRuntimeStatus(BaseModel):
+    """Whether this deployment has a local LLM runtime, and whether it answers (#962).
+
+    The body of ``GET /platform/v1/llm/local-runtime``. A **separate** endpoint rather than an
+    envelope around ``GET /llm/models``, which stays a bare ``list[ModelInfo]``: five web
+    consumers and seven internal callers read that list, and wrapping it would be a breaking
+    change bought for nothing (ADR-0144).
+
+    ``url_configured`` is the *why* behind the state: false means ``OLLAMA_URL`` is blank — a
+    deliberate hosted-only deployment — and no surface should draw a local-runtime control at
+    all. It is false exactly when ``state`` is ``absent``.
+    """
+
+    state: LocalRuntimeState
+    url_configured: bool
+
+
+class ModelWarmth(NamedTuple):
+    """What :meth:`LlmGateway.model_readiness` answers (ADR-0027, extended by #962).
+
+    ``warm`` is ``None`` whenever local warm-up is not a question that applies — a hosted
+    model, or a deployment with no local runtime at all — and ``runtime`` says which of the
+    two, so the readiness probe reports ``n/a`` for the second instead of "warming" forever.
+    """
+
+    model: str
+    warm: bool | None
+    runtime: Literal["local", "hosted", "absent"] = "local"
+
 
 ModelRole = Literal["chat", "embedding", "unknown"]
 """What a model is *for*, as the gateway resolved it (#944, ADR-0140).

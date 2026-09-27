@@ -8,6 +8,17 @@
 #
 # Internal-only: the core reaches it at http://ollama:11434 on the epicurus network;
 # it is not published to the host (private-by-default — the core is the front door).
+#
+# ── Leaving it out (#962, ADR-0144) ─────────────────────────────────────────────
+# A deployment can run *no* local runtime — hosted chat and hosted embeddings, nothing
+# local to run a model on. That is an **opt-out overlay**, `infra/ollama/compose.hosted-only.yaml`
+# (`task hosted-only-up`), the same idiom as the Docker-socket and external-mount opt-ins —
+# never a profile on the services below. A profile is opt-in by construction, and these
+# services sit on the repo's documented install path (`git clone` → `docker compose up -d`,
+# README and docs/user/installation.md, neither of which mentions an `.env`), so putting one
+# here would have silently removed the local runtime from every fresh clone and left the
+# shipped `llama3.2` / `nomic-embed-text` defaults pointing at nothing. The overlay keeps the
+# default path byte-identical and makes the hosted-only choice a visible command.
 
 # Bounded json-file logging (#462) — see infra/compose/docker-compose.yml for the rationale.
 x-logging: &default-logging

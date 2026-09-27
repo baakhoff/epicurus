@@ -55,3 +55,35 @@ def test_module_hostnames_skips_hostless_entry(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("MODULE_URLS", raising=False)
     settings = CoreAppSettings(service_name="test", module_urls="http://knowledge:8080, /")
     assert settings.module_hostnames == ["knowledge"]
+
+
+# ── the local runtime may simply not exist (#962, ADR-0144) ──────────────────────
+
+
+def test_local_runtime_is_enabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default stays local-first: an operator opts *out*, never in."""
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    settings = CoreAppSettings(service_name="test")
+    assert settings.ollama_url == "http://localhost:11434"
+    assert settings.local_runtime_enabled is True
+
+
+def test_a_set_ollama_url_enables_the_local_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_URL", "http://ollama:11434")
+    assert CoreAppSettings(service_name="test").local_runtime_enabled is True
+
+
+def test_a_blank_ollama_url_means_there_is_no_local_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``OLLAMA_URL=`` is how a hosted-only deployment says so — not a misconfiguration."""
+    monkeypatch.setenv("OLLAMA_URL", "")
+    settings = CoreAppSettings(service_name="test")
+    assert settings.ollama_url == ""
+    assert settings.local_runtime_enabled is False
+
+
+def test_a_whitespace_ollama_url_is_blank(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hand-edited env file leaves spaces behind; they mean the same thing as empty."""
+    monkeypatch.setenv("OLLAMA_URL", "   ")
+    assert CoreAppSettings(service_name="test").local_runtime_enabled is False

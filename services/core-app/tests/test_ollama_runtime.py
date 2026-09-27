@@ -105,3 +105,24 @@ def test_applied_always_implies_staged(tmp_path: Path) -> None:
         rt, _ = _runtime(tmp_path, docker)
         result = rt.apply_kv_cache_type("q8_0")
         assert not result.applied or result.staged
+
+
+def test_no_local_runtime_writes_nothing_and_restarts_nothing(tmp_path: Path) -> None:
+    """With no Ollama at all (#962, ADR-0144) the apply is the existing "unavailable" shape.
+
+    Not a *new* result shape, and not a failed restart: with nothing to restart, neither arm
+    of the container seam (ADR-0134) should be asked to look for a workload, on Docker or on
+    Kubernetes. The route refuses such a call with 409 before it reaches here; this is the
+    belt-and-braces behind it.
+    """
+    docker = _FakeDocker()
+    env = tmp_path / "ollama.env"
+    rt = OllamaRuntime(
+        docker,  # type: ignore[arg-type]
+        env_path=str(env),
+        service="ollama",
+        local_runtime_enabled=False,
+    )
+    assert rt.apply_kv_cache_type("q8_0") == KvCacheApplyResult(applied=False, staged=False)
+    assert docker.restarted == []
+    assert not env.exists()

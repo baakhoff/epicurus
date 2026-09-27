@@ -79,6 +79,13 @@ deliberate choice:
   network, with your own perimeter — VPN, reverse proxy, auth proxy — in front
   (ADR-0008: access is the operator's choice).
 
+Either way, turn on **[sign-in](../infrastructure/sign-in.md)** once the stack is reached
+from more than this machine: `AUTH_MODE=oidc` plus an OpenID Connect provider (Pocket ID,
+Authentik, Keycloak, …), set in `.env` — the keys are listed, commented, in
+[`.env.example`](../../.env.example). Sign-in guards the web shell, not the published
+module or core ports, which is one more reason to keep `BIND_ADDRESS` on loopback and put
+the perimeter in front of the web shell.
+
 Which `.env` applies depends on **how you start the stack**:
 
 - **Full stack** — `docker compose up` from the repo root reads the **root `.env`**.
@@ -158,3 +165,35 @@ To connect OpenRouter:
 
 > **Pausing.** Pausing the LLM runtime protects the local GPU, so it stops local models only.
 > Hosted chat and hosted embeddings keep working while paused.
+
+## A deployment with no local AI
+
+Running **no local runtime at all** — hosted chat, hosted embeddings, no Ollama — is a
+supported mode, not a broken install. It is spelled with a blank `OLLAMA_URL`: see
+[`config` reference](../reference/config.md) for the variable and
+[Kubernetes](../infrastructure/kubernetes.md) for the chart values that produce it.
+
+What you see in the web UI when the core reports no local runtime:
+
+- The **Models** page keeps only the hosted half. The catalog, the download tray, the local
+  model list, the default context window and the KV-cache card are *gone* — not greyed out —
+  and one line in their place says local AI is not configured on this deployment. Nothing there
+  could have done anything: every one of those cards is an Ollama control.
+- The **Embedding model** picker offers no `Local (Ollama)` group, so you cannot pick a model
+  that has nothing to run on. Everything on offer is hosted, which means the whole notes,
+  knowledge and memory corpus goes to that provider — the trade-off described above is no
+  longer optional here, so make it deliberately.
+- The **chat model picker** drops its `Local` heading and lists your hosted models. The *core
+  default* entry stays, because the core's default may itself be a hosted model.
+- A module's **model slots** (Modules page) offer the core default and any saved hosted model;
+  a slot with neither says why it is empty rather than looking broken.
+
+None of this is a warning, because nothing is wrong. A deployment that *does* expect a local
+runtime and cannot reach it is a different state and still says so, in the words it always
+used: "The local runtime is unreachable — is the ollama service up?" If you see that, something
+is down; if you see "Local AI is not configured on this deployment", nothing is.
+
+> **Set a hosted default.** With no local runtime, a stale `LLM_DEFAULT_MODEL` or
+> `MEMORY_EMBED_MODEL` naming a local model (`llama3.2`, `nomic-embed-text`) cannot run. Star a
+> hosted chat model under *Hosted models*, and pick a hosted embedding model under *Embedding
+> model*, so both defaults point somewhere that answers.

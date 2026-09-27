@@ -18,6 +18,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api, ApiError, ProxyError } from "@/lib/api";
+import { useAuth, resetAuthState } from "@/stores/auth";
 import { useConnection } from "@/stores/connection";
 
 const archive = () => new File(["tenant archive"], "epicurus-local.tar.gz");
@@ -217,5 +218,23 @@ describe("uploadPortabilityArchive connectivity evidence (#494, kept through #89
     await promise.catch(() => undefined);
 
     expect(useConnection.getState().coreDown).toBe(true);
+  });
+});
+
+describe("uploadPortabilityArchive sign-in evidence (#969)", () => {
+  it("hands a 401 to the auth gate, like every other platform request", async () => {
+    resetAuthState();
+    useAuth.setState({
+      phase: "app",
+      session: { mode: "oidc", signed_in: true, provider_name: null, auto_redirect: false, user: null, expires_at: null },
+    });
+    const { promise, xhr } = start();
+    xhr.respond(401, JSON.stringify({ detail: "Sign in to continue.", code: "unauthenticated" }));
+    await promise.catch(() => undefined);
+
+    expect(useAuth.getState().phase).toBe("signed-out");
+    // An answer all the same: the core is up.
+    expect(useConnection.getState().coreDown).toBe(false);
+    resetAuthState();
   });
 });

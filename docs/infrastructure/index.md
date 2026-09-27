@@ -16,7 +16,7 @@ The stateful services every block builds on (`infra/compose/`):
 | **NATS** | `nats:2.10` | 4222, 8222 | Event backbone (JetStream); 8222 = monitoring. **Authenticated** (role users `core`/`module`/`sys`) — see [NATS](nats.md). |
 | **Qdrant** | `qdrant/qdrant:${QDRANT_TAG}` | 6333, 6334 | Vector DB — memory recall + knowledge RAG. Upgrade-safe via the `qdrant-init` guard — see [Qdrant](qdrant.md). |
 | **OpenBao** | `openbao/openbao:2.2.0` | 8200 | Secrets — persistent file storage, auto-unseal sidecar. See [Secrets](secrets.md). |
-| **MinIO** | `quay.io/minio/minio` | 9000, 9001 | S3-compatible object store for app-managed objects. |
+| **MinIO** | `docker.io/pgsty/minio` | 9000, 9001 | S3-compatible object store for app-managed objects. A community-maintained fork of the AGPL MinIO server (not MinIO Inc.) — upstream no longer serves anonymous pulls (#973). |
 
 Dev credentials are intentionally weak and for a local, private box. OpenBao is the live
 credential source — provider API keys set via the UI survive full stack restarts.
@@ -66,7 +66,9 @@ init container runs.
 
 **Traefik** routes to services by Docker label, with **no authentication baked in** and no
 assumed ingress — the operator layers their own perimeter (Tailscale, a reverse proxy, an
-auth proxy) in front (ADR-0008). Host ports **8088** (web entrypoint) and **8089**
+auth proxy) in front (ADR-0008). Its per-module `<name>.localhost` routes sit outside the
+app's own [sign-in](sign-in.md), so a perimeter should front the web shell (`8084`), not the
+gateway. Host ports **8088** (web entrypoint) and **8089**
 (dashboard). Details: [`infra/edge/README.md`](../../infra/edge/README.md); concrete
 copy-pasteable perimeter recipes in [Remote access & hardening](remote-access.md).
 
@@ -241,6 +243,52 @@ hit `PermissionError` and the choice would save but never apply (#392). `ollama-
 only**: the core's write is lazy — it happens when the operator changes the KV-cache type, long
 after boot — so there is no startup race regardless.
 
+### Hosted-only: no local LLM runtime
+
+A deployment can run **no local runtime at all** — hosted chat and hosted embeddings, nothing
+local (#962, ADR-0144). It is an **opt-out overlay**,
+[`infra/ollama/compose.hosted-only.yaml`](../../infra/ollama/compose.hosted-only.yaml), the same
+idiom as the Docker-socket and external-mount opt-ins:
+
+```bash
+task hosted-only-up
+# == docker compose -f compose.yaml -f infra/ollama/compose.hosted-only.yaml up -d
+```
+
+The overlay does **both** halves, because either alone is wrong: it removes `ollama` and
+`ollama-init` from the stack (which `core-app`'s `required: false` dependency on `ollama` is what
+makes survivable), *and* it blanks `OLLAMA_URL`, which is how the core is told the absence is
+deliberate. Remove only the container and the core is left probing a host that is gone — that is
+the `unreachable` state, not `absent`.
+
+**Nothing about the default install changes.** `docker compose up -d` from a fresh clone, with no
+`.env` and no flags, still starts the local runtime exactly as before — which is why this is an
+overlay and not a compose profile on the `ollama` services. A profile is opt-in by construction,
+so it would have taken the runtime out of every fresh clone while the shipped `llama3.2` /
+`nomic-embed-text` defaults still pointed at it, which is the half-working stack the Kubernetes
+chart now refuses to render.
+
+Set both model defaults to hosted ids in `.env` as well — a bare name routes to the local
+runtime, so leaving them is that same half-working stack:
+
+```dotenv
+LLM_DEFAULT_MODEL=claude/claude-sonnet-4-6
+MEMORY_EMBED_MODEL=gpt/text-embedding-3-small
+```
+
+Add each provider's API key on the **Models** page before the first turn. With no local runtime
+the core refuses every local-only action with a reason — `409` from pull, delete, unload and the
+KV-cache setting — `GET /platform/v1/llm/models` answers `200` with an empty list rather than
+500ing, `GET /platform/v1/llm/local-runtime` reports `absent`, and chat readiness reports the
+model as `n/a` instead of "warming" forever. A local model id asked to answer is refused with a
+sentence naming the fix, before any provider call. The Kubernetes equivalent is
+[`ollama.enabled: false` with a blank `ollama.external.url`](kubernetes.md#hosted-only-no-local-llm-runtime).
+
+On the deploy box, `EPICURUS_HOSTED_ONLY=1` makes `infra/cd/reconcile.sh` apply the same overlay;
+unset (the default) it keeps the local runtime, so a box that never asked for a hosted-only stack
+cannot lose Ollama to a reconcile. To go back, drop the overlay (`task up`): the `ollama-models`
+volume is untouched by any of this, so the models are still there.
+
 ## Log retention
 
 Every service in every compose fragment sets a bounded `json-file` logging driver
@@ -277,9 +325,12 @@ See the [Architecture](../developer/architecture.md) guide for how the pieces fi
 ## Operations
 
 - [Remote access & hardening](remote-access.md) — reach the PWA from outside the box
-  safely: Tailscale, a reverse proxy with basic auth, or oauth2-proxy/OIDC, plus a
-  self-hosting security checklist. The stack has no built-in auth (ADR-0008), so a
-  perimeter is mandatory for any non-loopback exposure.
+  safely: Tailscale, built-in sign-in, a reverse proxy with basic auth, or oauth2-proxy,
+  plus a self-hosting security checklist. Sign-in is off by default and the gateway never
+  authenticates (ADR-0008), so something must authenticate any non-loopback exposure.
+- [Sign-in (OpenID Connect)](sign-in.md) — built-in sign-in with Pocket ID, Authentik,
+  Keycloak, Authelia, Kanidm or Google, on Compose and Kubernetes: the Pocket ID
+  walkthrough, admission rules, what it covers and what it does not, troubleshooting.
 - [Auto-deploy (CD)](auto-deploy.md) — how a released tag rolls out to the box
   automatically (scheduled reconcile script or Watchtower), and how to roll back.
 - [Startup and recovery](startup-and-recovery.md) — configure Docker Desktop

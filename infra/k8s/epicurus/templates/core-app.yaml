@@ -187,6 +187,10 @@ spec:
               value: {{ include "epicurus.attachmentSinkUrl" $ | quote }}
             - name: MEMORY_EMBED_MODEL
               value: {{ .Values.core.memoryEmbedModel | quote }}
+            - name: OPENROUTER_WEB_SEARCH_MODEL
+              value: {{ .Values.core.openrouterWebSearch.model | default "" | quote }}
+            - name: OPENROUTER_WEB_SEARCH_ENGINE
+              value: {{ .Values.core.openrouterWebSearch.engine | default "" | quote }}
             - name: LLM_DEFAULT_MODEL
               value: {{ .Values.core.llm.defaultModel | quote }}
             - name: LLM_KEEP_ALIVE

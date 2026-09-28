@@ -114,6 +114,7 @@ from epicurus_core_app.llm.prefs import LlmPrefsStore
 from epicurus_core_app.llm.routes import create_llm_router, create_power_router
 from epicurus_core_app.llm.saved_models import SavedHostedModelStore
 from epicurus_core_app.llm.variants import VariantLookup
+from epicurus_core_app.llm.web_search import OpenRouterWebSearch
 from epicurus_core_app.log_stream import LogBuffer
 from epicurus_core_app.log_stream_routes import create_log_stream_router
 from epicurus_core_app.maintenance import (
@@ -512,6 +513,10 @@ def create_app() -> FastAPI:
         docker_unavailable_reason=container_availability.reason,
         core=core_pages,
         events=core_events,
+        # The Modules-page gate on a config option that needs a provider key (#984).
+        provider_key_state=lambda alias: gateway.provider_key_state(
+            alias, tenant_id=settings.default_tenant_id
+        ),
     )
     ollama_runtime = OllamaRuntime(
         docker,
@@ -1161,6 +1166,13 @@ def create_app() -> FastAPI:
             gateway,
             prefs=prefs,
             default_tenant=settings.default_tenant_id,
+            web_search=OpenRouterWebSearch(
+                secrets=secrets,
+                bus=bus,
+                default_tenant=settings.default_tenant_id,
+                model=settings.openrouter_web_search_model,
+                engine=settings.openrouter_web_search_engine,
+            ),
         )
     )
     app.include_router(

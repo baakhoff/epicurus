@@ -306,3 +306,36 @@ class CollectionPrefs(BaseModel):
 
     enabled: list[CollectionRef] = Field(default_factory=list)
     active: CollectionRef | None = None
+
+
+# ── Hosted web search through the core (#984) ────────────────────────────────────
+
+
+class WebSearchHit(BaseModel):
+    """One normalised web-search result, the same four fields SearXNG results carry.
+
+    ``engine`` names who found it, for the result's hover-card (``"OpenRouter"`` for a search
+    the core ran through OpenRouter).
+    """
+
+    title: str
+    url: str
+    snippet: str = ""
+    engine: str = ""
+
+
+class WebSearchResult(BaseModel):
+    """The core's answer to ``POST /platform/v1/web-search`` (#984).
+
+    ``searched`` separates the two ways ``results`` can be empty: ``True`` means a search ran
+    and matched nothing; ``False`` means the provider answered without running one (the
+    search is degraded, not confirmed empty); ``None`` means the provider did not say.
+    ``backend`` names the provider (``"openrouter"``), ``model`` the model that ran the
+    search tool, and ``search_engine`` the search engine the provider was asked to use.
+    """
+
+    results: list[WebSearchHit] = Field(default_factory=list)
+    searched: bool | None = None
+    backend: str
+    model: str
+    search_engine: str = ""

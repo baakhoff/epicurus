@@ -209,6 +209,10 @@ class UsageEvent(BaseModel):
     # burning tokens is indistinguishable from the operator's own chatting. Additive and
     # optional, so an existing consumer is unaffected and an ordinary turn omits it.
     automation_id: str | None = None
+    # Searches a hosted web search ran for this call (#984) — OpenRouter prices each one on top
+    # of the tokens, so a metering consumer needs the count, not just the token totals. Set only
+    # by the core's web-search path; ``None`` on every ordinary chat or embed.
+    web_search_requests: int | None = None
 
 
 class PowerState(StrEnum):

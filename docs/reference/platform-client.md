@@ -158,9 +158,52 @@ else:
     apply_directly(change)  # review turned off
 ```
 
+### `await client.web_search(query, *, max_results=5) -> WebSearchResult`
+
+One web search through the core's hosted search provider (#984) — the wire call is
+[`POST /platform/v1/web-search`](platform-api.md#post-platformv1web-search). The core uses the
+tenant's stored OpenRouter key; the module never sees it. Returns the core's
+`WebSearchResult` (`results: list[WebSearchHit]` of `{title, url, snippet, engine}`, `searched:
+bool | None`, `backend`, `model`, `search_engine`).
+
+Raises **`PlatformError`** (exported from `epicurus_core`) when the core refuses or the provider
+fails — branch on `exc.code`, relay `exc.message`:
+
+```python
+from epicurus_core import PlatformError
+
+try:
+    found = await client.web_search("tidal turbines", max_results=5)
+except PlatformError as exc:
+    if exc.code == "openrouter_key_missing":
+        return "no OpenRouter key is stored — add one on the Models page"
+    raise  # provider_error / openrouter_key_rejected / provider_unreachable / key_store_unavailable
+```
+
+`PlatformError` is in the tool-error seam's *anticipated* set (ADR-0136): re-raised from a tool
+it reaches the model as the core's sentence and is logged at WARNING. `httpx.TransportError`
+still propagates when the core itself is unreachable.
+
+### `await client.get_module_config() -> dict`
+
+This module's stored settings — what the operator saved in its settings form on the Modules
+page (`GET /platform/v1/modules/{module}/config`; OpenBao `modules/<name>/config`, tenant
+scoped). `{}` when nothing was saved. Construct the client with `module=<name>`. Raises
+`httpx.HTTPError` when the core is unreachable. Added in #984: before it, a module had no way to
+read these values, so a `config_schema` form stored settings nothing ever used.
+
+### `ModuleConfigCache(client, *, ttl_s=15.0, clock=time.monotonic)` · `await cache.get() -> dict` · `cache.invalidate()`
+
+The way to read `get_module_config` from a hot path. `get()` answers from memory within `ttl_s`
+of the last successful read, else asks the core; when the core cannot be reached it keeps the
+last good answer (or `{}` if there never was one), logs one WARNING per outage, and retries on
+the next call. Returns a copy, so a caller cannot mutate the cache. Treat `{}` as "use my env
+defaults". The websearch module is the reference user (`epicurus_websearch.config`).
+
 ## Errors
 
-These methods raise `httpx.HTTPStatusError` on a non-2xx response — notably **`503`** when
+These methods raise `httpx.HTTPStatusError` on a non-2xx response (`web_search` raises
+`PlatformError` instead, carrying the core's `code`) — notably **`503`** when
 the gateway is paused (ADR-0005). A module should treat inference as best-effort and
 degrade gracefully.
 

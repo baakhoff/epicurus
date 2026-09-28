@@ -7,10 +7,17 @@
  * (enum → select, format "multiline" → textarea), number/integer, boolean.
  * Honored keywords: title, description, default, required, enum, minimum,
  * maximum. Anything else degrades to a raw JSON field — never a crash.
+ *
+ * Two data-only extensions ride beside `enum`, each a list parallel to it: `enumLabels`
+ * (display names) and `enumRequiresProviderKey` (#984: the hosted provider whose stored API key
+ * an option needs, or null). The second only takes effect when the caller passes
+ * `storedProviderKeys` — the Modules page does, from the provider list — so a module can gate
+ * an option on a key without shipping any markup of its own (ADR-0018/0019).
  */
 import { useMemo, useState } from "react";
 
-import { Button, Label, Select, Switch, TextArea, TextInput } from "@/components/ui";
+import { Button, Label, Select, Switch, TextArea, TextInput, cn } from "@/components/ui";
+import { PROVIDER_LABELS } from "@/lib/format";
 import { REPEAT_PRESETS, presetForRule, type RepeatPresetId } from "@/lib/rrule";
 
 interface PropertySchema {
@@ -21,6 +28,11 @@ interface PropertySchema {
   enum?: unknown[];
   // Display labels parallel to ``enum`` (a labeled <select>); falls back to the value.
   enumLabels?: string[];
+  // Parallel to ``enum`` (#984): the hosted provider whose stored API key an option needs, or
+  // null for "needs nothing". With ``storedProviderKeys`` passed, an option whose key is not
+  // stored is disabled and a hint says where to add one. The core refuses the same value
+  // server-side, so this is presentation, not the only guard.
+  enumRequiresProviderKey?: (string | null)[];
   format?: string;
   // Names a sibling boolean field that, when true, renders this date-time field as a
   // *date* picker emitting a ``YYYY-MM-DD`` value (the calendar's all-day toggle).
@@ -302,6 +314,31 @@ function cnField(focused: boolean): string {
   ].join(" ");
 }
 
+/** An enum option that needs a provider key the tenant has not stored (#984). */
+interface LockedOption {
+  value: string;
+  label: string;
+  providerLabel: string;
+}
+
+/** The options of an enum field that are locked behind a missing provider key. Empty when the
+ *  caller passed no `storedProviderKeys` (an action form, not a module's settings). */
+function lockedOptions(prop: PropertySchema, stored?: ReadonlySet<string>): LockedOption[] {
+  const requires = prop.enumRequiresProviderKey;
+  if (!stored || !prop.enum || !requires) return [];
+  const out: LockedOption[] = [];
+  prop.enum.forEach((option, i) => {
+    const alias = requires[i];
+    if (typeof alias !== "string" || !alias || stored.has(alias)) return;
+    out.push({
+      value: String(option),
+      label: prop.enumLabels?.[i] ?? String(option),
+      providerLabel: PROVIDER_LABELS[alias] ?? alias,
+    });
+  });
+  return out;
+}
+
 function FieldFor({
   name,
   prop,
@@ -309,11 +346,14 @@ function FieldFor({
   value,
   values,
   onChange,
+  storedProviderKeys,
 }: {
   name: string;
   prop: PropertySchema;
   required: boolean;
   value: unknown;
+  /** Provider aliases with a stored API key (#984); undefined = no provider gating. */
+  storedProviderKeys?: ReadonlySet<string>;
   /** All current form values — so a field can react to a sibling (e.g. the all-day toggle). */
   values: FormValues;
   onChange: (next: unknown) => void;
@@ -331,24 +371,50 @@ function FieldFor({
 
   if (prop.enum && prop.enum.length > 0) {
     const labels = prop.enumLabels;
+    const locked = lockedOptions(prop, storedProviderKeys);
+    const current = String(value ?? "");
     return (
       <div>
         <Label hint={prop.description}>{title}</Label>
         <Select
           aria-label={title}
-          value={String(value ?? "")}
+          value={current}
           onChange={(e) => onChange(e.target.value)}
           className="w-full"
         >
           <option value="" disabled>
             choose…
           </option>
-          {prop.enum.map((option, i) => (
-            <option key={String(option)} value={String(option)}>
-              {labels?.[i] ?? String(option)}
-            </option>
-          ))}
+          {prop.enum.map((option, i) => {
+            const lock = locked.find((l) => l.value === String(option));
+            const label = labels?.[i] ?? String(option);
+            // A locked option stays listed, so the operator learns it exists, but cannot be
+            // picked. The one already stored stays selectable so the form still shows it.
+            return (
+              <option
+                key={String(option)}
+                value={String(option)}
+                disabled={lock !== undefined && lock.value !== current}
+              >
+                {lock ? `${label} (needs your ${lock.providerLabel} key)` : label}
+              </option>
+            );
+          })}
         </Select>
+        {locked.map((lock) => {
+          const chosen = lock.value === current;
+          return (
+            <p
+              key={lock.value}
+              role={chosen ? "alert" : undefined}
+              className={cn("mt-1.5 text-xs", chosen ? "text-danger" : "text-ink-faint")}
+            >
+              {chosen
+                ? `No ${lock.providerLabel} API key is stored, so "${lock.label}" cannot run. Add one on the Models page, or choose another option.`
+                : `To use "${lock.label}", add your ${lock.providerLabel} API key on the Models page.`}
+            </p>
+          );
+        })}
       </div>
     );
   }
@@ -463,12 +529,16 @@ export function SchemaForm({
   submitLabel = "Save",
   busy = false,
   onSubmit,
+  storedProviderKeys,
 }: {
   schema: ObjectSchema;
   initial?: FormValues;
   submitLabel?: string;
   busy?: boolean;
   onSubmit: (values: FormValues) => void;
+  /** Provider aliases whose API key is stored (#984). When given, enum options a schema marks
+   *  with `enumRequiresProviderKey` are disabled without their key; omitted = no gating. */
+  storedProviderKeys?: ReadonlySet<string>;
 }) {
   const start = useMemo(() => initialValues(schema, initial), [schema, initial]);
   const [values, setValues] = useState<FormValues>(start);
@@ -517,6 +587,7 @@ export function SchemaForm({
           required={required.has(name)}
           value={values[name]}
           values={values}
+          storedProviderKeys={storedProviderKeys}
           onChange={(next) => setValues((prev) => ({ ...prev, [name]: next }))}
         />
       ))}

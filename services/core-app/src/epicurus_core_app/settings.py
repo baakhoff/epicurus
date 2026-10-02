@@ -151,6 +151,17 @@ class CoreAppSettings(CoreSettings):
     qdrant_url: str = "http://localhost:6333"
     # Ollama embedding model used to vectorize conversation text for recall.
     memory_embed_model: str = "nomic-embed-text"
+    # ── Hosted web search through OpenRouter (#984) ──────────────────────────────
+    # When the operator switches the websearch module to OpenRouter, the core runs each search
+    # as one OpenRouter completion carrying the `openrouter:web_search` server tool, using the
+    # tenant's stored OpenRouter key. The model only relays the query to the tool (its reply is
+    # discarded), so the cheapest reliable tool-calling model is the right one. An OpenRouter
+    # model id, *without* the `openrouter/` alias prefix.
+    openrouter_web_search_model: str = "openai/gpt-4.1-nano"
+    # The search engine OpenRouter runs: `exa` (default — a fixed per-search price), `auto`
+    # (the model's native search where it has one, else Exa), `native`, `parallel`,
+    # `perplexity`, or `firecrawl` (needs your own Firecrawl key on OpenRouter).
+    openrouter_web_search_engine: str = "exa"
     # ── Background fact extraction (ADR-0045 / ADR-0051) ─────────────────────────
     # When the agent distils durable user facts from a finished exchange:
     #   "nightly"   — (default) defer each exchange to a durable queue, drained once a day at
@@ -418,6 +429,22 @@ class CoreAppSettings(CoreSettings):
         """
         if isinstance(value, str) and value.strip() == "" and info.field_name is not None:
             return cls.model_fields[info.field_name].default
+        return value
+
+    @field_validator("openrouter_web_search_model", "openrouter_web_search_engine", mode="before")
+    @classmethod
+    def _blank_web_search_to_default(cls, value: object, info: ValidationInfo) -> object:
+        """A blank ``OPENROUTER_WEB_SEARCH_MODEL=`` / ``…_ENGINE=`` means the default (#984).
+
+        The chart renders every value, blank included, and a blank model id would reach
+        OpenRouter as a request it can only refuse — so blank falls back to the default here.
+        """
+        if isinstance(value, str) and info.field_name is not None:
+            value = value.strip()
+            if value == "":
+                return cls.model_fields[info.field_name].default
+            if info.field_name == "openrouter_web_search_engine":
+                return value.lower()
         return value
 
     @field_validator("llm_temperature", "llm_top_p", "llm_num_ctx", mode="before")

@@ -284,6 +284,8 @@ workloads share the cluster. They are ingress-only, so the core still reaches yo
 | `core.llm.temperature` / `.topP` / `.numCtx` | `""` | Blank = the provider default. |
 | `core.llm.bootstrapModels` | `auto` | `LLM_BOOTSTRAP_MODELS`; `""` disables the first-boot pull. |
 | `core.memoryEmbedModel` | `nomic-embed-text` | `MEMORY_EMBED_MODEL`. |
+| `core.openrouterWebSearch.model` | `openai/gpt-4.1-nano` | `OPENROUTER_WEB_SEARCH_MODEL` — the model that runs a web search through OpenRouter, once the websearch module is switched to it (#984). Blank = the core default. |
+| `core.openrouterWebSearch.engine` | `exa` | `OPENROUTER_WEB_SEARCH_ENGINE` — `exa` / `auto` / `native` / `parallel` / `perplexity` / `firecrawl`. Blank = the core default. |
 | `core.oauth.redirectBaseUrl` | `""` | `OAUTH_REDIRECT_BASE_URL`; blank derives it from `ingress.host`. Also the base of the sign-in callback. |
 | `core.podAnnotations` | `{}` | Merged with the metrics annotations. |
 | `core.nodeSelector` / `.tolerations` / `.affinity` | `{}` / `[]` / `{}` | Scheduling. |

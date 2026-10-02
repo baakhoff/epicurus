@@ -12,6 +12,8 @@ GET  /platform/v1/info   — discovery: contract, core-app + library versions, r
                            track, tenant.
 POST /platform/v1/embed  — embed texts via the LLM gateway (returns float vectors).
 POST /platform/v1/chat   — chat completion via the LLM gateway.
+POST /platform/v1/web-search — one web search through the tenant's hosted search provider
+                           (OpenRouter), normalised results (#984).
 """
 
 from __future__ import annotations
@@ -22,13 +24,14 @@ from importlib.metadata import version as pkg_version
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from epicurus_core import CONTRACT_VERSION, __version__
+from epicurus_core import CONTRACT_VERSION, WebSearchResult, __version__
 from epicurus_core_app.llm.errors import ModelCapabilityError
 from epicurus_core_app.llm.gateway import LlmGateway
 from epicurus_core_app.llm.models import ChatMessage, ChatResult
 from epicurus_core_app.llm.prefs import LlmPrefsStore
+from epicurus_core_app.llm.web_search import OpenRouterWebSearch, WebSearchError
 from epicurus_core_app.settings import CoreAppSettings
 
 # Vision gating for the module-facing chat path (#739). The interactive agent turn has gated
@@ -157,6 +160,14 @@ class EmbedResponse(BaseModel):
     embeddings: list[list[float]]
 
 
+class WebSearchRequest(BaseModel):
+    """Request body for ``POST /platform/v1/web-search`` (#984)."""
+
+    query: str = Field(min_length=1, max_length=2000)
+    max_results: int = Field(default=5, ge=1, le=20)
+    tenant_id: str | None = None
+
+
 class PlatformChatRequest(BaseModel):
     """Request body for ``POST /platform/v1/chat``."""
 
@@ -172,9 +183,11 @@ def create_platform_router(
     *,
     prefs: LlmPrefsStore | None = None,
     default_tenant: str = "local",
+    web_search: OpenRouterWebSearch | None = None,
 ) -> APIRouter:
     """Build the ``/platform/v1`` router that modules call into."""
     router = APIRouter(prefix="/platform/v1", tags=["platform"])
+    web_search_backend = web_search
 
     @router.get("/info", response_model=PlatformInfo)
     def info() -> PlatformInfo:
@@ -257,5 +270,37 @@ def create_platform_router(
             )
         except ModelCapabilityError as exc:
             raise HTTPException(status_code=400, detail=_capability_detail(exc)) from exc
+
+    @router.post("/web-search", response_model=WebSearchResult)
+    async def run_web_search(request: WebSearchRequest) -> WebSearchResult:
+        """Run one web search through the tenant's hosted search provider (#984).
+
+        Today that is OpenRouter's ``openrouter:web_search`` server tool, with the tenant's
+        stored ``openrouter`` key — the key never leaves the core (constraints #4 and #8), and
+        the call is metered under the caller's tenant (constraint #1). The websearch module
+        calls this when the operator has switched it to OpenRouter.
+
+        Every failure is a structured ``detail`` — ``{"code", "message", "backend"}`` — never a
+        silent empty result: **409** ``openrouter_key_missing`` (no key stored); **503**
+        ``key_store_unavailable`` (OpenBao could not be asked); **502**
+        ``openrouter_key_rejected`` / ``provider_error`` / ``provider_unreachable``.
+        """
+        if web_search_backend is None:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "web_search_unavailable",
+                    "message": "Hosted web search is not configured on this core.",
+                    "backend": "openrouter",
+                },
+            )
+        try:
+            return await web_search_backend.search(
+                request.query,
+                max_results=request.max_results,
+                tenant_id=request.tenant_id or default_tenant,
+            )
+        except WebSearchError as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail()) from exc
 
     return router

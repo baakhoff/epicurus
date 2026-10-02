@@ -109,7 +109,7 @@ async function request<T>(
   if (!response.ok) {
     let detail = response.statusText;
     try {
-      detail = (await response.json()).detail ?? detail;
+      detail = detailText((await response.json()).detail) ?? detail;
     } catch {
       /* non-JSON error body */
     }
@@ -118,6 +118,18 @@ async function request<T>(
     throw new ApiError(response.status, detail);
   }
   return schema.parse(await response.json());
+}
+
+/** The readable text of a core error `detail`. Most are a string; a structured refusal is an
+ *  object carrying a `message` (#984's `provider_key_required`, the capability refusals), which
+ *  would otherwise render as "[object Object]". `undefined` = nothing usable, keep the status. */
+export function detailText(detail: unknown): string | undefined {
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object" && "message" in detail) {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === "string" && message) return message;
+  }
+  return undefined;
 }
 
 /** The exact path the proxy's upload-size exemption matches — no trailing slash, no query. */

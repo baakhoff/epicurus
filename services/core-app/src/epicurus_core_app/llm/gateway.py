@@ -1170,6 +1170,19 @@ class LlmGateway:
             )
         return infos
 
+    async def provider_key_state(self, alias: str, *, tenant_id: str | None = None) -> KeyState:
+        """Whether ``alias``'s key is stored for the tenant — ``present`` / ``missing`` / …
+
+        The single-provider form of :meth:`providers`, for a caller that gates on one key
+        (#984: the Modules page's "use OpenRouter's web search" option). Unknown aliases raise
+        :class:`UnknownProviderError`.
+        """
+        provider = registry.PROVIDERS.get(alias)
+        if provider is None:
+            raise UnknownProviderError(f"no provider named {alias!r}")
+        state, _ = await self._key_state(provider.secret_path, tenant_id or self._default_tenant)
+        return state
+
     async def _key_state(self, secret_path: str | None, tenant: str) -> tuple[KeyState, str | None]:
         """Whether the provider's key is there — or whether we could even ask (#728).
 

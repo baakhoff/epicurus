@@ -21,6 +21,8 @@ Example::
 
 from __future__ import annotations
 
+import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -29,10 +31,63 @@ import httpx
 # ``PlatformChatResponse`` are backward-compatible aliases of ``ChatMessage`` /
 # ``ChatResult`` — re-exported here so existing
 # ``from epicurus_core.platform_client import PlatformChatResponse`` keeps resolving.
-from epicurus_core.contracts import CollectionPrefs, PlatformChatResponse, PlatformMessage
+from epicurus_core.contracts import (
+    CollectionPrefs,
+    PlatformChatResponse,
+    PlatformMessage,
+    WebSearchResult,
+)
 from epicurus_core.files import FileEntry
+from epicurus_core.logging import get_logger
 
-__all__ = ["PlatformChatResponse", "PlatformClient", "PlatformMessage"]
+__all__ = [
+    "ModuleConfigCache",
+    "PlatformChatResponse",
+    "PlatformClient",
+    "PlatformError",
+    "PlatformMessage",
+]
+
+
+class PlatformError(Exception):
+    """A refusal the core *explained*: a non-2xx answer whose body carries a ``code``.
+
+    Raised by the platform calls whose contract is a structured error detail
+    (``{"detail": {"code": ..., "message": ...}}``) — today :meth:`PlatformClient.web_search`.
+    ``code`` is what a module branches on (``openrouter_key_missing`` and so on), ``message``
+    is the operator-readable sentence to relay, and ``status`` the HTTP status the core used.
+
+    An *anticipated* tool failure (ADR-0136): the tool-error seam logs it at WARNING and
+    carries ``message`` to the model, exactly as it does an ``httpx.HTTPStatusError``.
+    """
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
+def _platform_error(resp: httpx.Response) -> PlatformError:
+    """Build a :class:`PlatformError` from a non-2xx core answer, whatever its body.
+
+    A structured ``detail`` object gives its ``code`` and ``message``; a plain-string detail
+    (FastAPI's own 422, a proxy's page) keeps the text under the code ``http_<status>``, so
+    the caller never loses the reason even when the core did not shape it.
+    """
+    code = f"http_{resp.status_code}"
+    message = resp.reason_phrase or f"HTTP {resp.status_code}"
+    try:
+        body = resp.json()
+    except ValueError:
+        return PlatformError(resp.status_code, code, message)
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict):
+        code = str(detail.get("code") or code)
+        message = str(detail.get("message") or message)
+    elif isinstance(detail, str) and detail:
+        message = detail
+    return PlatformError(resp.status_code, code, message)
 
 
 class PlatformClient:
@@ -207,6 +262,55 @@ class PlatformClient:
             resp.raise_for_status()
             return CollectionPrefs.model_validate(resp.json())
 
+    async def get_module_config(self) -> dict[str, Any]:
+        """This module's stored settings — what the operator saved on the Modules page (#984).
+
+        The values the shell's settings form writes (``PUT /platform/v1/modules/{name}/config``,
+        kept per tenant in OpenBao) and that, before #984, no module ever read back. Returns
+        ``{}`` when nothing has been saved. Most callers want :class:`ModuleConfigCache`, which
+        wraps this with a short cache and a last-known-good fallback. Requires
+        ``PlatformClient(..., module=...)``.
+
+        Raises:
+            httpx.HTTPError: the core is unreachable or answered non-2xx.
+        """
+        if self._module is None:
+            raise ValueError("PlatformClient.module must be set to read the module's settings")
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=10.0) as http:
+            resp = await http.get(
+                f"/platform/v1/modules/{self._module}/config",
+                params={"tenant_id": self._tenant_id},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            return dict(body) if isinstance(body, dict) else {}
+
+    async def web_search(self, query: str, *, max_results: int = 5) -> WebSearchResult:
+        """Run one web search through the core's hosted search provider (#984).
+
+        The core holds the provider key (constraints #4 and #8) — today the tenant's stored
+        OpenRouter key — runs the search, meters it under this client's tenant, and returns
+        normalised results. The module never sees the key.
+
+        Raises:
+            PlatformError: the core refused or the provider failed, with the core's ``code``:
+                ``openrouter_key_missing`` (409, no key stored), ``openrouter_key_rejected``,
+                ``provider_error``, ``provider_unreachable`` (502), ``key_store_unavailable``
+                (503).
+            httpx.TransportError: the core itself could not be reached.
+        """
+        payload: dict[str, Any] = {
+            "query": query,
+            "max_results": max_results,
+            "tenant_id": self._tenant_id,
+        }
+        # A hosted search is a model call plus a search round trip; give it the chat budget.
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=120.0) as http:
+            resp = await http.post("/platform/v1/web-search", json=payload)
+            if resp.is_error:
+                raise _platform_error(resp)
+            return WebSearchResult.model_validate(resp.json())
+
     async def list_modules(self) -> list[dict[str, Any]]:
         """List all modules with their manifests and enabled states (#215).
 
@@ -330,3 +434,54 @@ class PlatformClient:
             )
             resp.raise_for_status()
             return FileEntry.model_validate(resp.json())
+
+
+class ModuleConfigCache:
+    """A module's stored settings, read through the core with a short cache (#984).
+
+    The Modules page saves a module's settings in the core; this is how the module *sees*
+    them at runtime without a restart and without asking the core on every tool call. A read
+    within ``ttl_s`` of the last successful fetch answers from memory. When the core cannot be
+    reached the last good answer is kept (or ``{}`` if there has never been one) and the
+    failure is logged once per outage, so a core restart never turns into a failing tool — the
+    module falls back to its env defaults, which is what ``{}`` means to every caller.
+    """
+
+    def __init__(
+        self,
+        client: PlatformClient,
+        *,
+        ttl_s: float = 15.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._client = client
+        self._ttl_s = ttl_s
+        self._clock = clock
+        self._values: dict[str, Any] = {}
+        self._fetched_at: float | None = None
+        self._failing = False
+
+    async def get(self) -> dict[str, Any]:
+        """The stored settings — fresh within ``ttl_s``, else re-read (last-good on failure)."""
+        now = self._clock()
+        if self._fetched_at is not None and now - self._fetched_at < self._ttl_s:
+            return dict(self._values)
+        try:
+            values = await self._client.get_module_config()
+        except httpx.HTTPError as exc:
+            if not self._failing:
+                get_logger(__name__).warning(
+                    "could not read the module's stored settings; using the last known",
+                    error=str(exc),
+                    have_last_known=self._fetched_at is not None,
+                )
+            self._failing = True
+            return dict(self._values)
+        self._failing = False
+        self._values = values
+        self._fetched_at = now
+        return dict(values)
+
+    def invalidate(self) -> None:
+        """Forget the cached answer so the next :meth:`get` asks the core."""
+        self._fetched_at = None

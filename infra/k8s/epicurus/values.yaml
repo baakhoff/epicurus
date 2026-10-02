@@ -212,6 +212,16 @@ core:
     # the operator wrote it.
     bootstrapModels: auto
   memoryEmbedModel: nomic-embed-text
+  # Web search through OpenRouter (#984): used only once the websearch module is switched to
+  # OpenRouter on the Modules page, which itself needs an OpenRouter key stored on the Models
+  # page. The core runs each search as one OpenRouter completion carrying the
+  # `openrouter:web_search` server tool; the model only relays the query, so a cheap one is
+  # right. `model` is an OpenRouter id *without* the `openrouter/` alias prefix; `engine` is
+  # exa (a fixed per-search price) | auto | native | parallel | perplexity | firecrawl.
+  # Blank = the core's default.
+  openrouterWebSearch:
+    model: openai/gpt-4.1-nano
+    engine: exa
   oauth:
     # Public base URL a provider redirects back to — for connected accounts and,
     # with `auth.mode: oidc`, for sign-in. Blank derives it from `ingress.host`

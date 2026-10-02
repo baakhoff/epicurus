@@ -70,7 +70,7 @@ async def test_web_search_tool_caps_at_20() -> None:
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client)
     await module.call_tool("web_search", {"query": "q", "num_results": 999})
-    client.search.assert_called_once_with("q", 20)  # type: ignore[attr-defined]
+    client.search.assert_called_once_with("q", 20, engines=None)  # type: ignore[attr-defined]
 
 
 async def test_web_search_reports_searxng_unreachable_as_a_tool_error() -> None:
@@ -188,14 +188,14 @@ async def test_default_max_results_respected() -> None:
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client, max_results=3)
     await module.call_tool("web_search", {"query": "q"})
-    client.search.assert_called_once_with("q", 3)  # type: ignore[attr-defined]
+    client.search.assert_called_once_with("q", 3, engines=None)  # type: ignore[attr-defined]
 
 
 async def test_custom_num_results_overrides_default() -> None:
     client = _make_client(SAMPLE_RESULTS)
     module = build_module(client, max_results=5)
     await module.call_tool("web_search", {"query": "q", "num_results": 2})
-    client.search.assert_called_once_with("q", 2)  # type: ignore[attr-defined]
+    client.search.assert_called_once_with("q", 2, engines=None)  # type: ignore[attr-defined]
 
 
 # ── link_ingest (#739) ─────────────────────────────────────────────────────────────────

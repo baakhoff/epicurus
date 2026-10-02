@@ -225,12 +225,13 @@ class ModuleRegistry:
         docker_unavailable_reason: str | None = None,
         core: CorePseudoModule | None = None,
         events: CoreEventEmitter | None = None,
-        provider_key_state: Callable[[str], Awaitable[str]] | None = None,
+        provider_key_state: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> None:
         self._bases = list(base_urls)
-        # Answers "is this provider's key stored for the tenant?" (#984) — the gate on a config
-        # option a module marks as needing a provider key. None (tests, a core without an LLM
-        # gateway) skips the gate: nothing in a module's own schema can be checked without it.
+        # Answers "is this provider's key stored for this tenant?" (#984), called with
+        # ``(alias, tenant)`` — the gate on a config option a module marks as needing a
+        # provider key. None (tests, a core without an LLM gateway) skips the gate: nothing in
+        # a module's own schema can be checked without it.
         self._provider_key_state = provider_key_state
         self._mcp = mcp
         self._secrets = secrets
@@ -942,7 +943,12 @@ class ModuleRegistry:
             for option, alias in zip(options, requires, strict=False):
                 if option != values[key] or not isinstance(alias, str) or not alias:
                     continue
-                state = await self._provider_key_state(alias)
+                try:
+                    state = await self._provider_key_state(alias, self._tenant)
+                except LookupError:
+                    # A provider the gateway does not know (``UnknownProviderError``) can never
+                    # have a stored key: refuse with the 409 below, not a 500 from the save.
+                    state = "missing"
                 if state in ("present", "not_required"):
                     continue
                 title = str(prop.get("title") or key)

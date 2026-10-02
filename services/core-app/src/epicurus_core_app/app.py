@@ -503,6 +503,10 @@ def create_app() -> FastAPI:
         settings.container_runtime, namespace=settings.kubernetes_namespace
     )
     docker = container_availability.controller
+
+    async def _provider_key_state(alias: str, tenant: str) -> str:
+        return await gateway.provider_key_state(alias, tenant_id=tenant)
+
     registry = ModuleRegistry(
         settings.module_base_urls,
         mcp=mcp_host,
@@ -513,10 +517,9 @@ def create_app() -> FastAPI:
         docker_unavailable_reason=container_availability.reason,
         core=core_pages,
         events=core_events,
-        # The Modules-page gate on a config option that needs a provider key (#984).
-        provider_key_state=lambda alias: gateway.provider_key_state(
-            alias, tenant_id=settings.default_tenant_id
-        ),
+        # The Modules-page gate on a config option that needs a provider key (#984), asked
+        # for the registry's own tenant.
+        provider_key_state=_provider_key_state,
     )
     ollama_runtime = OllamaRuntime(
         docker,

@@ -306,7 +306,7 @@ seconds, no restart.
 
 | Field | Values (default) | Effect |
 | ----- | ---------------- | ------ |
-| `websearch_backend` | `searxng` (default) · `openrouter` | Which provider `web_search` uses. `openrouter` carries `enumRequiresProviderKey: "openrouter"`: the shell disables it until the tenant's OpenRouter key is stored, and the core refuses to save it without one (409 `provider_key_required`; 503 `key_store_unavailable` when OpenBao cannot be asked). Unknown values read as `searxng`. |
+| `websearch_backend` | `searxng` (default) · `openrouter` | Which provider `web_search` uses. The property carries `enumRequiresProviderKey: [null, "openrouter"]` (parallel to `enum`), so the `openrouter` option needs the OpenRouter key: the shell disables it until the tenant's OpenRouter key is stored, and the core refuses to save it without one (409 `provider_key_required`; 503 `key_store_unavailable` when OpenBao cannot be asked). Unknown values read as `searxng`. |
 | `websearch_max_results` | 1–20 (5) | Results per search when the agent does not pass `num_results`. Overrides `WEBSEARCH_MAX_RESULTS` when set to anything other than 5. |
 | `websearch_engines` | text (empty) | SearXNG engines. Overrides `WEBSEARCH_ENGINES` when non-empty. Ignored by OpenRouter. |
 
@@ -358,7 +358,7 @@ hover-card kinds resolve from self-describing `ref_id`s rather than a store.
 | ------- | --- |
 | SearXNG | The search backend; must be healthy before the module starts. |
 | NATS | Event bus (connected at startup; no events are used in v0.1). |
-| core-app | Platform API. `link_ingest` asks the core's LLM gateway to describe images (constraint #8) — the module holds no model keys. Since v0.5.0 the module also reads its stored settings from the core and, with the OpenRouter provider chosen, sends every search to `POST /platform/v1/web-search`, where the core uses the tenant's OpenRouter key. With the core unreachable the module falls back to its env settings (SearXNG). |
+| core-app | Platform API. `link_ingest` asks the core's LLM gateway to describe images (constraint #8) — the module holds no model keys. Since v0.5.0 the module also reads its stored settings from the core and, with the OpenRouter provider chosen, sends every search to `POST /platform/v1/web-search`, where the core uses the tenant's OpenRouter key. With the core unreachable the module keeps the last settings it read (`ModuleConfigCache`), or its env settings (SearXNG) if it has never read any; an OpenRouter search itself needs the core, so it fails loudly through the tool-error seam rather than switching to SearXNG. |
 | trafilatura | Article extraction + page metadata (Apache-2.0, pure Python over `lxml`). |
 | yt-dlp | Public-platform video metadata and uploader subtitles. **Lazily imported** and failure-tolerant: strip it and tier 3 degrades to oEmbed + OpenGraph. Metadata only — nothing is ever downloaded, so no ffmpeg and no OS packages. |
 

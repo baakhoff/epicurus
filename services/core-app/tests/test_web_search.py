@@ -536,7 +536,8 @@ class _Registry(ModuleRegistry):
 def _registry(state: str | None) -> tuple[_Registry, _ConfigSecrets, list[str]]:
     asked: list[str] = []
 
-    async def key_state(alias: str) -> str:
+    async def key_state(alias: str, tenant: str) -> str:
+        assert tenant == "local"
         asked.append(alias)
         assert state is not None
         return state
@@ -595,3 +596,41 @@ async def test_without_a_key_lookup_the_gate_is_skipped() -> None:
     registry, secrets, _ = _registry(None)
     await registry.set_config("websearch", {"websearch_backend": "openrouter"})
     assert "modules/websearch/config" in secrets.stored
+
+
+async def test_an_unknown_provider_alias_is_a_409_refusal_not_a_500() -> None:
+    async def key_state(alias: str, tenant: str) -> str:
+        raise UnknownProviderError(f"no provider named {alias!r}")
+
+    registry = _Registry(
+        ["http://websearch:8080"],
+        mcp=object(),  # type: ignore[arg-type]
+        secrets=_ConfigSecrets(),  # type: ignore[arg-type]
+        tenant="local",
+        prefs=_Prefs(),  # type: ignore[arg-type]
+        provider_key_state=key_state,
+    )
+    with pytest.raises(HTTPException) as err:
+        await registry.set_config("websearch", {"websearch_backend": "openrouter"})
+    assert err.value.status_code == 409
+    assert isinstance(err.value.detail, dict)
+    assert err.value.detail["code"] == "provider_key_required"
+
+
+async def test_the_key_gate_asks_for_the_registrys_own_tenant() -> None:
+    tenants: list[str] = []
+
+    async def key_state(alias: str, tenant: str) -> str:
+        tenants.append(tenant)
+        return "present"
+
+    registry = _Registry(
+        ["http://websearch:8080"],
+        mcp=object(),  # type: ignore[arg-type]
+        secrets=_ConfigSecrets(),  # type: ignore[arg-type]
+        tenant="acme",
+        prefs=_Prefs(),  # type: ignore[arg-type]
+        provider_key_state=key_state,
+    )
+    await registry.set_config("websearch", {"websearch_backend": "openrouter"})
+    assert tenants == ["acme"]

@@ -51,7 +51,7 @@ log.info("service starting", service=settings.service_name)
 | [`observability`](observability.md) | `add_ops_routes`, `create_ops_router`, `HealthResponse` |
 | [`tracing`](observability.md#tracing-57-adr-0068) | `setup_tracing`, `get_tracer` — optional OpenTelemetry traces to Tempo (#57) |
 | [`secrets`](secrets.md) | `SecretStore`, `SecretError` |
-| [`platform-client`](platform-client.md) | `PlatformClient`, `PlatformMessage` — a module's typed access to core inference |
+| [`platform-client`](platform-client.md) | `PlatformClient`, `PlatformMessage`, `PlatformError`, `ModuleConfigCache` — a module's typed access to core inference, hosted web search and its own stored settings |
 | [`files`](files.md) | `FileStore`, `FileEntry`, `build_file_store` — the core-owned, swappable per-tenant file space (ADR-0052) |
 | [`db`](db.md) | `ensure_columns` — additive schema reconcile for stores without migrations (ADR-0067); not top-level, needs the `db` extra |
 

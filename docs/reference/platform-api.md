@@ -321,6 +321,70 @@ no extra capability lookup.
 | 400 | Request carries image content-parts and the resolved model has no vision support (#739). Body: `{"detail": {"error": "unsupported_media", "message": …, "model": …}}`. |
 | 503 | Gateway is paused with no hosted fallback available. |
 
+## `POST /platform/v1/web-search`
+
+One web search through the tenant's **hosted search provider** (#984). Today that is
+OpenRouter: the core reads the tenant's stored OpenRouter key (`llm/openrouter` in OpenBao,
+the key the Models page stores with `PUT /platform/v1/llm/providers/openrouter/key`), runs the
+search, meters it, and returns normalised results. The key never leaves the core (constraints
+#4, #8). The websearch module calls this when the operator has switched it to OpenRouter; use
+`PlatformClient.web_search` rather than the raw path.
+
+**How the core searches.** OpenRouter has no search-only API: web search is a feature of a
+chat completion. The core sends one `POST https://openrouter.ai/api/v1/chat/completions` with
+the `openrouter:web_search` server tool (`tools: [{"type": "openrouter:web_search",
+"parameters": {"max_results": N, "max_uses": 1, "engine": "exa"}}]`), against the model
+`OPENROUTER_WEB_SEARCH_MODEL` (default `openai/gpt-4.1-nano`), told to search once for the
+query. OpenRouter's `url_citation` annotations on the reply become the results (title, URL, and
+the excerpt trimmed to a 400-character snippet; repeats and non-http(s) URLs dropped); the
+model's own text is discarded. The `web` plugin and the `:online` suffix are not used —
+OpenRouter documents both as deprecated in favour of the server tool.
+
+**Request body**
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `query` | `str` (1–2000 chars) | Yes | The search. |
+| `max_results` | `int` (1–20) | No, default 5 | Results wanted. |
+| `tenant_id` | `str \| null` | No | Tenant scope: whose key is used and who is metered. Defaults to the core's configured tenant. |
+
+**Response** — `epicurus_core.WebSearchResult`
+
+```json
+{
+  "results": [
+    {"title": "Tidal array reaches full power", "url": "https://example.com/tidal",
+     "snippet": "The five-turbine array …", "engine": "OpenRouter"}
+  ],
+  "searched": true,
+  "backend": "openrouter",
+  "model": "openai/gpt-4.1-nano",
+  "search_engine": "exa"
+}
+```
+
+`searched` tells the two empty results apart: `true` = a search ran and matched nothing;
+`false` = OpenRouter answered without running a search (`usage.server_tool_use.web_search_requests
+== 0`), so the search is degraded, not empty; `null` = OpenRouter did not say. A result list
+that is not empty always has `searched: true`.
+
+**Metering.** One `llm.usage` event under the caller's tenant: `model` =
+`openrouter/<model>`, the completion's token counts, and `web_search_requests` (the searches
+OpenRouter billed). No query text and no key.
+
+**Error responses** — every one a structured `detail` `{"code", "message", "backend"}`, never a
+silent empty result:
+
+| Status | `code` | Condition |
+| --- | --- | --- |
+| 409 | `openrouter_key_missing` | No OpenRouter key is stored for the tenant (or it is blank). |
+| 503 | `key_store_unavailable` | OpenBao could not be asked (not the same as "no key", #728). |
+| 502 | `openrouter_key_rejected` | OpenRouter answered 401/403: replace the key on the Models page. |
+| 502 | `provider_error` | Any other non-2xx from OpenRouter, a 200 carrying an `error` object, or an unreadable body. `message` includes OpenRouter's own reason (e.g. "Insufficient credits"), bounded to 300 characters. |
+| 502 | `provider_unreachable` | Timeout or connection failure reaching OpenRouter (60 s budget). |
+| 503 | `web_search_unavailable` | The core was built without a search backend (tests only). |
+| 422 | — | Malformed request (empty `query`, `max_results` outside 1–20). |
+
 ## `GET /platform/v1/timezone` · `PUT /platform/v1/timezone`
 
 The operator's IANA timezone, used by the agent's built-in `now` tool (ADR-0039). `GET`
@@ -1277,6 +1341,48 @@ sends an image to a model without vision (#739). Branch on
 `exc.response.json()["detail"]["error"] == "unsupported_media"` and degrade rather than
 failing the whole operation; `epicurus_websearch.vision._note_for_status` is the reference
 handling.
+
+### `await client.web_search(query, *, max_results=5) -> WebSearchResult`
+
+One web search through the core's hosted search provider (#984) — the wire call is
+[`POST /platform/v1/web-search`](#post-platformv1web-search). The core uses the
+tenant's stored OpenRouter key; the module never sees it. Returns the core's
+`WebSearchResult` (`results: list[WebSearchHit]` of `{title, url, snippet, engine}`, `searched:
+bool | None`, `backend`, `model`, `search_engine`).
+
+Raises **`PlatformError`** (exported from `epicurus_core`) when the core refuses or the provider
+fails — branch on `exc.code`, relay `exc.message`:
+
+```python
+from epicurus_core import PlatformError
+
+try:
+    found = await client.web_search("tidal turbines", max_results=5)
+except PlatformError as exc:
+    if exc.code == "openrouter_key_missing":
+        return "no OpenRouter key is stored — add one on the Models page"
+    raise  # provider_error / openrouter_key_rejected / provider_unreachable / key_store_unavailable
+```
+
+`PlatformError` is in the tool-error seam's *anticipated* set (ADR-0136): re-raised from a tool
+it reaches the model as the core's sentence and is logged at WARNING. `httpx.TransportError`
+still propagates when the core itself is unreachable.
+
+### `await client.get_module_config() -> dict`
+
+This module's stored settings — what the operator saved in its settings form on the Modules
+page (`GET /platform/v1/modules/{module}/config`; OpenBao `modules/<name>/config`, tenant
+scoped). `{}` when nothing was saved. Construct the client with `module=<name>`. Raises
+`httpx.HTTPError` when the core is unreachable. Added in #984: before it, a module had no way to
+read these values, so a `config_schema` form stored settings nothing ever used.
+
+### `ModuleConfigCache(client, *, ttl_s=15.0, clock=time.monotonic)` · `await cache.get() -> dict` · `cache.invalidate()`
+
+The way to read `get_module_config` from a hot path. `get()` answers from memory within `ttl_s`
+of the last successful read, else asks the core; when the core cannot be reached it keeps the
+last good answer (or `{}` if there never was one), logs one WARNING per outage, and retries on
+the next call. Returns a copy, so a caller cannot mutate the cache. Treat `{}` as "use my env
+defaults". The websearch module is the reference user (`epicurus_websearch.config`).
 
 ### `PlatformMessage` and `PlatformChatResponse`
 

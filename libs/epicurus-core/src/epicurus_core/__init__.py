@@ -30,6 +30,8 @@ from epicurus_core.contracts import (
     PlatformMessage,
     Role,
     ToolEnvelope,
+    WebSearchHit,
+    WebSearchResult,
     capped_listing,
     draft_review,
     tool_envelope,
@@ -85,7 +87,7 @@ from epicurus_core.module_events import (
     event_subject,
 )
 from epicurus_core.observability import HealthResponse, add_ops_routes, create_ops_router
-from epicurus_core.platform_client import PlatformClient
+from epicurus_core.platform_client import ModuleConfigCache, PlatformClient, PlatformError
 from epicurus_core.portability import (
     BLOB_CHUNK_BYTES,
     NDJSON_MEDIA_TYPE,
@@ -190,6 +192,7 @@ __all__ = [
     "MessageAttachment",
     "ModelRole",
     "ModelSlot",
+    "ModuleConfigCache",
     "ModuleManifest",
     "OutboundMessage",
     "PageArchetype",
@@ -197,6 +200,7 @@ __all__ = [
     "Payload",
     "PlatformChatResponse",
     "PlatformClient",
+    "PlatformError",
     "PlatformMessage",
     "PortabilityRecord",
     "PortabilityStore",
@@ -218,6 +222,8 @@ __all__ = [
     "ToolSpec",
     "UiAction",
     "UiSection",
+    "WebSearchHit",
+    "WebSearchResult",
     "WritesDocument",
     "__version__",
     "add_manifest_route",

@@ -295,7 +295,7 @@ async def test_recording_a_key_again_refreshes_rather_than_duplicates(
     await fresh.record(tenant=TENANT, keys=[key])
     assert await fresh.peek(tenant=TENANT, key=key) is True
     async with engine.connect() as conn:
-        rows = (
+        rows: int = (
             await conn.execute(
                 text("SELECT count(*) FROM calendar_self_writes WHERE marker_key = :k"),
                 {"k": key},
@@ -317,7 +317,7 @@ async def test_expiry_is_a_bigint_nanosecond_epoch(engine: AsyncEngine) -> None:
     await ledger.init()
     await ledger.record(tenant=TENANT, keys=["calendar.event_created|google:e1"])
     async with engine.connect() as conn:
-        stored = (
+        stored: int = (
             await conn.execute(text("SELECT expires_at_ns FROM calendar_self_writes"))
         ).scalar_one()
     assert stored > 2**31

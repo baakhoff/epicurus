@@ -1,9 +1,25 @@
 # websearch
 
-Self-hosted web search **and link reading** for the agent.  The websearch module runs a
+Web search **and link reading** for the agent.  The websearch module runs a
 [SearXNG](https://docs.searxng.org/) instance inside the stack and exposes two MCP tools —
-`web_search` to *find* pages and `link_ingest` to *read* one.  No external API keys are
-required.
+`web_search` to *find* pages and `link_ingest` to *read* one.  SearXNG needs no external API
+key and is the default. Once an OpenRouter key is stored on the Models page, the operator can
+switch `web_search` to **OpenRouter's hosted web search** instead (v0.5.0, #984); the core runs
+those searches with the tenant's key, which never reaches this module.
+
+**v0.5.0** (#984, ADR-XXXX): a **search provider** choice on the Modules page — `searxng`
+(default, unchanged behaviour) or `openrouter`. With `openrouter`, `web_search` asks the core
+(`PlatformClient.web_search` → `POST /platform/v1/web-search`), which runs one search through
+OpenRouter's `openrouter:web_search` server tool with the tenant's stored OpenRouter key and
+returns normalised `{title, url, snippet, engine}` results; they get the same chips,
+hover-cards (engine **OpenRouter**), dedupe and outcomes as SearXNG's. The option can only be
+chosen once an OpenRouter key is stored: the shell greys it out and the core refuses to save
+it (409 `provider_key_required`). If the key is removed afterwards, the tool says plainly that
+no search ran and how to fix it; it does **not** fall back to SearXNG. The same change fixes a
+long-standing gap: the Modules page's settings for this module (`websearch_max_results`,
+`websearch_engines`) were stored by the core and **never read by the module**. It now reads
+them through the core on each call (15-second cache), so a saved setting applies without a
+restart. See [Stored settings](#stored-settings-984).
 
 **v0.2.0** (#551, ADR-0019): `web_search` results now surface as entity-reference
 chips in the chat UI, at parity with local sources (#333). Hover shows the title,
@@ -67,7 +83,7 @@ The module adds two containers to the stack:
 
 | Tool | Description |
 | ---- | ----------- |
-| `web_search(query, num_results?)` | Search the web for `query`; returns up to `num_results` results (default: configured max, capped at 20) as a `ToolEnvelope`. The description steers the agent to search whenever a fact can't be grounded locally or may have changed since training (#703). |
+| `web_search(query, num_results?)` | Search the web for `query` with the operator's chosen provider (SearXNG, or OpenRouter through the core); returns up to `num_results` results (omitted = the configured max, capped at 20) as a `ToolEnvelope`. `num_results` is optional (`null` default) since v0.5.0 so the configured max is read at call time. The description steers the agent to search whenever a fact can't be grounded locally or may have changed since training (#703). |
 | `link_ingest(url)` | Read one http(s) link and return what is behind it — kind, title, site, author, date, extracted text, image descriptions, and honest notes — as a `ToolEnvelope`. Guarded: private/loopback/internal addresses refused, every redirect hop re-validated, size/time/redirect/content-type capped (#739). |
 
 #### `web_search` return shape
@@ -92,6 +108,17 @@ degraded search behind a clean "nothing found":
 A WARNING is logged (naming the unresponsive engines and their error types) whenever
 `unresponsive_engines` is non-empty, independent of whether the operator happens to ask about
 it — so the condition is visible in the container log on its own.
+
+**With the OpenRouter provider (#984)** the same contract holds, read from the core's
+`WebSearchResult`:
+
+| Outcome | Shape |
+| ------- | ----- |
+| Results found | The same listing and chips; each result's engine is `OpenRouter`, so the hover-card's **Engine** row reads "OpenRouter". Duplicate URLs collapse exactly as SearXNG's do. |
+| Genuinely empty (`results: []`, `searched: true` or unknown) | `tool_envelope("No web results found.", [])`. |
+| Degraded (`results: []`, `searched: false`) | A distinct envelope: OpenRouter answered but its search model did not run a search, so this is **not a confirmed empty result**. |
+| No OpenRouter key stored (core answers 409 `openrouter_key_missing`) | A plain envelope saying web search is set to OpenRouter, no key is stored, **no search ran**, and the operator should add a key on the Models page or switch back to SearXNG. Not an error and not an empty result; there is no fallback to SearXNG. |
+| OpenRouter or the core failing (any other `PlatformError`: `openrouter_key_rejected`, `provider_error`, `provider_unreachable`, `key_store_unavailable`) | Raised through the ADR-0136 tool-error seam; the model reads the core's sentence (e.g. "OpenRouter web search failed (402): Insufficient credits"), logged at WARNING (`PlatformError` is in `epicurus-core`'s anticipated set). |
 
 #### `link_ingest` return shape
 
@@ -177,7 +204,7 @@ what the page might have said.
 | `GET` | `/health` | Liveness probe (standard epicurus health response). |
 | `GET` | `/metrics` | Prometheus metrics. |
 | `GET` | `/manifest` | Module manifest (tools, UI, config schema). |
-| `GET` | `/status` | SearXNG reachability **and** last-search health (#936): `{"searxng_healthy": true, "searxng_url": "...", "search_evidence": "no search has run since this instance started", "degraded": false, "unresponsive_engines": null}`. Every value is a flat scalar — the core proxies the object verbatim and the Modules panel stringifies each field, so `unresponsive_engines` is the rendered `"google (timeout), bing (blocked)"` (or `null`), never a nested list. `searxng_healthy` is `/healthz` liveness — true as long as the SearXNG process is up, even if every engine it asks is blocked. `degraded`/`unresponsive_engines` report the **most recent `web_search` call's** engine health (`SearXNGClient.last_unresponsive_engines`), not a separate probe, and `search_evidence` says whether there has been a search to report on at all — see the note below. |
+| `GET` | `/status` | SearXNG reachability **and** last-search health (#936), plus the active provider (#984): `{"backend": "searxng", "openrouter_last_result": null, "searxng_healthy": true, "searxng_url": "...", "search_evidence": "no search has run since this instance started", "degraded": false, "unresponsive_engines": null}`. `backend` is the provider the next search will use (`searxng` / `openrouter`, from the stored setting); `openrouter_last_result` is `null` until an OpenRouter-backed search has run in this process, then `results` / `no results` / `no search ran` / `no OpenRouter key stored` / `failed: <reason>`. The `searxng_*`, `degraded` and `unresponsive_engines` fields always describe SearXNG, whichever provider is active. Every value is a flat scalar — the core proxies the object verbatim and the Modules panel stringifies each field, so `unresponsive_engines` is the rendered `"google (timeout), bing (blocked)"` (or `null`), never a nested list. `searxng_healthy` is `/healthz` liveness — true as long as the SearXNG process is up, even if every engine it asks is blocked. `degraded`/`unresponsive_engines` report the **most recent `web_search` call's** engine health (`SearXNGClient.last_unresponsive_engines`), not a separate probe, and `search_evidence` says whether there has been a search to report on at all — see the note below. |
 | `GET` | `/resolve/result/{ref_id}` | Hover-card resolver for a search result (ADR-0019) — see below. |
 | `GET` | `/resolve/source/{ref_id}` | Hover-card resolver for an ingested link (#739) — see below. |
 | `*` | `/mcp/*` | Streamable-HTTP MCP transport (agent connects here). |
@@ -250,7 +277,7 @@ The websearch module emits and consumes no NATS events.
 | Environment variable | Default | Description |
 | -------------------- | ------- | ----------- |
 | `SEARXNG_URL` | `http://searxng:8080` | Base URL of SearXNG on the internal network. |
-| `PLATFORM_URL` | `http://core-app:8080` | Core platform API. Used by `link_ingest` for image descriptions — the module holds no model keys (constraint #8). Wired but unused before v0.3.0. |
+| `PLATFORM_URL` | `http://core-app:8080` | Core platform API. Used by `link_ingest` for image descriptions, to read the stored settings, and for OpenRouter-backed searches (#984) — the module holds no keys (constraints #4, #8). Wired but unused before v0.3.0. |
 | `WEBSEARCH_MAX_RESULTS` | `5` | Default maximum results per search (operator override). |
 | `WEBSEARCH_ENGINES` | _(empty)_ | Comma-separated SearXNG engine names. Empty = SearXNG defaults. |
 | `LINK_INGEST_MAX_BYTES` | `5000000` | Hard ceiling on bytes read per fetch. A longer body is truncated and flagged, not failed; a truncated *image* is refused rather than described. |
@@ -266,6 +293,32 @@ The websearch module emits and consumes no NATS events.
 
 The `LINK_INGEST_*` caps all bound a fetch of an **operator-supplied URL made from inside
 the stack network**, so the defaults are deliberately conservative. Raise them knowingly.
+
+### Stored settings (#984)
+
+The module's settings form on the Modules page (`config_schema`) has three fields. They are
+stored by the core per tenant (`PUT /platform/v1/modules/websearch/config`, OpenBao
+`modules/websearch/config`) and, since v0.5.0, **read back by the module** on each
+`web_search` call through `epicurus_core.ModuleConfigCache` (a 15-second cache over
+`PlatformClient.get_module_config`; the last good answer is kept while the core is
+unreachable, and an empty answer means "env defaults"). A saved change applies within 15
+seconds, no restart.
+
+| Field | Values (default) | Effect |
+| ----- | ---------------- | ------ |
+| `websearch_backend` | `searxng` (default) · `openrouter` | Which provider `web_search` uses. The property carries `enumRequiresProviderKey: [null, "openrouter"]` (parallel to `enum`), so the `openrouter` option needs the OpenRouter key: the shell disables it until the tenant's OpenRouter key is stored, and the core refuses to save it without one (409 `provider_key_required`; 503 `key_store_unavailable` when OpenBao cannot be asked). Unknown values read as `searxng`. |
+| `websearch_max_results` | 1–20 (5) | Results per search when the agent does not pass `num_results`. Overrides `WEBSEARCH_MAX_RESULTS` when set to anything other than 5. |
+| `websearch_engines` | text (empty) | SearXNG engines. Overrides `WEBSEARCH_ENGINES` when non-empty. Ignored by OpenRouter. |
+
+**Precedence rule.** A stored value wins when it differs from the form's default; a stored
+value equal to the default, or none, falls back to the env value. The form submits every
+field, defaults included, so without this rule saving the form only to change the provider
+would wipe an env-configured engine list. The cost: the form cannot set a field *back* to its
+default over a non-default env value — change the env for that.
+
+The OpenRouter search itself is configured on the **core** (`OPENROUTER_WEB_SEARCH_MODEL`,
+`OPENROUTER_WEB_SEARCH_ENGINE`; see [config reference](../reference/config.md)), because the
+core makes the call.
 
 ### SearXNG
 
@@ -293,7 +346,7 @@ rather than the full default set.
 
 ## Data model
 
-The websearch module holds no persistent state.  It is a stateless proxy
+The websearch module holds no persistent state.  It is a stateless proxy (its settings live in the core)
 between the agent and SearXNG.  SearXNG itself stores nothing — it fans out
 queries to upstream engines on each request.  `link_ingest` adds no state either: nothing
 it fetches is cached or written to disk (yt-dlp runs with `cachedir: False`), and both
@@ -305,7 +358,7 @@ hover-card kinds resolve from self-describing `ref_id`s rather than a store.
 | ------- | --- |
 | SearXNG | The search backend; must be healthy before the module starts. |
 | NATS | Event bus (connected at startup; no events are used in v0.1). |
-| core-app | Platform API. `link_ingest` asks the core's LLM gateway to describe images (constraint #8) — the module holds no model keys. Optional in practice: with the core unreachable, or with no vision-capable model configured, ingestion still returns text and metadata plus a note explaining the missing description. |
+| core-app | Platform API. `link_ingest` asks the core's LLM gateway to describe images (constraint #8) — the module holds no model keys. Since v0.5.0 the module also reads its stored settings from the core and, with the OpenRouter provider chosen, sends every search to `POST /platform/v1/web-search`, where the core uses the tenant's OpenRouter key. With the core unreachable the module keeps the last settings it read (`ModuleConfigCache`), or its env settings (SearXNG) if it has never read any; an OpenRouter search itself needs the core, so it fails loudly through the tool-error seam rather than switching to SearXNG. |
 | trafilatura | Article extraction + page metadata (Apache-2.0, pure Python over `lxml`). |
 | yt-dlp | Public-platform video metadata and uploader subtitles. **Lazily imported** and failure-tolerant: strip it and tier 3 degrades to oEmbed + OpenGraph. Metadata only — nothing is ever downloaded, so no ffmpeg and no OS packages. |
 

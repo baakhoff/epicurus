@@ -41,6 +41,7 @@ from epicurus_core.manifest import (
     UiSection,
     WritesDocument,
 )
+from epicurus_core.platform_client import PlatformError
 
 __all__ = ["EpicurusModule", "ToolError", "add_manifest_route"]
 
@@ -67,6 +68,9 @@ logger = get_logger(__name__)
 # httpx exception families (status-code failures and connection/timeout failures) without
 # reaching for the broader ``httpx.HTTPError``/``RequestError`` bases, which would also
 # swallow things like ``TooManyRedirects`` or a decoding error — genuine bugs worth an ERROR.
+#
+# ``PlatformError`` (#984) is the core's own explained refusal — a structured ``code`` +
+# ``message``, e.g. a hosted search provider failing — expected traffic of the same kind.
 _ANTICIPATED_TOOL_EXCEPTIONS: tuple[type[BaseException], ...] = (
     KeyError,
     LookupError,
@@ -75,6 +79,7 @@ _ANTICIPATED_TOOL_EXCEPTIONS: tuple[type[BaseException], ...] = (
     FileNotFoundError,
     httpx.HTTPStatusError,
     httpx.TransportError,
+    PlatformError,
 )
 
 

@@ -261,17 +261,36 @@ function ModuleConfig({ snapshot }: { snapshot: ModuleSnapshot }) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["module-config", name] }),
   });
   const schema = snapshot.manifest.ui?.config_schema as ObjectSchema | undefined;
+  // A field that gates an option on a hosted provider's key (#984) needs to know which keys
+  // are stored; only then is the provider list fetched, so every other module's form costs
+  // nothing extra. A key that is `present` (or a provider that needs none) unlocks its options.
+  const gated = Object.values(schema?.properties ?? {}).some((p) =>
+    Array.isArray((p as { enumRequiresProviderKey?: unknown }).enumRequiresProviderKey),
+  );
+  const providers = useQuery({
+    queryKey: ["providers"],
+    queryFn: () => api.providers(),
+    enabled: gated,
+  });
+  const storedProviderKeys = gated
+    ? new Set(
+        (providers.data ?? [])
+          .filter((p) => p.key_state === "present" || p.key_state === "not_required")
+          .map((p) => p.alias),
+      )
+    : undefined;
   if (!schema || Object.keys(schema.properties ?? {}).length === 0) return null;
 
   return (
     <div>
       <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-ink-faint">Settings</h4>
-      {config.isLoading ? (
+      {config.isLoading || (gated && providers.isLoading) ? (
         <Spinner />
       ) : (
         <SchemaForm
           schema={schema}
           initial={config.data ?? {}}
+          storedProviderKeys={storedProviderKeys}
           submitLabel={save.isSuccess ? "Saved" : "Save settings"}
           busy={save.isPending}
           onSubmit={(values) => save.mutate(values)}

@@ -59,13 +59,18 @@ class SearXNGClient:
         # searched yet", and ``/status`` must not report the second as the first.
         self._has_searched = False
 
-    async def search(self, query: str, num_results: int = 5) -> SearchOutcome:
+    async def search(
+        self, query: str, num_results: int = 5, *, engines: str | None = None
+    ) -> SearchOutcome:
         """Return up to *num_results* web results for *query*, plus engine health.
 
         Queries SearXNG's JSON endpoint and normalises the response. Empty ``results``
         (e.g. when SearXNG has no engines configured, or a query genuinely has no hits)
         come back as ``SearchOutcome(results=[], unresponsive_engines=[])`` — callers
         distinguish that from a degraded search via ``unresponsive_engines``.
+
+        ``engines`` overrides the constructor's engine list for this one call (the operator's
+        stored setting, #984); ``None`` keeps the constructor's.
 
         Raises ``httpx.HTTPError`` on network or HTTP-level failures so callers can
         handle them gracefully (as of #936, that means letting it propagate to the
@@ -75,8 +80,9 @@ class SearXNGClient:
             "q": query,
             "format": "json",
         }
-        if self._engines:
-            params["engines"] = self._engines
+        chosen = self._engines if engines is None else engines
+        if chosen:
+            params["engines"] = chosen
 
         resp = await self._client.get(f"{self._base_url}/search", params=params)
         resp.raise_for_status()

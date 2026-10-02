@@ -14,6 +14,7 @@ from pydantic import ValidationError
 import epicurus_core.module as module_mod
 from epicurus_core.manifest import CONTRACT_VERSION, ModelSlot, WritesDocument
 from epicurus_core.module import EpicurusModule, ToolError, add_manifest_route
+from epicurus_core.platform_client import PlatformError
 
 
 def _text_of(item: ContentBlock) -> str:
@@ -159,6 +160,22 @@ async def test_httpx_transport_error_is_anticipated(monkeypatch: pytest.MonkeyPa
     error = httpx.ConnectError("connection refused")
 
     with pytest.raises(ToolError, match="connection refused"):
+        await _raise(error).call_tool("call", {})
+
+    assert recorder.warnings == ["tool raised an anticipated exception"]
+    assert recorder.errors == []
+
+
+async def test_a_platform_refusal_is_anticipated_and_carries_the_cores_sentence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #984: the core's explained refusal (a hosted search provider failing) reaches the model
+    # as the core's own message, logged at WARNING like any other provider failure.
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(module_mod, "logger", recorder)
+    error = PlatformError(502, "provider_error", "OpenRouter web search failed (402): credits")
+
+    with pytest.raises(ToolError, match=r"OpenRouter web search failed \(402\): credits"):
         await _raise(error).call_tool("call", {})
 
     assert recorder.warnings == ["tool raised an anticipated exception"]

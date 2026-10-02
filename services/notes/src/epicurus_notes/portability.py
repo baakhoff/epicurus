@@ -65,7 +65,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncScalarResult,
+    AsyncSession,
+    async_sessionmaker,
+)
 from sqlalchemy.orm.attributes import flag_modified
 
 from epicurus_core import ImportOutcome, ImportReport, PortabilityRecord, get_logger
@@ -250,7 +255,7 @@ class NotesPortability:
                     .where(table.model.tenant == tenant_id)
                     .order_by(*(getattr(table.model, column) for column in table.order_by))
                 )
-                rows = await session.stream_scalars(statement)
+                rows: AsyncScalarResult[Any] = await session.stream_scalars(statement)
                 async for row in rows:
                     yield PortabilityRecord(
                         kind=table.kind,

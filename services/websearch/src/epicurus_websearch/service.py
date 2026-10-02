@@ -2,10 +2,12 @@
 
 Registers two tools the agent can call:
 
-* ``web_search`` — query SearXNG and return ranked web results (title, url,
-  snippet, engine) so the agent can answer current-events questions, ground
-  anything it cannot source locally (#703), and cite sources. Each result
-  also becomes a chat entity-reference chip (#551,
+* ``web_search`` — search the web and return ranked results (title, url,
+  snippet, engine) through the operator's chosen provider: the bundled SearXNG
+  (default), or OpenRouter's hosted web search run by the core with the tenant's
+  stored OpenRouter key (#984 — the module never holds the key), so the agent can
+  answer current-events questions, ground anything it cannot source locally (#703),
+  and cite sources. Each result also becomes a chat entity-reference chip (#551,
   ADR-0019) the operator can hover for a preview and click to open in a new
   tab — resolved statelessly via ``epicurus_websearch.refs``.
 * ``link_ingest`` — read one link and return what is actually behind it (#739):
@@ -22,10 +24,18 @@ from __future__ import annotations
 from epicurus_core import (
     EntityRef,
     EpicurusModule,
+    PlatformClient,
+    PlatformError,
     UiSection,
     capped_listing,
     get_logger,
     tool_envelope,
+)
+from epicurus_websearch.config import (
+    OPENROUTER,
+    ConfigSource,
+    EffectiveConfig,
+    static_source,
 )
 from epicurus_websearch.ingest import LinkIngestor, render
 from epicurus_websearch.refs import RESULT_KIND, SOURCE_KIND, canonical_url, encode_ref
@@ -68,35 +78,110 @@ def _dedupe_by_url(results: list[SearchResult]) -> list[SearchResult]:
     return out
 
 
+KEY_MISSING = "openrouter_key_missing"
+"""The core's ``detail.code`` for "OpenRouter is chosen but no key is stored" (#984)."""
+
+NO_KEY_MESSAGE = (
+    "Web search is set to use OpenRouter, but no OpenRouter API key is stored, so no search"
+    " ran. This is not an empty result — do not tell the operator nothing was found. Tell them"
+    " web search is unavailable until they either add an OpenRouter key on the Models page or"
+    " switch web search back to SearXNG in the websearch module's settings on the Modules page."
+)
+
+DEGRADED_NO_SEARCH_MESSAGE = (
+    "Search is degraded, not confirmed empty: OpenRouter answered, but its search model did not"
+    " run a web search this time. Do not report this as a clean 'no results' — say plainly that"
+    " search did not run, and consider retrying once before falling back to anything else."
+)
+
+
+class BackendStatus:
+    """What the last OpenRouter-backed search came to, for ``GET /status`` (#984).
+
+    SearXNG keeps its own evidence on its client; this is the OpenRouter half, one flat string
+    so the panel renders it as-is: ``None`` until an OpenRouter search has run in this process,
+    then ``results`` / ``no results`` / ``no search ran`` / ``no OpenRouter key stored`` /
+    ``failed: <the core's reason>``.
+    """
+
+    def __init__(self) -> None:
+        self.openrouter_last_result: str | None = None
+
+
+def _render_results(results: list[SearchResult]) -> tuple[str, list[EntityRef]]:
+    """The listing and the chips for a non-empty result list — one shape for every backend."""
+    refs = [
+        EntityRef(
+            ref_id=encode_ref(
+                url=r["url"], title=r["title"], snippet=r["snippet"], engine=r["engine"]
+            ),
+            module=MODULE_NAME,
+            kind=RESULT_KIND,
+            title=r["title"],
+            summary=r["snippet"],
+        )
+        for r in results
+    ]
+    lines = [f"- {r['title']} — {r['url']} (via {r['engine']})\n  {r['snippet']}" for r in results]
+    return capped_listing(lines, noun="result"), refs
+
+
 def build_module(
     client: SearXNGClient,
     max_results: int = 5,
     *,
     ingestor: LinkIngestor | None = None,
+    config: ConfigSource | None = None,
+    platform: PlatformClient | None = None,
+    status: BackendStatus | None = None,
 ) -> EpicurusModule:
     """Build the websearch module and register its tools.
 
     ``ingestor`` backs ``link_ingest``; ``None`` still registers the tool but every call
     reports that link reading is not configured, so the manifest is the same shape whether
     or not the service wired one up.
+
+    ``config`` answers the effective settings for each call — the operator's stored choice
+    over env defaults (``epicurus_websearch.config``, #984); ``None`` means "SearXNG with
+    ``max_results`` and the client's engines", exactly the pre-#984 module. ``platform`` is
+    how an OpenRouter-backed search reaches the core, which holds the key (constraint #8).
     """
+    source = config or static_source(EffectiveConfig(max_results=max_results))
+    backend_status = status or BackendStatus()
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.4.0",
+        version="0.5.0",
         description=(
-            "Self-hosted web search via SearXNG, plus guarded reading of any link —"
-            " no API key required."
+            "Web search via the bundled, self-hosted SearXNG — or, once an OpenRouter key is"
+            " stored, OpenRouter's hosted web search — plus guarded reading of any link."
         ),
         resolver=True,
         ui=UiSection(
             icon="globe",
             summary=(
-                "Gives the agent free, private web search via a self-hosted"
-                " SearXNG instance. No external API keys required."
+                "Gives the agent web search. By default it uses the bundled, self-hosted"
+                " SearXNG: free, private, no API key. With an OpenRouter key stored on the"
+                " Models page you can switch it to OpenRouter's hosted web search instead."
             ),
             config_schema={
                 "type": "object",
                 "properties": {
+                    "websearch_backend": {
+                        "type": "string",
+                        "title": "Search provider",
+                        "description": (
+                            "Where web searches run. SearXNG is the bundled, self-hosted"
+                            " search. OpenRouter runs each search through OpenRouter's web"
+                            " search with your stored OpenRouter key (billed to that account)."
+                        ),
+                        "enum": ["searxng", OPENROUTER],
+                        "enumLabels": ["SearXNG (self-hosted)", "OpenRouter web search"],
+                        # Parallel to `enum`: the provider whose stored key an option needs
+                        # (#984). The shell greys the option out without it; the core refuses
+                        # to save it without it.
+                        "enumRequiresProviderKey": [None, OPENROUTER],
+                        "default": "searxng",
+                    },
                     "websearch_max_results": {
                         "type": "integer",
                         "title": "Max results",
@@ -110,7 +195,7 @@ def build_module(
                         "title": "Engines",
                         "description": (
                             "Comma-separated SearXNG engine names to use"
-                            " (empty = SearXNG defaults)."
+                            " (empty = SearXNG defaults). Applies to SearXNG only."
                         ),
                         "default": "",
                     },
@@ -120,8 +205,43 @@ def build_module(
         ),
     )
 
+    async def _search_openrouter(query: str, limit: int) -> str:
+        """One search through the core's OpenRouter path — the same three outcomes as SearXNG."""
+        if platform is None:
+            backend_status.openrouter_last_result = "failed: the core is not configured"
+            return tool_envelope(
+                "Web search is set to use OpenRouter, but this module has no route to the core"
+                " to run it. No search ran — say so plainly rather than reporting no results.",
+                [],
+            )
+        try:
+            answer = await platform.web_search(query, max_results=limit)
+        except PlatformError as exc:
+            if exc.code == KEY_MISSING:
+                backend_status.openrouter_last_result = "no OpenRouter key stored"
+                logger.warning("openrouter web search selected but no key is stored")
+                return tool_envelope(NO_KEY_MESSAGE, [])
+            backend_status.openrouter_last_result = f"failed: {exc.message}"
+            # Through the tool-error seam (ADR-0136): the core's own sentence reaches the model.
+            raise
+        results = _dedupe_by_url(
+            [
+                SearchResult(title=h.title, url=h.url, snippet=h.snippet, engine=h.engine)
+                for h in answer.results
+            ]
+        )
+        if not results:
+            if answer.searched is False:
+                backend_status.openrouter_last_result = "no search ran"
+                return tool_envelope(DEGRADED_NO_SEARCH_MESSAGE, [])
+            backend_status.openrouter_last_result = "no results"
+            return tool_envelope("No web results found.", [])
+        backend_status.openrouter_last_result = "results"
+        text, refs = _render_results(results)
+        return tool_envelope(text, refs)
+
     @module.tool()
-    async def web_search(query: str, num_results: int = max_results) -> str:
+    async def web_search(query: str, num_results: int | None = None) -> str:
         """Search the web for *query* and return ranked results.
 
         Reach for this whenever the answer is not in the operator's own data
@@ -130,25 +250,33 @@ def build_module(
         Prefer searching over answering from memory — never guess when you
         can look something up.
 
-        Queries the self-hosted SearXNG instance and returns up to *num_results*
-        results, each with title, URL, and snippet, so the agent can cite its
-        sources.  Each result also becomes a "Sources" chip in the chat UI —
-        hover for a preview, click to open the page in a new tab.
+        Searches with the provider the operator chose — the self-hosted SearXNG instance, or
+        OpenRouter's hosted web search — and returns up to *num_results* results, each with
+        title, URL, and snippet, so the agent can cite its sources.  Each result also becomes
+        a "Sources" chip in the chat UI — hover for a preview, click to open the page in a new
+        tab.
 
         Args:
             query: Natural-language question or search phrase.
-            num_results: Maximum number of results to return (default configured
-                by operator; capped at 20).
+            num_results: Maximum number of results to return (omit for the operator's
+                configured default; capped at 20).
 
-        Returns an entity-ref-carrying envelope ranked by SearXNG's relevance. Three
-        distinguishable outcomes reach you: results; a genuine "no results found" when the
-        query truly had no matches; and a degraded-search note when SearXNG answered but
-        one or more of its engines did not — treat that one as "search may be unreliable
-        right now", not as a confirmed empty result. If SearXNG itself is unreachable or
-        erroring, this tool raises rather than reporting a silent empty search.
+        Returns an entity-ref-carrying envelope of ranked results. Three distinguishable
+        outcomes reach you: results; a genuine "no results found" when the query truly had
+        no matches; and a degraded-search note when the search provider answered but could
+        not search fully (some engines did not respond, or no search ran) — treat that one as
+        "search may be unreliable right now", not as a confirmed empty result. If the chosen
+        provider is not set up (OpenRouter chosen with no key stored) the reply says so and
+        no search ran. If the provider itself is unreachable or erroring, this tool raises
+        rather than reporting a silent empty search.
         """
-        capped = min(num_results, 20)
-        outcome = await client.search(query, capped)
+        effective = await source()
+        capped = min(num_results if num_results is not None else effective.max_results, 20)
+        capped = max(capped, 1)
+        if effective.backend == OPENROUTER:
+            return await _search_openrouter(query, capped)
+
+        outcome = await client.search(query, capped, engines=effective.engines)
 
         if outcome.unresponsive_engines:
             logger.warning(
@@ -171,22 +299,7 @@ def build_module(
                 )
             return tool_envelope("No web results found.", [])
 
-        refs = [
-            EntityRef(
-                ref_id=encode_ref(
-                    url=r["url"], title=r["title"], snippet=r["snippet"], engine=r["engine"]
-                ),
-                module=MODULE_NAME,
-                kind=RESULT_KIND,
-                title=r["title"],
-                summary=r["snippet"],
-            )
-            for r in deduped
-        ]
-        lines = [
-            f"- {r['title']} — {r['url']} (via {r['engine']})\n  {r['snippet']}" for r in deduped
-        ]
-        text = capped_listing(lines, noun="result")
+        text, refs = _render_results(deduped)
         if outcome.unresponsive_engines:
             text += (
                 f"\n\n(Note: {len(outcome.unresponsive_engines)} search engine(s) did not"

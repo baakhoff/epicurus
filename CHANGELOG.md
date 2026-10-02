@@ -12,6 +12,34 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **Web search through OpenRouter, once an OpenRouter key is stored** (#984) — web search ran
+  only through the bundled SearXNG, whose engines are blocked or rate-limited on many home-lab
+  IPs (#920, #936). The websearch module's settings on the Modules page now have a **Search
+  provider** choice: SearXNG (the default, unchanged) or **OpenRouter web search**. The
+  OpenRouter option is greyed out, with a hint to add the key on the Models page, until the
+  tenant's OpenRouter key is stored; the core refuses the same save without one (409
+  `provider_key_required`), and the form shows the core's sentence rather than
+  "[object Object]". With OpenRouter chosen, `web_search` asks the core — new `POST
+  /platform/v1/web-search`, `PlatformClient.web_search` — which runs one search through
+  OpenRouter's `openrouter:web_search` server tool (the documented replacement for the
+  deprecated `web` plugin and `:online` suffix) with the tenant's key, turns the `url_citation`
+  annotations into `{title, url, snippet, engine}` results, and meters it under the caller's
+  tenant (`llm.usage` gains `web_search_requests`). The key never reaches the module. Results
+  get the same chips, hover-cards (engine "OpenRouter"), dedupe and three outcomes as SearXNG's;
+  a missing key is a plain "no search ran, add a key or switch back" message, never an empty
+  result, and there is no silent fallback to SearXNG; an OpenRouter failure (bad key, no
+  credits, unreachable) reaches the model through the tool-error seam with OpenRouter's own
+  reason. Two new core settings, on Compose and the chart alike: `OPENROUTER_WEB_SEARCH_MODEL`
+  (`openai/gpt-4.1-nano`) and `OPENROUTER_WEB_SEARCH_ENGINE` (`exa`), chart
+  `core.openrouterWebSearch.{model,engine}`. `/status` gains `backend` and
+  `openrouter_last_result`. This also fixes a general defect: a module's Modules-page settings
+  were stored by the core and **never delivered** to the module. `epicurus-core` gains
+  `PlatformClient.get_module_config` and `ModuleConfigCache` (15-second cache, last-good on
+  failure), and websearch now honours its stored max-results and engines at runtime; the other
+  modules with a settings form (echo, knowledge, storage) are a follow-up. `web_search`'s
+  `num_results` is now optional (`null` = the configured max). `core-app` 0.130.0→0.131.0
+  (MINOR) · `epicurus-core` 0.41.0→0.42.0 (MINOR) · `websearch` 0.4.0→0.5.0 (MINOR) · `web`
+  0.152.0→0.153.0 (MINOR) · chart 0.3.0→0.4.0 (MINOR).
 - **Sign-in on Compose and Kubernetes, and how to set it up** (#969) — the core's new OpenID
   Connect sign-in only helps if every way of running epicurus can turn it on, and if an operator
   can find out how. On **Compose** the core-app fragment now passes `AUTH_MODE`,

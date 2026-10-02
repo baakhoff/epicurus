@@ -16,17 +16,24 @@ from epicurus_core import (
     HoverCard,
     HoverCardDetail,
     HoverCardLink,
+    ModuleConfigCache,
     PlatformClient,
     add_manifest_route,
     add_ops_routes,
     configure_logging,
     get_logger,
 )
+from epicurus_websearch.config import EffectiveConfig, resolve
 from epicurus_websearch.ingest import LinkIngestor
 from epicurus_websearch.refs import decode_ref, decode_source_ref
 from epicurus_websearch.safety import FetchLimits, GuardedFetcher, UrlGuard
 from epicurus_websearch.searxng import SearXNGClient
-from epicurus_websearch.service import MODULE_NAME, build_module, describe_unresponsive
+from epicurus_websearch.service import (
+    MODULE_NAME,
+    BackendStatus,
+    build_module,
+    describe_unresponsive,
+)
 from epicurus_websearch.settings import WebSearchSettings
 from epicurus_websearch.vision import VisionCaptioner
 
@@ -49,6 +56,26 @@ def create_app() -> FastAPI:
         engines=settings.websearch_engines,
     )
     bus = EventBus.from_settings(settings)
+    # One platform client for everything this module asks of the core: image captions for
+    # link_ingest, the operator's stored settings, and OpenRouter-backed searches (#984) — the
+    # core holds every key; the module holds none (constraints #4 and #8).
+    platform = PlatformClient(
+        base_url=settings.platform_url,
+        tenant_id=settings.default_tenant_id,
+        module=MODULE_NAME,
+    )
+    # The Modules page's saved settings, re-read at most every 15 s (#984). Before #984 they
+    # were stored by the core and never delivered to this module at all.
+    stored_config = ModuleConfigCache(platform, ttl_s=15.0)
+
+    async def effective_config() -> EffectiveConfig:
+        return resolve(
+            await stored_config.get(),
+            env_max_results=settings.websearch_max_results,
+            env_engines=settings.websearch_engines,
+        )
+
+    backend_status = BackendStatus()
     # link_ingest (#739): a guarded fetcher for operator-supplied URLs, and a captioner that
     # asks the *core* to describe images — the module holds no model keys (constraint #8).
     fetcher = GuardedFetcher(
@@ -62,18 +89,18 @@ def create_app() -> FastAPI:
     )
     ingestor = LinkIngestor(
         fetcher=fetcher,
-        captioner=VisionCaptioner(
-            PlatformClient(
-                base_url=settings.platform_url,
-                tenant_id=settings.default_tenant_id,
-                module=MODULE_NAME,
-            ),
-            model=settings.link_ingest_vision_model,
-        ),
+        captioner=VisionCaptioner(platform, model=settings.link_ingest_vision_model),
         max_text_chars=settings.link_ingest_max_text_chars,
         use_media_probe=settings.link_ingest_ytdlp,
     )
-    module = build_module(client, max_results=settings.websearch_max_results, ingestor=ingestor)
+    module = build_module(
+        client,
+        max_results=settings.websearch_max_results,
+        ingestor=ingestor,
+        config=effective_config,
+        platform=platform,
+        status=backend_status,
+    )
     mcp_app = module.http_app()
 
     @asynccontextmanager
@@ -120,10 +147,17 @@ def create_app() -> FastAPI:
         """
         healthy = await client.health_check()
         unresponsive = client.last_unresponsive_engines
+        effective = await effective_config()
         # Flat scalars only: the core proxies this object verbatim and the Modules panel
         # renders each value with `String(v)`, so a nested list of objects would read as
         # "[object Object]" (`docs/reference/modules.md` — a status field is a flat value).
+        # ``backend`` (#984) is the provider the *next* search will use, from the operator's
+        # stored choice; the ``searxng_*`` / ``degraded`` / ``unresponsive_engines`` fields keep
+        # describing SearXNG either way, and ``openrouter_last_result`` says what the last
+        # OpenRouter-backed search came to (null until one has run in this process).
         return {
+            "backend": effective.backend,
+            "openrouter_last_result": backend_status.openrouter_last_result,
             "searxng_healthy": healthy,
             "searxng_url": settings.searxng_url,
             "search_evidence": (

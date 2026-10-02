@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -225,8 +225,14 @@ class ModuleRegistry:
         docker_unavailable_reason: str | None = None,
         core: CorePseudoModule | None = None,
         events: CoreEventEmitter | None = None,
+        provider_key_state: Callable[[str, str], Awaitable[str]] | None = None,
     ) -> None:
         self._bases = list(base_urls)
+        # Answers "is this provider's key stored for this tenant?" (#984), called with
+        # ``(alias, tenant)`` — the gate on a config option a module marks as needing a
+        # provider key. None (tests, a core without an LLM gateway) skips the gate: nothing in
+        # a module's own schema can be checked without it.
+        self._provider_key_state = provider_key_state
         self._mcp = mcp
         self._secrets = secrets
         self._tenant = tenant
@@ -899,9 +905,76 @@ class ModuleRegistry:
             return {}
 
     async def set_config(self, name: str, values: dict[str, Any]) -> None:
-        """Persist the module's config values (tenant-scoped, encrypted at rest)."""
-        await self._resolve(name)  # only known modules
+        """Persist the module's config values (tenant-scoped, encrypted at rest).
+
+        Refuses (**409** ``provider_key_required``) a value the module's ``config_schema``
+        marks as needing a provider key the tenant has not stored — see
+        :meth:`_check_provider_keys` (#984). The shell greys the same option out from the same
+        annotation; this is the server half, so the rule holds for any client.
+        """
+        _, manifest = await self._resolve(name)  # only known modules
+        schema = manifest.ui.config_schema if manifest.ui is not None else None
+        await self._check_provider_keys(schema, values)
         await self._secrets.set(f"modules/{name}/config", values, self._tenant)
+
+    async def _check_provider_keys(
+        self, schema: dict[str, Any] | None, values: dict[str, Any]
+    ) -> None:
+        """Refuse a chosen enum option whose ``enumRequiresProviderKey`` key is not stored.
+
+        A module marks an option as usable only with a hosted provider's key by giving the
+        property an ``enumRequiresProviderKey`` list parallel to its ``enum`` (the same
+        convention as ``enumLabels``): a provider alias, or ``null`` for "needs nothing". The
+        websearch module's ``openrouter`` backend is the first user. Pure data — the core
+        knows nothing about websearch, only about the annotation.
+        """
+        if self._provider_key_state is None or not isinstance(schema, dict):
+            return
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            return
+        for key, prop in properties.items():
+            if not isinstance(prop, dict) or key not in values:
+                continue
+            options = prop.get("enum")
+            requires = prop.get("enumRequiresProviderKey")
+            if not isinstance(options, list) or not isinstance(requires, list):
+                continue
+            for option, alias in zip(options, requires, strict=False):
+                if option != values[key] or not isinstance(alias, str) or not alias:
+                    continue
+                try:
+                    state = await self._provider_key_state(alias, self._tenant)
+                except LookupError:
+                    # A provider the gateway does not know (``UnknownProviderError``) can never
+                    # have a stored key: refuse with the 409 below, not a 500 from the save.
+                    state = "missing"
+                if state in ("present", "not_required"):
+                    continue
+                title = str(prop.get("title") or key)
+                if state == "unavailable":
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": "key_store_unavailable",
+                            "provider": alias,
+                            "message": (
+                                f"Could not check for a stored {alias!r} key right now (the"
+                                f" secret store did not answer), so {title!r} was not saved."
+                            ),
+                        },
+                    )
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "provider_key_required",
+                        "provider": alias,
+                        "message": (
+                            f"{title!r} can only be set to {option!r} once an API key for the"
+                            f" {alias!r} provider is stored. Add one on the Models page first."
+                        ),
+                    },
+                )
 
     async def _get_json(
         self,

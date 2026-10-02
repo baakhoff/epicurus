@@ -19,6 +19,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.engine import ScalarResult
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -418,7 +419,7 @@ class ConversationStore:
         insertion-ordered.
         """
         async with self._session() as session:
-            rows = await session.scalars(
+            rows: ScalarResult[list[dict[str, Any]] | None] = await session.scalars(
                 select(StoredMessage.attachments).where(
                     StoredMessage.tenant == tenant,
                     StoredMessage.session_id == session_id,

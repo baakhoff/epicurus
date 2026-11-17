@@ -17,9 +17,28 @@ client = PlatformClient(
 )
 ```
 
-The client is stateless and cheap; make one per module, scoped to its tenant. Every
-request carries that tenant, so usage is metered and resources are scoped correctly. Pass
-`module=<name>` as well if the module uses per-module model slots (see `get_module_model`).
+The client is stateless and cheap; make one per module. Every request carries a tenant
+(`tenant_id`, as a query parameter or in the JSON body), so usage is metered and resources are
+scoped correctly. Pass `module=<name>` as well if the module uses per-module model slots (see
+`get_module_model`).
+
+## Which tenant a call acts for (#917)
+
+The `tenant_id` given to the constructor is the **fallback**, not a fixed identity. Each call
+resolves its tenant at the moment it is made, in this order:
+
+1. **A pin.** `client.for_tenant("acme")` returns a copy pinned to that tenant (validated —
+   a malformed id raises `TenantError`); the original client is unchanged. For code that holds
+   the tenant explicitly, e.g. a fan-out over several tenants.
+2. **The bound context.** Inside a tool call, `EpicurusModule` has bound the tenant the core
+   named for the call (the `x-epicurus-tenant` header — see
+   [modules](modules.md#the-tenant-on-a-tool-call-917)), so a module acting for tenant X reaches
+   tenant X's data in the core with no code of its own.
+3. **The constructor's `tenant_id`.** What a call outside any tool call — an indexer, a sync
+   loop, a startup task — acts for: the deployment default, as before #917.
+
+`client.tenant_id` reads the resolved tenant. One client serves concurrent tool calls for
+different tenants correctly, because each tool call runs in its own context.
 
 ## Methods
 
@@ -199,6 +218,11 @@ of the last successful read, else asks the core; when the core cannot be reached
 last good answer (or `{}` if there never was one), logs one WARNING per outage, and retries on
 the next call. Returns a copy, so a caller cannot mutate the cache. Treat `{}` as "use my env
 defaults". The websearch module is the reference user (`epicurus_websearch.config`).
+
+The cache is **kept per tenant** (#917): `get()` answers from the entry of the tenant the client
+resolves for the call (`client.tenant_id`), and a tenant that has never had an answer gets `{}`
+during an outage — never another tenant's last-known settings. `invalidate()` forgets every
+tenant's entry.
 
 ## Errors
 

@@ -36,7 +36,7 @@ EpicurusModule(
 | `name` *(property)* | The module name. |
 | `mcp` *(property)* | The underlying `MCPServer` (advanced use). The one legitimate direct use is `mcp.session_manager.run()` in the service lifespan (requires `http_app()` to have been called first). |
 | `tool(name=None, description=None)` | Decorator registering a tool; the function signature becomes the tool's typed input schema. |
-| `async call_tool(name, arguments) -> tuple[list[ContentBlock], Any]` | Invoke a registered tool in-process and return `(content blocks, structured_content)` — the stable invocation surface for module tests. Raises `ToolError` when the tool is unknown or its function raised (over the wire the same failure travels as an `isError` result instead). |
+| `async call_tool(name, arguments, *, tenant=None) -> tuple[list[ContentBlock], Any]` | Invoke a registered tool in-process and return `(content blocks, structured_content)` — the stable invocation surface for module tests. `tenant` binds a tenant around the call exactly as the `x-epicurus-tenant` header does over the wire (#917); omitted, the call runs in the caller's context unchanged. Raises `ToolError` when the tool is unknown or its function raised (over the wire the same failure travels as an `isError` result instead), and `TenantError` for a malformed `tenant`. |
 | `emits(subject, description="") -> None` | Declare a published event subject. |
 | `consumes(subject, description="") -> None` | Declare a subscribed subject. |
 | `async manifest(*, config=None, secrets=None) -> ModuleManifest` | Build the manifest from registered tools + declared events (args override the constructor's `config`/`secrets`). |
@@ -75,6 +75,39 @@ status-code family and `TransportError` the connection/timeout family; `TooManyR
 a decoding error stay outside both and still log at ERROR as genuine bugs. A tool is always
 free to catch a specific `httpx` exception itself and translate it into a more model-actionable
 message before it reaches this wrapper.
+
+### The tenant on a tool call (#917)
+
+**The core names the tenant on every module tool call, and the module binds it.** `McpHost.call`
+sends the tenant the agent turn (or the UI action) belongs to in the **`x-epicurus-tenant`**
+HTTP header of every MCP request (`epicurus_core.TENANT_HEADER`). The server `EpicurusModule`
+builds binds it with `set_current_tenant` around the tool and resets it when the tool returns
+or raises — once, in the foundation, so no module parses a header or writes a binding of its
+own.
+
+| The header | What the tool sees |
+| --- | --- |
+| a valid tenant id | `current_tenant()` / `bound_tenant()` return it for the whole tool, including across `await`s and in a sync tool; a `PlatformClient` call made inside the tool names it ([platform-client](platform-client.md#which-tenant-a-call-acts-for-917)); an event published without an explicit tenant is scoped to it |
+| absent, or empty | nothing bound — the module's own fallback (its `DEFAULT_TENANT_ID`) applies, exactly as before #917. This is what a core older than #917 sends. |
+| malformed (not a [tenant id](tenancy.md#tenant-id-format)) | **refused** before the tool runs: an `isError` result `refused: invalid tenant id …`, which the core raises as `ToolCallError`. Never defaulted — a malformed name must not become a silent read of the default tenant's data (the #836 / ADR-0137 rule). |
+
+The binding is read from the **HTTP request that carried this very call** (the SDK hands each
+message's own request to the handler), not from a ContextVar a middleware set — so it is
+correct on a stateful streamable-HTTP session (the legacy handshake, with an `mcp-session-id`)
+and on the SDK's stateless protocol alike, two concurrent calls for two tenants each see only
+their own, and nothing leaks into the next call on the same session. All of that is proven over
+the wire against a served module in `libs/epicurus-core/tests/test_module_tenant_binding.py`.
+
+**Trust.** The module trusts the header the way it trusts every other byte the core sends: the
+module↔core contract runs on the internal network only and is never exposed (constraint #7), so
+the only party that can reach a module's `/mcp` is the core. Exposing a module's MCP endpoint
+beyond the internal network would also hand whoever reaches it the choice of tenant — one more
+reason that exposure stays a deliberate, gated capability.
+
+**Compatibility.** A module built on an `epicurus-core` before 0.43.0 ignores the header (an
+unknown header to it) and keeps resolving the default tenant; a core before #917 sends none and
+a new module behaves as before. Discovery (`list_tools`) names no tenant — a module's tool list
+is the same for every tenant.
 
 ### `add_manifest_route`
 

@@ -47,6 +47,36 @@ generic `Error executing tool <name>` (see [the tool-error
 seam](../reference/modules.md#the-tool-error-seam-908) for why, and how the server log still
 tells an anticipated `KeyError`/`ValueError`/etc. apart from a genuine crash).
 
+### The tenant a tool acts for
+
+Every tool runs with the caller's tenant **already bound** (#917): the core names it in the
+`x-epicurus-tenant` header of each MCP request and `EpicurusModule` binds it around the tool.
+Resolve it per call, with your deployment default as the fallback for a call that names none
+(a core older than #917, or an in-process test with nothing bound):
+
+```python
+from epicurus_core import bound_tenant
+
+
+def _tenant() -> str:
+    return bound_tenant() or settings.default_tenant_id
+
+
+@module.tool()
+async def list_items() -> list[str]:
+    """List the caller's items."""
+    return await store.list_items(tenant_id=_tenant())
+```
+
+Do **not** close over `settings.default_tenant_id` at build time — that answers every tenant
+from the default tenant's data. Do not parse the header yourself either: the binding is the
+contract. A malformed header is refused before your tool runs. `PlatformClient` calls made
+inside the tool already follow the bound tenant, and so does an event published without an
+explicit `tenant_id`. In a test, `await module.call_tool(name, args, tenant="acme")` binds a
+tenant the same way. The module trusts the header because the module↔core contract runs on the
+internal network only (constraint #7). Full contract:
+[modules § The tenant on a tool call](../reference/modules.md#the-tenant-on-a-tool-call-917).
+
 ### Tools that write a document
 
 If a tool writes a document the user should watch take shape, annotate it with
@@ -220,6 +250,9 @@ print(result.content)
   (ADR-0005).
 - A usage event is emitted on NATS after every call — no prompt content,
   no keys.
+- `tenant_id` is the **fallback**: inside a tool call the client names the tenant the core
+  bound for that call; `platform.for_tenant("acme")` pins one explicitly (#917, see
+  [`PlatformClient`](../reference/platform-client.md#which-tenant-a-call-acts-for-917)).
 
 See [Platform API reference](../reference/platform-api.md) for the full HTTP
 contract and `PlatformChatResponse` type.

@@ -25,7 +25,26 @@ threaded through every call.
 def set_current_tenant(tenant_id: str) -> contextvars.Token   # bind; returns a reset token
 def reset_current_tenant(token: contextvars.Token) -> None    # restore the previous value
 def current_tenant() -> str                                   # the bound tenant, or raises TenantError
+def bound_tenant() -> str | None                              # the bound tenant, or None (#917)
 ```
+
+`bound_tenant()` is the non-raising twin of `current_tenant()`, for a caller with a fallback of
+its own — `PlatformClient` falls back to the tenant it was built with, a module's tool to its
+deployment default.
+
+## Across the module↔core hop (#917)
+
+```python
+TENANT_HEADER = "x-epicurus-tenant"
+```
+
+The header that names the tenant a core → module request acts for. The core stamps it on every
+module MCP tool call (`McpHost.call`) and on the chat-upload sink (`/ingest`); `EpicurusModule`
+binds it with `set_current_tenant` around every tool it runs (absent → nothing bound, malformed →
+refused — see [modules](modules.md#the-tenant-on-a-tool-call-917)). Going back the other way, a
+module's `PlatformClient` names the bound tenant as `tenant_id` on every platform call, and the
+core answers for it. So inside a tool call, the tenant the agent turn belongs to is the tenant
+of every resource the tool touches, on both sides of the hop.
 
 ## Scoping helpers
 

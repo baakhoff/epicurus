@@ -16,6 +16,7 @@ members = [
     "epicurus-core",
     "epicurus-core-app",
     "epicurus-echo",
+    "epicurus-hermarchus",
     "epicurus-knowledge",
     "epicurus-mail",
     "epicurus-messaging",
@@ -1121,6 +1122,31 @@ dependencies = [
 requires-dist = [
     { name = "epicurus-core", editable = "libs/epicurus-core" },
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.0" },
+]
+
+[[package]]
+name = "epicurus-hermarchus"
+version = "0.1.0"
+source = { editable = "services/hermarchus" }
+dependencies = [
+    { name = "aiosqlite" },
+    { name = "epicurus-core" },
+    { name = "fastapi" },
+    { name = "prometheus-client" },
+    { name = "pyyaml" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiosqlite", specifier = ">=0.20" },
+    { name = "epicurus-core", editable = "libs/epicurus-core" },
+    { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "prometheus-client", specifier = ">=0.21" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.51" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.0" },
 ]
 

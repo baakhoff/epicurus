@@ -60,3 +60,7 @@ documented in [platform-api](platform-api.md). The running services that consume
 this are under [Services & Modules](../services/index.md). The host ports each one
 publishes — and how a new module gets a collision-free one — are in the
 [host-port registry](ports.md).
+
+The controller ↔ **Hermarchus** contract — the agent host's HTTP API, its event stream and its
+configuration — is a separate surface, not part of `epicurus-core`:
+[Hermarchus API & configuration](hermarchus.md).

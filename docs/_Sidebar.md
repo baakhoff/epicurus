@@ -23,6 +23,7 @@
 - [notes](services/notes.md)
 - [messaging](services/messaging.md)
 - [echo](services/echo.md)
+- [hermarchus — the agent host](services/hermarchus.md)
 
 **API Reference**
 
@@ -42,6 +43,7 @@
 - [platform client](reference/platform-client.md)
 - [file space](reference/files.md)
 - [db (migrations & reconcile)](reference/db.md)
+- [Hermarchus API & configuration](reference/hermarchus.md)
 - [host-port registry](reference/ports.md)
 
 **Infrastructure**

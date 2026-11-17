@@ -12,6 +12,23 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **The tenant crosses the module↔core hop** (#917) — a module tool call always acted for the
+  deployment's default tenant: the core dispatched a tool by name and URL only, nothing in a
+  module ever bound a tenant, and the core ignored the `tenant_id` a module named on four of its
+  own reads. Invisible with one tenant, and the first thing a second tenant (a profile) needs.
+  The core now names the tenant on every module tool call, in the `x-epicurus-tenant` header it
+  already used for chat uploads; `EpicurusModule` binds it around every tool — once, in the
+  foundation, read from the request that carried the call so it holds on a stateful MCP session
+  and under concurrency — and refuses a malformed one; with no header nothing is bound, so an
+  older core or module behaves exactly as before. `PlatformClient` resolves its tenant per call
+  (a `for_tenant()` pin, else the bound tenant, else the one it was built with), so a tool's
+  calls back into the core act for the caller; `ModuleConfigCache` keeps one entry per tenant;
+  the core's module-facing reads (settings, model slot, review switch, collection prefs) now
+  answer for the `tenant_id` they are given, and 400 a malformed one. Storage's file tools read
+  the core file space as the calling tenant instead of answering from the object store alone.
+  Proven over the wire against a served module with two tenants calling concurrently. A
+  single-tenant install changes nothing. `epicurus-core` 0.42.0→0.43.0 (MINOR) · `core-app`
+  0.131.0→0.131.1 (PATCH) · `storage` 0.12.0→0.12.1 (PATCH).
 - **Calendar test no longer fails every winter** (#1019) — the operator-timezone free-slot test
   hardcoded Belgrade's summer offset (`+02:00`), so `quality` went red on every pull request from
   the end of October to the end of March. It now expects the zone's own offset at each slot's

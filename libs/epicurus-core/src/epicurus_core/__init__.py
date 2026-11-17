@@ -118,7 +118,9 @@ from epicurus_core.review import (
 from epicurus_core.routing import route_paths
 from epicurus_core.secret_store import SecretError, SecretNotFoundError, SecretStore
 from epicurus_core.tenancy import (
+    TENANT_HEADER,
     TenantError,
+    bound_tenant,
     current_tenant,
     is_valid_tenant_id,
     reset_current_tenant,
@@ -150,6 +152,7 @@ __all__ = [
     "NDJSON_MEDIA_TYPE",
     "REDACTED_KEYS",
     "SCHEMA_VERSION",
+    "TENANT_HEADER",
     "Account",
     "AccountsView",
     "ApplyResult",
@@ -229,6 +232,7 @@ __all__ = [
     "add_manifest_route",
     "add_ops_routes",
     "add_portability_routes",
+    "bound_tenant",
     "build_file_store",
     "capped_listing",
     "configure_logging",

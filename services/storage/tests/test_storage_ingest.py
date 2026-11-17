@@ -36,6 +36,10 @@ class _NoFilesPlatform:
     async def files_read(self, path: str) -> str:  # pragma: no cover - not reached here
         raise AssertionError("the file space should not be read in object-only tests")
 
+    def for_tenant(self, tenant_id: str) -> _NoFilesPlatform:
+        """Every tenant's file space is empty here, so the pin changes nothing (#917)."""
+        return self
+
 
 class _FakeObjectStore(ObjectStore):
     """In-memory substitute for the binary surface — no MinIO required."""

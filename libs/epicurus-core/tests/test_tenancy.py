@@ -65,3 +65,23 @@ def test_scoping_without_tenant_raises() -> None:
 def test_scoping_validates_explicit_tenant() -> None:
     with pytest.raises(TenantError):
         scope_subject("x", "BAD")
+
+
+def test_bound_tenant_is_none_when_unbound_and_the_tenant_when_bound() -> None:
+    from epicurus_core.tenancy import bound_tenant
+
+    assert bound_tenant() is None
+    token = set_current_tenant("acme")
+    try:
+        assert bound_tenant() == "acme"
+    finally:
+        reset_current_tenant(token)
+    assert bound_tenant() is None
+
+
+def test_the_tenant_header_is_the_one_the_core_already_sends() -> None:
+    # The chat-upload sink and storage's /ingest used this name before #917; the MCP hop
+    # reuses it rather than inventing a second one.
+    from epicurus_core import TENANT_HEADER
+
+    assert TENANT_HEADER == "x-epicurus-tenant"

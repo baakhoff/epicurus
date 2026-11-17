@@ -10,7 +10,9 @@ visible host bar whenever a sign-in flow takes the window to another site, a loc
 of a blank window when the server is down, and a hardened engine (sandboxed, no Node in the page,
 permissions denied by default). Electron was chosen over Tauri because Chromium is the one engine
 the project can test on Linux and in CI before anyone on it has a Mac, and it keeps the shell in
-TypeScript like the web UI. Version **0.1.0**. Installing it as a user:
+TypeScript like the web UI. It is the first piece of **Epicurus, the client**, in the planned
+split into client, server and agent host — what is built and what is planned is in
+[the architecture](../developer/architecture.md). Version **0.1.0**. Installing it as a user:
 [the desktop app](../user/desktop-app.md).
 
 ## The contract

@@ -53,8 +53,12 @@ Chromium exposes `PushManager`, but there is no push service behind it —
 `pushManager.subscribe()` rejects with `AbortError: Registration failed - push service not
 available` — and the app refuses the `notifications` permission. A future shell that can deliver
 notifications flips the capability; the web UI needs no change. The object is exposed to every
-`http(s)` page in the window, including an identity provider's sign-in page; it says only that this
-is the epicurus desktop app on a given platform, which the user agent already reveals.
+`http(s)` page in the window, including an identity provider's sign-in page (the preload cannot
+know the server's origin without a synchronous IPC call); it says only that this is the epicurus
+desktop app on a given platform. The user agent does **not** say so (the app strips `Electron/…`
+from it), so any site the window visits can tell it is in the app from this object alone — accepted
+for now; nothing in it is secret. Any page can also define the object itself, which only hides its
+own push card.
 
 ### The local pages
 

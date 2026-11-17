@@ -20,7 +20,8 @@ Each is a zip that holds the installers below.
 ### macOS
 
 Two builds: `Epicurus-0.1.0-mac-arm64.dmg` for Apple silicon (M1 and later) and
-`Epicurus-0.1.0-mac-x64.dmg` for Intel Macs (a `.zip` of each is there too).
+`Epicurus-0.1.0-mac-x64.dmg` for Intel Macs (a `.zip` of each is there too). The Intel build is
+built and its signature checked, but it has not yet been started on an Intel Mac.
 
 1. Open the `.dmg` and drag **Epicurus** to **Applications**.
 2. The first time, macOS refuses to open it — *"Apple could not verify 'Epicurus' is free of

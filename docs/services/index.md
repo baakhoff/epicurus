@@ -3,6 +3,9 @@
 epicurus is a **core** surrounded by **sidecar modules** (ADR-0004): each is its own
 container, and adding a capability means running one more container that speaks the
 contract. This is the map of every running block — each row links its full reference page.
+Today this is the whole system: one server, one web UI, one tenant. The server is planned
+to be called Pamphilus and to be joined by a desktop client and an agent host; that split
+is **not built yet** (see [the three parts](../developer/architecture.md#the-three-parts)).
 
 ## The blocks
 

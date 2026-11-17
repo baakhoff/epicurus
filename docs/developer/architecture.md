@@ -2,7 +2,85 @@
 
 epicurus is a **core service** surrounded by **sidecar modules**. The core runs
 the agent and the platform capabilities; each module is a container that adds a
-capability the agent can use.
+capability the agent can use. That is what exists today: one server, one web UI,
+one tenant. The [three parts](#the-three-parts) section below describes where the
+project is heading and marks, sentence by sentence, what is built and what is not.
+
+## The three parts
+
+> **Read this first.** Today epicurus is **one server, one web UI and one tenant**.
+> Everything below marked **Planned** is a direction, not a feature: there is no
+> desktop app, no agent host, no profiles, no user accounts beyond sign-in, no
+> network paths and no remote projects, and none of them can be used yet. The plan
+> is tracked in epic [#1014](https://github.com/baakhoff/epicurus/issues/1014).
+
+epicurus is planned to split into three parts that can run on different machines.
+
+### Epicurus, the client
+
+- **Today.** The client is the **web UI** (`web`, a phone-first PWA) served by the
+  stack and talking to the one server. It has no local projects and no state of its
+  own beyond the browser.
+- **Planned.** One UI in two shells: a **desktop app** and the web front, with a small
+  client core behind the UI. The desktop app is to work alone for local projects
+  (chat, local or API models, files and terminal on that machine), to connect to any
+  number of Pamphilus servers, and to delegate everything else. The desktop shell is
+  [#1015](https://github.com/baakhoff/epicurus/issues/1015). It may run on a
+  laptop or desktop; the web front runs in any browser.
+
+### Pamphilus, the server
+
+- **Today.** The server **is** what this page describes: the core (`core-app`), the
+  model gateway, the secret store (OpenBao), the data plane and the sidecar modules,
+  behind the edge gateway and the `web` shell. It is not yet called Pamphilus in the
+  code or in the other docs, which say "core". It serves **one tenant** (`local` by
+  default). Optional OIDC sign-in exists (`AUTH_MODE=oidc`); it admits people to that
+  one tenant and does not give each of them a space of their own.
+- **Planned.** The same server gains users, profiles, remote projects, sync, a
+  per-profile tool endpoint (so every agent kind can use the modules), network paths,
+  an admin UI for user management, and the ability to start and supervise Hermarchus
+  instances. The tenant hop it depends on is
+  [#917](https://github.com/baakhoff/epicurus/issues/917). It runs on a home server,
+  a VPS or a cluster. The word *Pamphilus* previously named a planned thin inference
+  box (#109); that is now just one model backend behind the gateway.
+
+### Hermarchus, the agent host
+
+- **Today.** Nothing exists. The agent runs inside `core-app`.
+- **Planned.** One sandbox bound to exactly **one profile**, running any number of
+  agent sessions side by side on one filesystem. It owns nothing of its own: tools,
+  limits and the network path are handed to it by whoever controls it. It may run
+  on the same machine as the server or on another one. The first version is
+  [#1016](https://github.com/baakhoff/epicurus/issues/1016).
+
+## Terms
+
+| Term | Meaning | Today |
+| --- | --- | --- |
+| **User** | The person who signs in. Sign-in, devices, appearance, the list of profiles and the known servers live here. | **Planned.** Optional OIDC sign-in exists, but there is no per-user record, profile list or device list. |
+| **Profile** | A walled space a user creates, as many as they want: sign-ins, keys, tools, rules, prompts, limits, network path, chats, files, memory. It is built on `tenant_id` and is what the roadmap called a *workspace*. | **Planned.** Today there is a single tenant and a user cannot create another. The `tenant_id` scoping it will rely on does exist (see [Tenant scoping](#tenant-scoping)). |
+| **Project** | Says where things run: which profile, which Hermarchus (or none), which network path. *Local* (lives in one Epicurus client) or *remote* (lives in a Pamphilus, visible from every connected client). | **Planned.** No project concept exists. |
+| **Chat** | A conversation; it belongs to a project. | **Today** chats exist, but they belong to the one tenant, not to a project. |
+| **Session** | One running agent behind a chat. | **Planned** as a named thing. Today a chat turn runs the built-in agent in `core-app`. |
+
+## How the parts connect
+
+This is the **planned** design; none of these links exist yet.
+
+- **Three versioned contracts:** UI to client core, client core to Pamphilus, and
+  controller to Hermarchus.
+- **Links are dialled outwards by the less reachable side**, enrolled with a
+  one-time code, so a laptop or a home box behind NAT needs no inbound port.
+- **Credentials.** API keys stay on the server. A program in a Hermarchus is pointed
+  at the model gateway with a short-lived key and never holds an API key. A
+  subscription sign-in is done once inside a Hermarchus and stays inside that one.
+- **Network path.** A profile's network path is to cover everything its sandbox
+  sends (a tunnel beside the sandbox, default-deny when the tunnel is down).
+- **Constraints amended on purpose.** The module-to-core contract is no longer
+  local-only for these links, and a subscription agent calls its vendor itself
+  rather than through the gateway. Until they ship, the local-only note above and
+  [All AI goes through the core](#all-ai-goes-through-the-core) describe the real
+  system exactly.
 
 ## Core + sidecar modules
 

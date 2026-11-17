@@ -19,13 +19,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import uvicorn
 from mcp.server.mcpserver import MCPServer
 from mcp.types import TextContent
+from sse_starlette.sse import AppStatus
 from starlette.applications import Starlette
 
 import epicurus_core_app.agent.mcp_host as mcp_host
@@ -372,6 +373,25 @@ def _pre_917_module_app() -> Starlette:
     return server.streamable_http_app()
 
 
+class _InProcessServer(uvicorn.Server):
+    """A uvicorn server that never takes over the process's signal handlers.
+
+    ``uvicorn.Server.serve()`` installs its own ``handle_exit`` as the SIGINT/SIGTERM handler
+    while it runs. sse-starlette (the SSE layer under the MCP SDK's streamable-HTTP transport)
+    polls for exactly that: its shutdown watcher finds the server through the SIGTERM handler,
+    and once it sees ``server.should_exit`` it sets the **process-global**
+    ``AppStatus.should_exit = True`` — permanently. In production that is the intended drain at
+    shutdown, one server per process. In a test process that starts and stops many servers, a
+    poll that lands while one is stopping latches the flag, and every later SSE response —
+    each legacy-handshake ``initialize`` — closes before its answer ("SSE stream ended without
+    a response"). A server embedded in a test owns no process signals, so it installs none.
+    """
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
+
+
 @contextlib.asynccontextmanager
 async def _live_module(app: Starlette | None = None) -> AsyncIterator[str]:
     """Serve the module in-process on an ephemeral port; yield its ``/mcp`` URL.
@@ -387,7 +407,7 @@ async def _live_module(app: Starlette | None = None) -> AsyncIterator[str]:
         port=port,
         log_level="error",
     )
-    server = uvicorn.Server(config)
+    server = _InProcessServer(config)
     serve_task = asyncio.create_task(server.serve())
     try:
         for _ in range(250):  # up to ~5s for startup
@@ -400,6 +420,8 @@ async def _live_module(app: Starlette | None = None) -> AsyncIterator[str]:
     finally:
         server.should_exit = True
         await serve_task
+    # Stopping this server must not have shut SSE down for the rest of the process.
+    assert not AppStatus.should_exit
 
 
 async def test_call_success_against_live_server() -> None:

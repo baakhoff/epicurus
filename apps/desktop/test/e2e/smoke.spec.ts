@@ -178,8 +178,12 @@ test("after a restart the app is still connected, with its session", async () =>
   // The window state is recorded (the restore logic itself is unit-tested in windowState.test.ts;
   // the DevTools protocol cannot resize an Electron window to prove a round trip here).
   const settings = readSettings(userDataDir);
-  expect(settings?.window).toMatchObject({ maximized: false });
-  expect((settings?.window as { width: number }).width).toBeGreaterThanOrEqual(480);
+  // `maximized` is whatever the platform reports: macOS calls a window that fills a small
+  // runner screen "maximized" (zoomed).
+  const saved = settings?.window as { width: number; height: number; maximized: unknown };
+  expect(saved.width).toBeGreaterThanOrEqual(480);
+  expect(saved.height).toBeGreaterThanOrEqual(360);
+  expect(typeof saved.maximized).toBe("boolean");
 });
 
 test("an unreachable server shows Retry and Change server, and Retry recovers", async () => {

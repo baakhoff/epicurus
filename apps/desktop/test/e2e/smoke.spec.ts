@@ -291,7 +291,8 @@ test("the app refuses a DevTools port onto its default profile", async () => {
   // Without EPICURUS_DESKTOP_USER_DATA_DIR the profile is the user's real one: the app must exit
   // before Chromium opens the port (src/main/debugging.ts).
   const { file, args } = command();
-  const env = { ...process.env };
+  // Logging on, as launchApp does, so Chromium's "DevTools listening" line would show if it ran.
+  const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_ENABLE_LOGGING: "1" };
   delete env.EPICURUS_DESKTOP_USER_DATA_DIR;
   const child = spawn(file, [...args, "--remote-debugging-port=0"], {
     env,
@@ -311,6 +312,8 @@ test("the app refuses a DevTools port onto its default profile", async () => {
     });
   });
   expect(output).not.toContain("DevTools listening");
-  expect(output).toContain("refuses --remote-debugging-port");
+  // The exit code is the proof on every platform; the message is checked where stderr of a GUI
+  // build is known to reach the pipe.
+  if (process.platform !== "win32") expect(output).toContain("refuses --remote-debugging-port");
   expect(code).toBe(1);
 });

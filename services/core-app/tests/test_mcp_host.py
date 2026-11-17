@@ -24,11 +24,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import uvicorn
+from mcp.server.mcpserver import MCPServer
 from mcp.types import TextContent
 from starlette.applications import Starlette
 
 import epicurus_core_app.agent.mcp_host as mcp_host
-from epicurus_core import EpicurusModule
+from epicurus_core import EpicurusModule, bound_tenant
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 
 
@@ -346,11 +347,33 @@ def _live_module_app() -> Starlette:
     def boom() -> str:
         raise ValueError("event 'e1' not found")
 
+    @module.tool()
+    async def whoami(delay: float = 0.0) -> str:
+        # The tenant the module bound for this call (#917), read before and after yielding
+        # to the loop so two overlapping calls would show a shared binding as a mismatch.
+        before = bound_tenant() or "<unbound>"
+        await asyncio.sleep(delay)
+        return f"{before}|{bound_tenant() or '<unbound>'}"
+
     return module.mcp.streamable_http_app()
 
 
+def _pre_917_module_app() -> Starlette:
+    """A module built on a bare ``MCPServer`` — what an ``epicurus-core`` before #917 served.
+
+    It never reads the tenant header; the tool reports the ContextVar it would have resolved.
+    """
+    server = MCPServer("old-module")
+
+    @server.tool()
+    async def whoami() -> str:
+        return bound_tenant() or "<unbound>"
+
+    return server.streamable_http_app()
+
+
 @contextlib.asynccontextmanager
-async def _live_module() -> AsyncIterator[str]:
+async def _live_module(app: Starlette | None = None) -> AsyncIterator[str]:
     """Serve the module in-process on an ephemeral port; yield its ``/mcp`` URL.
 
     A plain ``async with`` helper rather than a fixture — the repo has no async-fixture
@@ -358,7 +381,12 @@ async def _live_module() -> AsyncIterator[str]:
     Linux alike, no Docker).
     """
     port = _free_port()
-    config = uvicorn.Config(_live_module_app(), host="127.0.0.1", port=port, log_level="error")
+    config = uvicorn.Config(
+        app if app is not None else _live_module_app(),
+        host="127.0.0.1",
+        port=port,
+        log_level="error",
+    )
     server = uvicorn.Server(config)
     serve_task = asyncio.create_task(server.serve())
     try:
@@ -431,3 +459,56 @@ async def test_call_hung_module_times_out_to_module_unreachable(
                 )
     finally:
         server.close()
+
+
+# ── The tenant crosses the MCP hop (#917) ──────────────────────────────────────
+# ``call`` names the turn's tenant in the ``x-epicurus-tenant`` header of every request it
+# sends, and the module (through ``EpicurusModule``) binds it around the tool. Proven against
+# a real served module — the binding's hazard (a stateful session's long-lived task) only
+# exists over the wire. The library's own suite covers the module side in depth
+# (``libs/epicurus-core/tests/test_module_tenant_binding.py``); these pin the core's half.
+
+
+async def test_call_carries_the_tenant_to_the_module() -> None:
+    host = McpHost([])
+    async with _live_module() as url:
+        out = await host.call("whoami", {}, url, tenant="acme")
+    assert out == "acme|acme"
+
+
+async def test_concurrent_calls_for_two_tenants_each_reach_the_module_as_their_own() -> None:
+    host = McpHost([])
+    tenants = ["acme", "globex"] * 5
+    async with _live_module() as url:
+        results = await asyncio.gather(
+            *(host.call("whoami", {"delay": 0.05}, url, tenant=t) for t in tenants)
+        )
+    assert results == [f"{t}|{t}" for t in tenants]
+
+
+async def test_a_malformed_tenant_is_refused_by_the_module_as_a_tool_error() -> None:
+    # The core never sends one (its tenants are validated where they enter), but the module
+    # refuses rather than defaulting — and the refusal arrives as the familiar ToolCallError.
+    host = McpHost([])
+    async with _live_module() as url:
+        with pytest.raises(ToolCallError, match="invalid tenant id"):
+            await host.call("whoami", {}, url, tenant="Not A Tenant")
+
+
+async def test_a_module_built_before_917_still_answers_and_ignores_the_header() -> None:
+    """New core, old module: the header is an unknown header to it, nothing more."""
+    host = McpHost([])
+    async with _live_module(_pre_917_module_app()) as url:
+        out = await host.call("whoami", {}, url, tenant="acme")
+    assert out == "<unbound>"
+
+
+async def test_discovery_sends_no_tenant_and_still_lists_the_tools() -> None:
+    # Discovery is tenant-agnostic (a tool list is the same for every tenant); only ``call``
+    # names one. Pinned so a future per-tenant surface is a deliberate change.
+    host = McpHost([])
+    async with _live_module() as url:
+        host._module_urls = [url]
+        specs, route = await host.discover()
+    assert {s["function"]["name"] for s in specs} >= {"echo", "boom", "whoami"}
+    assert route["whoami"] == url

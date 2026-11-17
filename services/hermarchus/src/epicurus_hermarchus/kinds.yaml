@@ -1,0 +1,47 @@
+# Agent kinds Hermarchus ships an entry for. Each one is a program that speaks the Agent
+# Client Protocol (https://agentclientprotocol.com) over stdio; Hermarchus starts one process
+# per session with `command` + `args`, the kind's `env` on top of the sandboxed environment,
+# HOME set to the instance's home volume, and the session's working directory as cwd.
+#
+# NONE OF THESE THREE HAS BEEN VERIFIED BY RUNNING. They are taken from each project's own
+# documentation (the `docs` URLs); nobody has signed in to any of them on a Hermarchus. No
+# vendor program is in the image: install one into the home volume with its `install`
+# command (HERMARCHUS_INSTALL_KINDS, or by hand inside the instance), then sign in there.
+#
+# An operator file (HERMARCHUS_KINDS_FILE) has the same shape; its entries replace these by
+# name, and `enabled: false` turns one off. The built-in `echo` kind is not defined here.
+kinds:
+  claude-code:
+    name: Claude Code
+    # The ACP adapter around Claude Code (bundles the `claude` program it drives).
+    command: claude-agent-acp
+    args: []
+    env:
+      # Pin the adapter to ACP v1, the stable protocol this host speaks; `auto` would also
+      # offer the draft v2.
+      CLAUDE_AGENT_ACP_PROTOCOL: v1
+    install: npm install -g @agentclientprotocol/claude-agent-acp
+    docs:
+      - https://agentclientprotocol.com/overview/agents
+      - https://github.com/agentclientprotocol/claude-agent-acp
+  codex:
+    name: Codex
+    # The ACP adapter around OpenAI's Codex (bundles a compatible @openai/codex).
+    command: codex-acp
+    args: []
+    env: {}
+    install: npm install -g @agentclientprotocol/codex-acp
+    docs:
+      - https://agentclientprotocol.com/overview/agents
+      - https://github.com/agentclientprotocol/codex-acp
+  grok-build:
+    name: Grok Build
+    # xAI's coding CLI speaks ACP itself: `grok agent stdio`.
+    command: grok
+    args: [agent, stdio]
+    env: {}
+    install: curl -fsSL https://x.ai/cli/install.sh | bash
+    docs:
+      - https://docs.x.ai/build/overview
+      - https://github.com/xai-org/grok-build
+      - https://zed.dev/acp/agent/grok-build

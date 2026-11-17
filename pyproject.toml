@@ -58,7 +58,7 @@ extend-exclude = ["templates"]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["epicurus_core", "epicurus_core_app", "epicurus_echo", "epicurus_storage", "epicurus_knowledge", "epicurus_websearch", "epicurus_calendar", "epicurus_mail", "epicurus_tasks", "epicurus_notes", "epicurus_messaging"]
+known-first-party = ["epicurus_core", "epicurus_core_app", "epicurus_echo", "epicurus_storage", "epicurus_knowledge", "epicurus_websearch", "epicurus_calendar", "epicurus_mail", "epicurus_tasks", "epicurus_notes", "epicurus_messaging", "epicurus_hermarchus"]
 
 [tool.mypy]
 strict = true
@@ -92,6 +92,7 @@ mypy_path = [
     "services/calendar/src",
     "services/core-app/src",
     "services/echo/src",
+    "services/hermarchus/src",
     "services/knowledge/src",
     "services/mail/src",
     "services/messaging/src",
@@ -106,6 +107,7 @@ files = [
     "services/calendar/src", "services/calendar/tests",
     "services/core-app/src", "services/core-app/tests",
     "services/echo/src", "services/echo/tests",
+    "services/hermarchus/src", "services/hermarchus/tests",
     "services/knowledge/src", "services/knowledge/tests",
     "services/mail/src", "services/mail/tests",
     "services/messaging/src", "services/messaging/tests",

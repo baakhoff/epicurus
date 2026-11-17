@@ -212,7 +212,16 @@ def create_app(settings: HermarchusSettings) -> FastAPI:
             await mgr.shutdown()
             await store.close()
 
-    app = FastAPI(title="Hermarchus", version=__version__, lifespan=lifespan)
+    # No /docs, /redoc or /openapi.json: only /health and /metrics are served without the
+    # token (the contract is in docs/reference/hermarchus.md).
+    app = FastAPI(
+        title="Hermarchus",
+        version=__version__,
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.include_router(
         create_ops_router("hermarchus", version=__version__, registry=metrics.registry)
     )

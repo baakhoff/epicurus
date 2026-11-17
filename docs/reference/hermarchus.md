@@ -9,7 +9,7 @@ implemented by `services/hermarchus` 0.1.0. What the block is and how to run it:
 | | |
 | --- | --- |
 | Auth | `Authorization: Bearer <token>` on every `/v1` route. Missing, wrong, or another scheme → **401** `{"detail":{"code":"unauthenticated",…}}` with `WWW-Authenticate: Bearer`. Compared in constant time. |
-| Open routes | `GET /health`, `GET /metrics` |
+| Open routes | `GET /health`, `GET /metrics` — nothing else (no `/docs`, `/redoc`, `/openapi.json`) |
 | Profile | Optional on any `/v1` request: `X-Epicurus-Profile`, `X-Epicurus-Tenant`, or `?tenant_id=`. Must equal the bound profile → else **403** `wrong_profile`; malformed (the `epicurus-core` tenant rule: 1–63 of `[a-z0-9-]`, no edge hyphen) → **400** `invalid_profile`. |
 | Errors | `{"detail": {"code": "<code>", "message": "<sentence>"}}`; body validation errors are FastAPI's 422. |
 
@@ -83,6 +83,10 @@ ends after a terminal event or a delete, and — when this connection is more th
 | `GET /v1/sessions/{id}/permissions?pending=true` | — | `{"permissions": [{"id", "session_id", "status": "pending"\|"resolved", "request": {"tool_call", "options"}, "decision", "resolved_by", "created_at", "expires_at", "resolved_at"}]}`; `pending=false` lists all |
 | `POST /v1/sessions/{id}/permissions/{request_id}` | `{"decision": "once" \| "always" \| "reject"}` | 200 `{"request_id", "decision", "seq"}` · 404 (unknown, or another session's) · 409 `permission_not_pending` / `session_not_live` |
 
+`once` selects the agent's `allow_once` option only; `always` its `allow_always`, else
+`allow_once`; `reject` its `reject_once`, else `reject_always`. With no fitting option the agent is
+answered `cancelled`.
+
 `decision` in a resolved request is `once`, `always`, `reject` or `cancelled`; `resolved_by` is
 `controller`, `timeout`, `cancel`, `session_failed`, `host_shutdown`, `stopped by controller` or
 `host_restart`.
@@ -115,7 +119,8 @@ ends after a terminal event or a delete, and — when this connection is more th
 
 Environment, prefix `HERMARCHUS_` (`LOG_LEVEL`, `APP_ENV`, `JSON_LOGS` unprefixed, as stack-wide).
 The service **refuses to start** (exit 2, the reason on stderr) on a missing or short token, an
-invalid profile, a pass-through naming a `HERMARCHUS_*` variable, or an invalid kinds file.
+invalid profile, a pass-through naming a `HERMARCHUS_*` variable, a state directory or agent
+home that overlaps the workspace, or an invalid kinds file.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -141,7 +146,9 @@ invalid profile, a pass-through naming a `HERMARCHUS_*` variable, or an invalid 
 **Compose overlay** (`services/hermarchus/compose.yaml`) passes `HERMARCHUS_TOKEN` (required —
 `compose` itself refuses to resolve without it), `HERMARCHUS_PROFILE` (`local`),
 `HERMARCHUS_MAX_SESSIONS` (`10`), `HERMARCHUS_UNATTENDED` (`false`), `HERMARCHUS_INSTALL_KINDS`,
-`LOG_LEVEL`, and publishes `${BIND_ADDRESS:-127.0.0.1}:${HERMARCHUS_PORT:-8094}`.
+`LOG_LEVEL`, publishes `${BIND_ADDRESS:-127.0.0.1}:${HERMARCHUS_PORT:-8094}` (a *host* port —
+the overlay does not pass `HERMARCHUS_PORT` into the container, which listens on 8080), and
+attaches the service to its own `hermarchus` network, not the stack's `epicurus`.
 
 **Chart** — the `hermarchus:` values block, see
 [Kubernetes](../infrastructure/kubernetes.md#hermarchus--the-agent-host).

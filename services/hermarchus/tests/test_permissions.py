@@ -166,3 +166,28 @@ async def test_answers_are_validated(host: Any) -> None:
     other = await host.create()
     cross = await _answer(host, other, req["request_id"], "once")
     assert cross.status_code == 404, "a request answered through another session's URL"
+
+
+# ── which agent option carries a decision out ─────────────────────────────────
+
+
+def _opts(*kinds: str) -> list[dict[str, Any]]:
+    return [{"optionId": f"id-{k}", "name": k, "kind": k} for k in kinds]
+
+
+def test_a_decision_never_selects_more_than_was_decided() -> None:
+    from epicurus_hermarchus.runtime import option_for
+
+    full = _opts("allow_once", "allow_always", "reject_once", "reject_always")
+    assert option_for("once", full) == "id-allow_once"
+    assert option_for("always", full) == "id-allow_always"
+    assert option_for("reject", full) == "id-reject_once"
+    # `once` must not turn into the agent's own "always" (it may remember that for good).
+    assert option_for("once", _opts("allow_always", "reject_once")) is None
+    # `always` may fall back to allowing once — that grants less.
+    assert option_for("always", _opts("allow_once")) == "id-allow_once"
+    assert option_for("reject", _opts("reject_always")) == "id-reject_always"
+    # No fitting option at all: nothing is selected (the relay answers `cancelled`).
+    assert option_for("reject", _opts("allow_once", "allow_always")) is None
+    assert option_for("once", []) is None
+    assert option_for("once", [{"kind": "allow_once"}]) is None  # no optionId

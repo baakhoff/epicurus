@@ -11,8 +11,10 @@ log** as server-sent events with replay, and answers the **permission requests**
 
 It is the third part of the split in #1014 (Epicurus the client, Pamphilus the server, Hermarchus
 the agent host). In v0 (#1016) nothing in the stack drives it yet: the controller is anything with
-the token — curl, the tests, the smoke gates. It **owns nothing** in the stack and talks to none
-of it: no NATS, no Postgres, no OpenBao, no core.
+the token — curl, the tests, the smoke gates. It **owns nothing** in the stack and uses none of
+it: no NATS, no Postgres, no OpenBao, no core. Because its agents run arbitrary code, it is also
+kept from *reaching* the stack — a network of its own on Compose, an egress policy on Kubernetes
+when `networkPolicy` is on (see [Security model](#security-model--where-the-walls-are)).
 
 It is deliberately a **stateful sandbox** — its filesystem *is* the agents' workspace, and agent
 programs and their sign-ins live in its home directory — which is a stated exception to the
@@ -31,7 +33,8 @@ controller that goes away; the lasting record of a chat will belong to the contr
 
 All of `/v1` requires `Authorization: Bearer <HERMARCHUS_TOKEN>` (401 `unauthenticated`
 otherwise). `GET /health` and `GET /metrics` are open, as on every service in the stack; neither
-carries a session id, a title, a path or a prompt. A request **may** name a profile —
+carries a session id, a title, a path or a prompt. Nothing else is served without the token —
+there is no `/docs`, `/redoc` or `/openapi.json`. A request **may** name a profile —
 `X-Epicurus-Profile` or `X-Epicurus-Tenant` header, or `?tenant_id=` — and if it does, it must be
 the bound one: another profile is **403 `wrong_profile`**, a malformed one **400
 `invalid_profile`**. Errors are `{"detail": {"code": "...", "message": "..."}}`.
@@ -99,8 +102,9 @@ can lose the last few.
 
 **Permission requests.** An agent's `session/request_permission` becomes `permission.requested`
 (`request_id`, the ACP `tool_call`, its `options`, `expires_at`). The controller answers:
-`once` picks the agent's `allow_once` option, `always` its `allow_always` option **and remembers
-it** for that session's **project directory** (the session `cwd`) — any later request in that
+`once` picks the agent's `allow_once` option (never its `allow_always`, which the agent program
+might remember for good), `always` its `allow_always` option — or `allow_once` if it offers no
+other — **and remembers it** for that session's **project directory** (the session `cwd`) — any later request in that
 directory with the same agent kind, tool kind and title is allowed without asking, in any session;
 `reject` picks `reject_once`. If the agent offered no option that carries the decision out, it is
 answered `cancelled` (which never allows). Nothing waits forever: an **unattended** session
@@ -176,7 +180,45 @@ Environment variables, prefixed `HERMARCHUS_` (plus the stack-wide `LOG_LEVEL`, 
 `HERMARCHUS_CHILD_ENV_PASSTHROUGH`, `HOME` = the home volume, `NPM_CONFIG_PREFIX` inside it, `PATH`
 prefixed with `~/.local/bin` and `~/.npm-global/bin`, and the kind's own `env`. Every
 `HERMARCHUS_*` name and any variable whose value is the bearer token is removed last, whatever put
-it there.
+it there. The service refuses to start when `HERMARCHUS_STATE_DIR` or `HERMARCHUS_AGENT_HOME`
+overlaps `HERMARCHUS_WORKSPACE_DIR`.
+
+## Security model — where the walls are
+
+Agent programs run arbitrary code, and Hermarchus is **not an operating-system sandbox**: every
+agent runs as the service's own user (uid 10001 in the image). **The container — or machine — is
+the wall.** Inside it, as that user, any agent can:
+
+- read and write the **whole workspace**, every session's directory, not only its own `cwd`;
+- read and write the **home volume** — every installed agent program and **every sign-in** on
+  it, and replace an installed program (the home volume's `bin` directories come first on the
+  agent `PATH`, so a planted program runs in later sessions and suppresses its install);
+- read and write the **state database** — every session's log, and forge rows in it (a
+  remembered `always` rule, say). The permission relay is therefore consent for a cooperating
+  agent program, not a wall against a hostile one.
+
+What Hermarchus does keep from agents:
+
+- **The bearer token.** It is not in an agent's environment (above), and at start the process
+  makes itself non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`), so the same user cannot read
+  `/proc/<service pid>/environ`, `mem` or `fd/` (`tests/test_entrypoint.py` proves it with an
+  agent that tries). If you use `HERMARCHUS_TOKEN_FILE`, mount it where uid 10001 cannot read
+  it after start, or agents can; the Compose overlay and the chart pass the token in the
+  environment.
+- **The stack.** On Compose the overlay puts Hermarchus on a network of its own (`hermarchus`),
+  not the stack's `epicurus` network: agents reach the internet (their vendors, npm) but no
+  module's MCP endpoint, not the core's platform API or model gateway (sign-in guards only
+  requests that came through the web proxy), not the data plane — the `runtime-smoke` gate
+  proves `core-app`, a module, Postgres and Qdrant do not answer from inside it. On Kubernetes
+  the same holds **only with `networkPolicy.enabled`** on a CNI that enforces it: the pod may
+  send to cluster DNS and public addresses only (`hermarchus.egressExtra` adds more), and no
+  in-release policy admits it. With the chart's default (`networkPolicy` off), nothing stops an
+  agent calling any Service in the cluster; this effect is not proven in CI (`k8s-smoke` runs
+  with policies off).
+- **Paths outside the workspace, through Hermarchus.** A session `cwd` and every path an agent
+  passes to `fs/read_text_file` / `fs/write_text_file` must resolve, symlinks followed, inside the
+  workspace. The check and the file operation are two steps, so an agent racing a symlink swap
+  could slip between them — gaining nothing it could not already do as its own user.
 
 ## Data model
 
@@ -197,8 +239,11 @@ means reinstalling and signing in again.
 
 On start, sessions a crash left `starting` / `idle` / `running` become `interrupted`, with
 `input.dropped` / `permission.resolved` (`by: "host_restart"`) / `session.interrupted` events. On
-shutdown (SIGTERM) every agent is stopped (stdin closed, then SIGTERM to its process group, then
-SIGKILL) and its session is marked `interrupted` with `session.stopping` → `session.interrupted`.
+shutdown (SIGTERM) open event streams get 5 s to close and are then cut, every agent is stopped
+(stdin closed, then SIGTERM to its process group, then SIGKILL) and its session is marked
+`interrupted` with `session.stopping` → `session.interrupted` — well inside the 30 s the Compose
+overlay and the chart give the container (`test_entrypoint.py` holds a following stream open
+across the SIGTERM).
 v0 cannot resume an interrupted session; start a new one.
 
 ## Dependencies
@@ -239,7 +284,16 @@ curl -sN -H "$A" "$H/v1/sessions/$SID/events?after=0&follow=true"
 image. Either list the kinds in `HERMARCHUS_INSTALL_KINDS` (their `install` command runs at start,
 in the background, as the service user with the agent environment; `/v1/info` shows each kind's
 `install.state` — `succeeded`, `failed` with the output tail, or `skipped` when the command is
-already there — and a failure is never fatal), or do it by hand inside the instance:
+already there — and a failure is never fatal), or do it by hand inside the instance.
+
+**What install-on-request opts you into.** Only the operator sets it — the environment (or the
+chart's `hermarchus.installKinds`) picks the kinds and the shipped list or `HERMARCHUS_KINDS_FILE`
+holds the commands; no API call can. Each command is a **shell string run through `/bin/sh -c`**,
+with network access, on **every start** where the kind's program is not already on the agent
+`PATH`. The shipped commands install the publisher's **current, unpinned release**
+(`npm install -g …`), and Grok Build's pipes `https://x.ai/cli/install.sh` into `bash`. Turning it
+on means trusting those publishers' latest release, fetched at start, with the instance's
+sign-ins and workspace. By hand:
 
 ```bash
 docker compose -f compose.yaml -f services/hermarchus/compose.yaml exec hermarchus bash
@@ -274,7 +328,8 @@ kinds:
 breaking change to a shape bumps both. A schema change is a new `STEPS[n]` in `schema.py` plus the
 matching `store.py` table change — `tests/test_schema.py` holds the two together. The safety
 requirements each have a test: workspace confinement (`test_sandbox.py`, `test_sessions.py`), the
-child environment (`test_sandbox.py`, and `/proc/<pid>/environ` in `test_sessions.py`), shutdown
+child environment (`test_sandbox.py`, and `/proc/<pid>/environ` in `test_sessions.py`), the token
+out of agents' reach through `/proc` (`test_entrypoint.py`), shutdown
 and crash reconciliation (`test_lifecycle.py`), profile refusal and the token (`test_sessions.py`,
 `test_settings.py`), never waiting forever (`test_permissions.py`), slow readers
 (`test_streams.py`). Run them with `uv run pytest services/hermarchus`.

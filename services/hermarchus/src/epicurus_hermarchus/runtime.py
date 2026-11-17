@@ -93,11 +93,16 @@ def _pick_option(options: list[dict[str, Any]], kinds: tuple[str, ...]) -> str |
 
 
 def option_for(decision: str, options: list[dict[str, Any]]) -> str | None:
-    """The agent's option id that carries out a controller decision, if it offered one."""
+    """The agent's option id that carries out a controller decision, if it offered one.
+
+    Never more than was decided: ``once`` does not fall back to ``allow_always`` (an agent
+    program may remember that choice itself, for good); ``always`` may fall back to
+    ``allow_once``, which grants less.
+    """
     if decision == "always":
         return _pick_option(options, ("allow_always", "allow_once"))
     if decision == "once":
-        return _pick_option(options, ("allow_once", "allow_always"))
+        return _pick_option(options, ("allow_once",))
     if decision == "reject":
         return _pick_option(options, ("reject_once", "reject_always"))
     return None

@@ -72,3 +72,33 @@ def test_the_entrypoint_exits_non_zero_without_a_token(tmp_path: Path) -> None:
 def test_the_package_version_matches_its_manifest() -> None:
     manifest = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert epicurus_hermarchus.__version__ == manifest["project"]["version"] == "0.1.0"
+
+
+@pytest.mark.parametrize(
+    ("state", "home"),
+    [
+        ("ws/state", "home"),  # the spool inside the workspace: agents could read it
+        ("state", "ws/.home"),  # the home volume inside the workspace
+        ("state", "ws"),  # the same directory
+        (".", "home"),  # the workspace inside the state directory
+    ],
+)
+def test_state_and_home_may_not_overlap_the_workspace(
+    tmp_path: Path, state: str, home: str
+) -> None:
+    with pytest.raises(SettingsError, match="overlaps HERMARCHUS_WORKSPACE_DIR"):
+        _settings(
+            token="x" * 20,
+            workspace_dir=tmp_path / "ws",
+            state_dir=tmp_path / state,
+            agent_home=tmp_path / home,
+        ).validated()
+
+
+def test_side_by_side_state_home_and_workspace_are_accepted(tmp_path: Path) -> None:
+    _settings(
+        token="x" * 20,
+        workspace_dir=tmp_path / "ws",
+        state_dir=tmp_path / "state",
+        agent_home=tmp_path / "home",
+    ).validated()

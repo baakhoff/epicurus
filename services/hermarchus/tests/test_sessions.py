@@ -29,6 +29,8 @@ async def test_health_and_metrics_are_open_and_v1_needs_the_token(host: Any) -> 
         assert health.status_code == 200
         assert health.json() == {"status": "ok", "service": "hermarchus", "version": __version__}
         assert (await anon.get("/metrics")).status_code == 200
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert (await anon.get(path)).status_code == 404, f"{path} is served without a token"
         for path in ("/v1/info", "/v1/sessions"):
             resp = await anon.get(path)
             assert resp.status_code == 401

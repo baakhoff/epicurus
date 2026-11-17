@@ -114,6 +114,15 @@ class HermarchusSettings(BaseSettings):
             validate_tenant_id(self.profile)
         except TenantError as exc:
             raise SettingsError(f"HERMARCHUS_PROFILE: {exc}") from exc
+        workspace = self.workspace_dir.resolve()
+        for name, directory in (("STATE_DIR", self.state_dir), ("AGENT_HOME", self.agent_home)):
+            other = directory.resolve()
+            if other == workspace or workspace in other.parents or other in workspace.parents:
+                raise SettingsError(
+                    f"HERMARCHUS_{name} ({str(directory)!r}) overlaps HERMARCHUS_WORKSPACE_DIR "
+                    f"({str(self.workspace_dir)!r}); agents reach the workspace through the "
+                    "client file methods, so the spool and the home volume must sit beside it"
+                )
         bad = [n for n in self.passthrough_names if n.upper().startswith("HERMARCHUS_")]
         if bad:
             raise SettingsError(

@@ -10,13 +10,19 @@
   last, whatever asked for them.
 
 What this does *not* do: it is not an OS sandbox. An agent program runs as the same uid as
-Hermarchus and can open any path that uid can; the container (or machine) boundary is the
-sandbox. These rules bound what Hermarchus itself does on an agent's behalf.
+Hermarchus and can open any path that uid can — the state database and the home volume
+included; the container (or machine) boundary is the sandbox. These rules bound what
+Hermarchus itself does on an agent's behalf. :func:`harden_process` closes the one door the
+same uid would otherwise open into the service *process*: ``/proc/<pid>/environ`` (where the
+bearer token sits) and its siblings.
 """
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import os
+import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 
@@ -25,12 +31,33 @@ __all__ = [
     "PathError",
     "build_child_env",
     "confine_path",
+    "harden_process",
     "resolve_workdir",
 ]
 
 # Copied from the service's own environment when present. Nothing else is.
 BASE_ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM")
 _DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+_PR_SET_DUMPABLE = 4
+
+
+def harden_process() -> bool:
+    """Make this process non-dumpable; ``True`` when it took effect (Linux only).
+
+    Agents run as the service's own uid, so without this any agent can read
+    ``/proc/<service pid>/environ`` — ``HERMARCHUS_TOKEN`` included — and ``/proc/<pid>/mem``
+    and ``fd/``. A non-dumpable process's ``/proc`` entries belong to root and ptrace is
+    refused. Children are unaffected: ``execve`` makes a new program dumpable again.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or None, use_errno=True)
+        return int(libc.prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0)) == 0
+    except (OSError, AttributeError):
+        return False
 
 
 class PathError(ValueError):

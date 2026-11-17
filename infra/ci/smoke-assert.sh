@@ -50,6 +50,9 @@
 #                       dummy client id and OIDC_ALLOW_ALL_USERS=true; block until healthy
 #   enable_hermarchus   bring up the opt-in agent host (#1016) as service `hermarchus`, block
 #                       until healthy, and set HERMARCHUS_TOKEN to its bearer token
+#   hermarchus_http <curl-args…>  like `http`, but from where the agent host's controller
+#                       sits — on Compose the agent host is on a network of its own, not the
+#                       stack's, so this is a curl container on *that* network
 #   EXPECT_MODULES      space-separated module names this deployment should have
 #                       (`smoke_modules` below derives the canonical list)
 #
@@ -399,58 +402,58 @@ smoke_assert_hermarchus() {
   JSON="Content-Type: application/json"
 
   i=0
-  until http -f "$H/health" >/dev/null 2>&1; do
+  until hermarchus_http -f "$H/health" >/dev/null 2>&1; do
     i=$((i + 1))
     [ "$i" -lt 30 ] || die "hermarchus /health never answered"
     sleep 2
   done
   ok "hermarchus /health (open, like every service's)"
 
-  code="$(http -o /dev/null -w '%{http_code}' "$H/v1/info" || true)"
+  code="$(hermarchus_http -o /dev/null -w '%{http_code}' "$H/v1/info" || true)"
   [ "$code" = "401" ] || die "hermarchus answered $code to /v1/info with no token (expected 401)"
-  info="$(http -H "$AUTH" "$H/v1/info" || true)"
+  info="$(hermarchus_http -H "$AUTH" "$H/v1/info" || true)"
   printf '%s' "$info" | grep -q '"profile":"local"' \
     || die "hermarchus is not bound to the default profile: $info"
   printf '%s' "$info" | grep -qE '"kind":"echo"[^}]*"available":true' \
     || die "the built-in echo agent is not available in the image: $info"
-  code="$(http -o /dev/null -w '%{http_code}' -H "$AUTH" -H 'X-Epicurus-Profile: someone-else' \
+  code="$(hermarchus_http -o /dev/null -w '%{http_code}' -H "$AUTH" -H 'X-Epicurus-Profile: someone-else' \
     "$H/v1/info" || true)"
   [ "$code" = "403" ] || die "a request naming another profile answered $code (expected 403)"
   ok "/v1/info needs the token, reports the bound profile and echo, refuses another profile"
 
-  created="$(http -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions" \
+  created="$(hermarchus_http -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions" \
     -d '{"agent":"echo","cwd":"smoke","title":"smoke"}' || true)"
   SID="$(printf '%s' "$created" | grep -oE '"id":"[0-9a-f]{32}"' | head -1 | cut -d'"' -f4)"
   [ -n "$SID" ] || die "creating an echo session failed: $created"
   i=0
-  until http -H "$AUTH" "$H/v1/sessions/$SID" | grep -q '"status":"idle"'; do
+  until hermarchus_http -H "$AUTH" "$H/v1/sessions/$SID" | grep -q '"status":"idle"'; do
     i=$((i + 1))
-    [ "$i" -lt 30 ] || die "the echo session never became idle: $(http -H "$AUTH" "$H/v1/sessions/$SID")"
+    [ "$i" -lt 30 ] || die "the echo session never became idle: $(hermarchus_http -H "$AUTH" "$H/v1/sessions/$SID")"
     sleep 1
   done
   ok "an echo session started (a real ACP agent over stdio, in the image)"
 
   hermarchus_wait_for() { # <text> — poll the session's replayed log until it contains <text>
     j=0
-    until http -H "$AUTH" "$H/v1/sessions/$SID/events?after=0" | grep -qF "$1"; do
+    until hermarchus_http -H "$AUTH" "$H/v1/sessions/$SID/events?after=0" | grep -qF "$1"; do
       j=$((j + 1))
       [ "$j" -lt 30 ] || die "the echo session's log never showed '$1'"
       sleep 1
     done
   }
 
-  http -f -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions/$SID/input" \
+  hermarchus_http -f -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions/$SID/input" \
     -d '{"text":"hello from smoke"}' >/dev/null || die "sending input to the session failed"
   hermarchus_wait_for '"text":"echo: hello from smoke"'
   ok "input admitted, delivered, and echoed back"
 
-  http -f -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions/$SID/input" \
+  hermarchus_http -f -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions/$SID/input" \
     -d '{"text":"write hello.txt written by the smoke gate"}' >/dev/null \
     || die "sending the write prompt failed"
   hermarchus_wait_for '"text":"wrote hello.txt"'
   ok "the agent wrote into the workspace volume through fs/write_text_file"
 
-  http -f -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions/$SID/input" \
+  hermarchus_http -f -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions/$SID/input" \
     -d '{"text":"permission smoke-check"}' >/dev/null || die "sending the permission prompt failed"
   REQ=""
   i=0
@@ -458,33 +461,33 @@ smoke_assert_hermarchus() {
     i=$((i + 1))
     [ "$i" -lt 30 ] || die "the permission request never appeared"
     sleep 1
-    REQ="$(http -H "$AUTH" "$H/v1/sessions/$SID/permissions" \
+    REQ="$(hermarchus_http -H "$AUTH" "$H/v1/sessions/$SID/permissions" \
       | grep -oE '"id":"[0-9a-f]{32}"' | head -1 | cut -d'"' -f4 || true)"
   done
-  http -f -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions/$SID/permissions/$REQ" \
+  hermarchus_http -f -H "$AUTH" -H "$JSON" -X POST "$H/v1/sessions/$SID/permissions/$REQ" \
     -d '{"decision":"once"}' >/dev/null || die "answering the permission request failed"
   hermarchus_wait_for '"text":"permission: allowed (allow-once)"'
   ok "a permission request was relayed, answered once, and the agent went ahead"
 
-  all="$(http -H "$AUTH" "$H/v1/sessions/$SID/events?after=0")"
+  all="$(hermarchus_http -H "$AUTH" "$H/v1/sessions/$SID/events?after=0")"
   printf '%s\n' "$all" | grep -qx 'id: 1' || die "the replayed log does not start at seq 1"
-  tail="$(http -H "$AUTH" "$H/v1/sessions/$SID/events?after=2")"
+  tail="$(hermarchus_http -H "$AUTH" "$H/v1/sessions/$SID/events?after=2")"
   printf '%s\n' "$tail" | grep -qx 'id: 3' || die "replay after=2 did not start at seq 3: $tail"
   if printf '%s\n' "$tail" | grep -qxE 'id: [12]'; then
     die "replay after=2 repeated events 1-2"
   fi
   # A follow connection replays first, then stays open: curl ends it after 5s (exit 28).
-  followed="$(http -N --max-time 5 -H "$AUTH" "$H/v1/sessions/$SID/events?after=0&follow=true" || true)"
+  followed="$(hermarchus_http -N --max-time 5 -H "$AUTH" "$H/v1/sessions/$SID/events?after=0&follow=true" || true)"
   printf '%s\n' "$followed" | grep -qx 'event: permission.resolved' \
     || die "a follow stream did not replay the log: $followed"
   ok "the event log replays from a sequence number, plain and following"
 
-  stopped="$(http -H "$AUTH" -X POST "$H/v1/sessions/$SID/stop" || true)"
+  stopped="$(hermarchus_http -H "$AUTH" -X POST "$H/v1/sessions/$SID/stop" || true)"
   printf '%s' "$stopped" | grep -q '"status":"stopped"' || die "stopping the session failed: $stopped"
   hermarchus_wait_for 'event: session.stopped'
-  code="$(http -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE "$H/v1/sessions/$SID" || true)"
+  code="$(hermarchus_http -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE "$H/v1/sessions/$SID" || true)"
   [ "$code" = "204" ] || die "deleting the session answered $code (expected 204)"
-  code="$(http -o /dev/null -w '%{http_code}' -H "$AUTH" "$H/v1/sessions/$SID" || true)"
+  code="$(hermarchus_http -o /dev/null -w '%{http_code}' -H "$AUTH" "$H/v1/sessions/$SID" || true)"
   [ "$code" = "404" ] || die "the deleted session still answers $code"
   ok "the session stopped (its agent terminated) and was deleted"
 }

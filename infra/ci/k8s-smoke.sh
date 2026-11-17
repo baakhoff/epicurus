@@ -72,6 +72,9 @@ kc() { kubectl -n "$NS" "$@"; }
 # it reaches every Service by its bare name, which is exactly how the core, the
 # modules and the web shell reach each other.
 http() { kc exec "$CURL_POD" -- curl -s --max-time 25 "$@"; }
+# The agent host's controller (#1016): the same curl pod. With networkPolicy off (the gate's
+# values), nothing stands between them; kind's CNI does not enforce NetworkPolicy anyway.
+hermarchus_http() { http "$@"; }
 
 # ── the restart callbacks smoke-assert.sh calls (Kubernetes' answer) ──────────
 restart_openbao() { # delete the vault pod; the chart's unseal loop brings it back

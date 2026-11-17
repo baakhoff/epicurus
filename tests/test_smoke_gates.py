@@ -54,6 +54,7 @@ _HOOKS = (
     "settle_llm_runtime",
     "enable_sign_in",
     "enable_hermarchus",
+    "hermarchus_http",
 )
 
 # The label pair KubernetesController._workloads selects on and _owns re-reads before

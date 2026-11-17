@@ -80,6 +80,10 @@ die() { printf '\n\033[1;31mSMOKE FAILED: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # HTTP against the internal network — no host ports needed.
 http() { docker run --rm --network "$NET" "$CURL_IMG" -s --max-time 25 "$@"; }
+# Hermarchus (#1016) sits on a network of its own (services/hermarchus/compose.yaml; the name
+# is fixed by infra/ci/compose.hermarchus.yaml), so its controller's curl joins that one.
+HNET="${COMPOSE_PROJECT_NAME}-hermarchus"
+hermarchus_http() { docker run --rm --network "$HNET" "$CURL_IMG" -s --max-time 25 "$@"; }
 
 wait_state() { # <service> — block until healthy (or running, if it has no healthcheck)
   svc="$1"
@@ -142,6 +146,18 @@ enable_hermarchus() {
   wait_state hermarchus
   uid="$($DC exec -T hermarchus id -u 2>/dev/null | tr -d '\r' || true)"
   [ "$uid" = "10001" ] || die "hermarchus runs as uid '$uid' (expected the non-root 10001)"
+  # Agents run arbitrary code: from inside the agent host, nothing in the stack may answer —
+  # not the core's platform API, not a module's MCP endpoint, not the data plane.
+  probe='import socket,sys; h,p=sys.argv[1].split(":"); socket.create_connection((h,int(p)),timeout=3)'
+  # The probe itself works (so a failure below is the network, not a broken probe).
+  $DC exec -T hermarchus python -c "$probe" 127.0.0.1:8080 >/dev/null 2>&1 \
+    || die "the reachability probe cannot even reach hermarchus itself"
+  for target in core-app:8080 echo:8080 postgres:5432 qdrant:6333; do
+    if $DC exec -T hermarchus python -c "$probe" "$target" >/dev/null 2>&1; then
+      die "hermarchus can reach $target — it must not be on the stack's network"
+    fi
+  done
+  ok "hermarchus cannot reach the stack (core-app, a module, the data plane)"
 }
 
 dump_diagnostics() {

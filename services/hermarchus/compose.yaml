@@ -7,8 +7,9 @@
 #   # or: task hermarchus-up
 #
 # Paths below are relative to the project directory (the repo root), as for every overlay
-# merged onto compose.yaml. It needs nothing else from the stack — Hermarchus owns nothing;
-# a controller drives it with the token. See docs/services/hermarchus.md.
+# merged onto compose.yaml. It needs nothing else from the stack — Hermarchus owns nothing,
+# sits on a network of its own and cannot reach the stack's services; a controller drives it
+# with the token through the published port. See docs/services/hermarchus.md.
 services:
   hermarchus:
     build:
@@ -50,7 +51,15 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    networks: [epicurus]
+    # Its OWN network, never the stack's `epicurus` one: agents run arbitrary code, and on
+    # `epicurus` they could reach every module's MCP endpoint, the core's platform API and
+    # model gateway (sign-in guards only requests that came through the web proxy) and the
+    # data plane. On `hermarchus` it reaches the internet (vendors, npm) and nothing in the
+    # stack; the controller comes in through the published port.
+    networks: [hermarchus]
+
+networks:
+  hermarchus: {}
 
 volumes:
   hermarchus-workspace:

@@ -64,12 +64,17 @@ spec:
   policyTypes: ["Ingress"]
   ingress:
     # The web shell (its nginx proxies /platform/) and the modules (the platform
-    # API, ADR-0004). Nothing else in the cluster.
+    # API, ADR-0004). Nothing else in the cluster — and never the agent host, whose
+    # agents run arbitrary code (#1016).
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/part-of: epicurus
               app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: NotIn
+                values: ["hermarchus"]
       ports:
         - protocol: TCP
           port: 8080
@@ -117,10 +122,9 @@ spec:
   podSelector:
     matchLabels:
       {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "hermarchus") | nindent 6 }}
-  policyTypes: ["Ingress"]
+  policyTypes: ["Ingress", "Egress"]
   ingress:
-    # The agent host answers its controller and nobody else. Ingress-only like the rest of
-    # this file: its agents call their vendors (and npm, for an install) outbound.
+    # The agent host answers its controller and nobody else.
     - from:
         {{- if .Values.hermarchus.ingressFrom }}
         {{- toYaml .Values.hermarchus.ingressFrom | nindent 8 }}
@@ -129,10 +133,49 @@ spec:
             matchLabels:
               app.kubernetes.io/part-of: epicurus
               app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: NotIn
+                values: ["hermarchus"]
         {{- end }}
       ports:
         - protocol: TCP
           port: 8080
+  # Unlike every other workload here, the agent host is egress-restricted: its agents run
+  # arbitrary code, and the release's own services (the core's platform API and model
+  # gateway, every module's MCP endpoint, the data plane) answer callers inside the cluster
+  # without a user's sign-in. So: cluster DNS, and the public internet (vendors, npm) — no
+  # private, link-local or carrier-grade-NAT range, which covers pod and Service CIDRs on
+  # common clusters. Anything else (a node-local DNS cache, a proxy, a git server on the LAN)
+  # is the operator's to add with `hermarchus.egressExtra`.
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 100.64.0.0/10
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - fc00::/7
+              - fe80::/10
+    {{- with .Values.hermarchus.egressExtra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
@@ -153,10 +196,15 @@ spec:
   policyTypes: ["Ingress"]
   ingress:
     # Reachable from inside the release only — the core, the modules, and the
-    # OpenBao bootstrap/unseal helpers (which carry the same part-of label).
+    # OpenBao bootstrap/unseal helpers (which carry the same part-of label) — never
+    # the agent host (#1016).
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/part-of: epicurus
               app.kubernetes.io/instance: {{ .Release.Name }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: NotIn
+                values: ["hermarchus"]
 {{- end }}

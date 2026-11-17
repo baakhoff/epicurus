@@ -701,8 +701,16 @@ hermarchus:
     allowPrivilegeEscalation: false
     capabilities:
       drop: ["ALL"]
-  # With networkPolicy.enabled: who may reach port 8080. Empty = pods of this release only.
+  # With networkPolicy.enabled: who may reach port 8080. Empty = pods of this release only
+  # (never another hermarchus pod).
   ingressFrom: []
+  # With networkPolicy.enabled the pod may send only to cluster DNS (k8s-app=kube-dns) and to
+  # public addresses — nothing in the release, the cluster or the LAN. Extra NetworkPolicy
+  # egress rules, appended as given (e.g. a node-local DNS cache or an HTTP proxy):
+  #   egressExtra:
+  #     - to: [{ipBlock: {cidr: 169.254.20.10/32}}]
+  #       ports: [{protocol: UDP, port: 53}]
+  egressExtra: []
   podAnnotations: {}
   nodeSelector: {}
   tolerations: []

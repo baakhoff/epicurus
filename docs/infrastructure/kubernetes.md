@@ -122,7 +122,7 @@ runs alongside the pods that are waiting for it.
 | `minio` | StatefulSet + PVC | On by default (as under Compose) — the `storage` module's object store. Plus a bucket-seeding Job. |
 | `ollama` | StatefulSet + PVC | Optional (on by default), CPU by default, GPU hooks. |
 | `searxng` | Deployment | Its `settings.yml` as a ConfigMap. |
-| `hermarchus` | Deployment (`replicas: 1`, `Recreate`) + 3 PVCs + token Secret | **Off by default** (`hermarchus.enabled`). The agent host (#1016); talks to nothing in the release. |
+| `hermarchus` | Deployment (`replicas: 1`, `Recreate`) + 3 PVCs + token Secret | **Off by default** (`hermarchus.enabled`). The agent host (#1016); uses nothing in the release — and with `networkPolicy.enabled` cannot reach it. |
 
 Every workload carries `app.kubernetes.io/part-of: epicurus` and
 `app.kubernetes.io/component: <name>`. That pair is a contract, not decoration:
@@ -391,10 +391,14 @@ Four ingress-only policies: default-deny for everything labelled
 `part-of=epicurus`, then `web` from anywhere (an ingress controller lives in its
 own namespace), `core-app` from the release's own pods, each module from
 `core-app` alone, the data plane from the release's own pods, and — when it is
-enabled — `hermarchus` from `hermarchus.ingressFrom` (default: the release's own pods). Egress is
-deliberately unrestricted — websearch, Ollama model pulls and hosted LLM providers
-all need it, and a default-deny egress is a footgun that would also take DNS with
-it.
+enabled — `hermarchus` from `hermarchus.ingressFrom` (default: the release's own pods). The
+"release's own pods" rules of `core-app`, the data plane and `hermarchus` exclude the
+`hermarchus` pod itself. Egress is deliberately unrestricted for everything **except**
+`hermarchus` — websearch, Ollama model pulls and hosted LLM providers all need it, and a
+default-deny egress is a footgun that would also take DNS with it. `hermarchus` runs arbitrary
+agent code, so its policy also restricts egress: cluster DNS (`k8s-app: kube-dns`) and public
+addresses only — no `10/8`, `172.16/12`, `192.168/16`, `169.254/16`, `100.64/10`, `fc00::/7` or
+`fe80::/10` — plus whatever `hermarchus.egressExtra` adds.
 
 ### `metrics`
 
@@ -415,7 +419,18 @@ Prometheus, no rules and no dashboards — that is phase 2 (#896).
 
 [Hermarchus](../services/hermarchus.md) (#1016) runs agent sessions in its own pod, bound to one
 profile, driven over HTTP by whoever holds its bearer token. **Off by default**; it owns nothing
-in the release and talks to nothing in it, and the release talks to nothing in it.
+in the release and uses nothing in it.
+
+**What its agents can reach.** Agents run arbitrary code in this pod, and the release's own
+services answer callers inside the cluster without a user's sign-in (the core's platform API and
+model gateway, every module's MCP endpoint, the data plane). **With `networkPolicy.enabled`** the
+`hermarchus` policy limits the pod's egress to cluster DNS and public addresses, and no
+in-release policy admits it, so its agents reach the internet (their vendors, npm) and nothing in
+the release, the cluster or the LAN. **Without it — the chart's default — nothing stops an agent
+from calling any Service in the cluster.** Turn `networkPolicy` on before enabling `hermarchus`
+on a cluster whose CNI enforces policies (Calico, Cilium; not k3s' default flannel). The
+`chart-validate` job renders the policy; the `k8s-smoke` gate runs with `networkPolicy` off, so
+**its effect has not been proven in CI**.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -431,7 +446,8 @@ in the release and talks to nothing in it, and the release talks to nothing in i
 | `hermarchus.resources` | `100m`/`256Mi` requests, `4Gi` memory limit | Agent programs run inside this pod — size it for them. |
 | `hermarchus.podSecurityContext` | non-root uid/gid/fsGroup `10001`, `RuntimeDefault` seccomp | `fsGroup` is what makes fresh claims writable by the service user. |
 | `hermarchus.securityContext` | no privilege escalation, all capabilities dropped | |
-| `hermarchus.ingressFrom` | `[]` | With `networkPolicy.enabled`: who may reach port 8080; empty = the release's own pods. |
+| `hermarchus.ingressFrom` | `[]` | With `networkPolicy.enabled`: who may reach port 8080; empty = the release's own pods (never another `hermarchus` pod). |
+| `hermarchus.egressExtra` | `[]` | With `networkPolicy.enabled`: NetworkPolicy egress rules appended to the pod's DNS + public-internet allowance — a node-local DNS cache (`169.254.20.10`), an HTTP proxy, a git server on the LAN. |
 | `hermarchus.image`, `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | — | As for the other workloads. |
 
 The pod mounts **no service-account token** (`automountServiceAccountToken: false`) — it needs no

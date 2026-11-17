@@ -259,8 +259,11 @@ task hermarchus-up
 It publishes `${BIND_ADDRESS:-127.0.0.1}:${HERMARCHUS_PORT:-8094}`, runs as uid 10001, and keeps
 three named volumes — `hermarchus-workspace`, `hermarchus-home` (installed agent programs and
 their sign-ins) and `hermarchus-state` (its session spool) — which `task hermarchus-down` keeps.
-Back them up like any other state. The `runtime-smoke` gate brings it up the same way and runs an
-`echo` session through it.
+Back them up like any other state. It sits on a **network of its own** (`hermarchus`), not the
+stack's `epicurus` network: its agents run arbitrary code and reach the internet, but no module,
+not the core and not the data plane. The `runtime-smoke` gate brings it up the same way, runs an
+`echo` session through it, and proves from inside the container that `core-app`, a module,
+Postgres and Qdrant do not answer.
 
 ### Hosted-only: no local LLM runtime
 

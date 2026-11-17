@@ -73,8 +73,9 @@ from the default tenant's data. Do not parse the header yourself either: the bin
 contract. A malformed header is refused before your tool runs. `PlatformClient` calls made
 inside the tool already follow the bound tenant, and so does an event published without an
 explicit `tenant_id`. In a test, `await module.call_tool(name, args, tenant="acme")` binds a
-tenant the same way. The module trusts the header because the module↔core contract runs on the
-internal network only (constraint #7). Full contract:
+tenant the same way. The module trusts the header because the module↔core contract is internal
+(constraint #7) — read [what that does and does not cover](../reference/modules.md#the-tenant-on-a-tool-call-917)
+before a second tenant holds data. Full contract:
 [modules § The tenant on a tool call](../reference/modules.md#the-tenant-on-a-tool-call-917).
 
 ### Tools that write a document

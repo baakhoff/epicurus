@@ -1361,7 +1361,9 @@ container, and its review is mandatory (nothing self-applies, ever).
 `?tenant_id=` — what a module's `PlatformClient` sends, naming the tenant the core bound around
 the tool call that is asking. Unnamed (or empty) → the registry's tenant, so the web shell and
 every pre-#917 module read exactly what they always did; malformed → **400**, the
-`files_routes` rule. Every other route here still acts for the registry's one tenant.
+`files_routes` rule. Every other route here still acts for the registry's one tenant. Nothing
+checks that the caller may act for the tenant it names — any caller of the platform API can name
+one, as on the file routes; binding the tenant to the signed-in session is profile work.
 
 | Method · Path | Purpose |
 | --- | --- |
@@ -1482,7 +1484,9 @@ pool, 300s read). `EpicurusModule` binds it around the tool, so the tool and eve
 A malformed tenant is refused by the module and arrives here as a `ToolCallError`; a module on
 an `epicurus-core` older than 0.43.0 ignores the header and keeps its default. Discovery
 (`McpHost.discover`) names no tenant — a tool list is the same for every tenant. The module trusts
-the header because the module↔core contract runs on the internal network only (constraint #7).
+the header because the module↔core contract is internal (constraint #7); a module's port is also
+reachable from the host and through the edge gateway, so see the
+[trust note](../reference/modules.md#the-tenant-on-a-tool-call-917) before a second tenant holds data.
 
 ### Tenant data portability (#867)
 

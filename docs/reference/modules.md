@@ -98,11 +98,17 @@ and on the SDK's stateless protocol alike, two concurrent calls for two tenants 
 their own, and nothing leaks into the next call on the same session. All of that is proven over
 the wire against a served module in `libs/epicurus-core/tests/test_module_tenant_binding.py`.
 
-**Trust.** The module trusts the header the way it trusts every other byte the core sends: the
-module↔core contract runs on the internal network only and is never exposed (constraint #7), so
-the only party that can reach a module's `/mcp` is the core. Exposing a module's MCP endpoint
-beyond the internal network would also hand whoever reaches it the choice of tenant — one more
-reason that exposure stays a deliberate, gated capability.
+**Trust.** The module trusts the header from whoever reaches its `/mcp`, the way it trusts every
+other byte of the request — the module↔core contract is internal and unauthenticated by design
+(constraint #7). That is the core on the internal network, **and also** anything on the host
+itself: the shipped Compose stack publishes each module's port on
+`${BIND_ADDRESS:-127.0.0.1}` and the edge gateway routes `<module>.localhost` to it (#978), and
+neither asks for sign-in. Such a caller could already run every tool; since #917 it can also
+name the tenant the tool acts for. With one tenant that changes nothing. Before a second tenant
+(a profile) holds data, isolation must not rest on this header alone — keep `BIND_ADDRESS` on
+loopback and see #978 — and any wider exposure of a module stays a deliberate, gated capability.
+The same holds on the way back: any caller that reaches the platform API can name a `tenant_id`
+(already true of the file, timezone and portability routes before #917).
 
 **Compatibility.** A module built on an `epicurus-core` before 0.43.0 ignores the header (an
 unknown header to it) and keeps resolving the default tenant; a core before #917 sends none and

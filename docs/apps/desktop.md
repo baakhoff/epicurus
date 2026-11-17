@@ -112,7 +112,7 @@ host that is not this machine only with the user's explicit confirmation.
 
 | Choice | Where | Why |
 | --- | --- | --- |
-| `contextIsolation`, `sandbox`, no `nodeIntegration` (also not in workers or sub-frames), `webSecurity` on, no insecure content, no `<webview>` | `webPreferences()` in `src/main/main.ts`; `app.enableSandbox()` | the server's page is remote content; it gets nothing a browser tab would not. An ESLint rule refuses turning any of these off. |
+| `contextIsolation`, `sandbox`, no `nodeIntegration` (also not in workers or sub-frames), `webSecurity` on, no insecure content, no `<webview>` | `webPreferences()` in `src/main/main.ts`; `app.enableSandbox()` | the server's page is remote content; it gets nothing a browser tab would not. An ESLint rule refuses `nodeIntegration: true`, `contextIsolation: false` and `sandbox: false`. |
 | A minimal preload | `src/preload/preload.ts` | one frozen marker object for web pages; the IPC calls only on the app's own pages, never `ipcRenderer` itself. |
 | Permissions denied by default | `src/main/permissions.ts` | granted only to the server's own origin: `clipboard-sanitized-write` (the web UI's copy buttons) and `fullscreen` (the HTML fullscreen API). Refused: `notifications` (push cannot work, above), `media` (nothing records audio or video), geolocation, MIDI, HID/serial/USB devices, `clipboard-read`, and every permission any other origin asks for. |
 | No remote module | — | `@electron/remote` is not a dependency; the built-in remote module was removed from Electron years ago. |

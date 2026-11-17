@@ -121,6 +121,22 @@ enable_sign_in() {
   [ "$mode" = "oidc" ] || die "helm upgrade with auth.mode=oidc rendered AUTH_MODE='$mode'"
 }
 
+# Hermarchus (#1016) is off by default in the chart; infra/ci/values-ci.yaml turns it on, so
+# by now `helm install --wait` has already waited for it. This reads the token the chart
+# generated into the `hermarchus` Secret — the same way an operator does — and checks the pod
+# carries the hardening the chart promises.
+enable_hermarchus() {
+  kc rollout status deployment/hermarchus --timeout=300s >/dev/null \
+    || die "the hermarchus Deployment never became ready"
+  HERMARCHUS_TOKEN="$(kc get secret hermarchus -o jsonpath='{.data.token}' | base64 -d)"
+  [ -n "$HERMARCHUS_TOKEN" ] || die "the chart wrote no token into the hermarchus Secret"
+  amt="$(kc get deployment hermarchus \
+    -o jsonpath='{.spec.template.spec.automountServiceAccountToken}')"
+  [ "$amt" = "false" ] || die "hermarchus mounts a service-account token (automount='$amt')"
+  uid="$(kc exec deployment/hermarchus -- id -u 2>/dev/null | tr -d '\r' || true)"
+  [ "$uid" = "10001" ] || die "hermarchus runs as uid '$uid' (expected the non-root 10001)"
+}
+
 dump_diagnostics() {
   log "Diagnostics (k8s smoke failed)"
   kc get pods -o wide 2>&1 || true
@@ -262,6 +278,10 @@ ok "app token is periodic (${token_period}s), so renewal can keep it alive indef
 # ── the runtime-neutral last mile, shared with the Compose gate ────────────────
 smoke_assert
 
+# ── the opt-in agent host: an echo session end to end (#1016) ─────────────────
+smoke_assert_hermarchus
+HERMARCHUS_TOKEN_BEFORE="$HERMARCHUS_TOKEN"
+
 # ── the upgrade path (#919) ───────────────────────────────────────────────────
 # Every boot before this was a fresh `helm install`. Operators upgrade, and the chart
 # defects found so far (OpenBao's DAC_OVERRIDE) were of exactly that class: a thing
@@ -312,6 +332,11 @@ prov="$(http "http://core-app:8080/platform/v1/llm/providers" || true)"
 printf '%s' "$prov" | grep -oE '"alias":"claude"[^}]*' | grep -q '"configured":true' \
   || die "the provider key did not survive a helm upgrade (vault re-initialised, or a new app token?)"
 ok "state survived the upgrade: every module still registered, the stored secret still readable"
+# The chart reads the live Secret back before generating a token (`lookup`), so an upgrade
+# must not rotate it out from under a controller that holds it.
+token_after="$(kc get secret hermarchus -o jsonpath='{.data.token}' | base64 -d)"
+[ "$token_after" = "$HERMARCHUS_TOKEN_BEFORE" ] || die "helm upgrade rotated the hermarchus token"
+ok "the hermarchus token survived the upgrade"
 
 # ── a deployment with no local runtime at all (#962, ADR-0144) ────────────────
 # The mode the chart refused to render until now, and the one the core used to 500 in.

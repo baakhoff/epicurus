@@ -53,7 +53,11 @@ mkdir -p "$SMOKE_MOUNT_DIR"
 chmod 0777 "$SMOKE_MOUNT_DIR"
 printf 'seed\n' > "$SMOKE_MOUNT_DIR/seed.txt"
 BOOT_LOG="$(mktemp)"
-DC="docker compose -f compose.yaml -f infra/ci/compose.ci.yaml --env-file $ENV_FILE"
+# The Hermarchus overlay (#1016) and its CI override ride along on every invocation: the
+# overlay only *adds* a service nothing below starts by name until `enable_hermarchus`, and
+# having it in the project means `down --remove-orphans` and the diagnostics cover it too.
+DC="docker compose -f compose.yaml -f infra/ci/compose.ci.yaml"
+DC="$DC -f services/hermarchus/compose.yaml -f infra/ci/compose.hermarchus.yaml --env-file $ENV_FILE"
 CURL_IMG="curlimages/curl:8.11.1"
 
 DATA_PLANE="openbao postgres valkey nats qdrant minio minio-init"
@@ -127,10 +131,23 @@ enable_sign_in() {
   wait_state core-app
 }
 
+# Hermarchus (#1016) is an opt-in overlay, so the gate brings it up the way an operator does:
+# the overlay file, a token, `up -d hermarchus`. HERMARCHUS_TOKEN is already in the env file.
+enable_hermarchus() {
+  if [ "${SMOKE_SKIP_BUILD:-0}" != "1" ]; then
+    $DC build hermarchus || die "building the hermarchus image failed"
+  fi
+  $DC up -d --no-deps hermarchus >/dev/null 2>&1 \
+    || die "could not start hermarchus from services/hermarchus/compose.yaml"
+  wait_state hermarchus
+  uid="$($DC exec -T hermarchus id -u 2>/dev/null | tr -d '\r' || true)"
+  [ "$uid" = "10001" ] || die "hermarchus runs as uid '$uid' (expected the non-root 10001)"
+}
+
 dump_diagnostics() {
   log "Diagnostics (smoke failed)"
   $DC ps || true
-  for s in openbao openbao-unseal core-app web $EXPECT_MODULES searxng; do
+  for s in openbao openbao-unseal core-app web $EXPECT_MODULES searxng hermarchus; do
     printf '\n--- logs: %s ---\n' "$s"
     $DC logs --tail 40 "$s" 2>&1 || true
   done
@@ -152,11 +169,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ── minimal env (everything else comes from the compose `:-` defaults) ─────────
+# A throwaway bearer token for the Hermarchus phase; the overlay refuses to resolve without one.
+HERMARCHUS_TOKEN="smoke-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
 cat > "$ENV_FILE" <<EOF
 APP_ENV=ci
 LOG_LEVEL=warning
 DEFAULT_TENANT_ID=local
 SMOKE_MOUNT_DIR=$SMOKE_MOUNT_DIR
+HERMARCHUS_TOKEN=$HERMARCHUS_TOKEN
 EOF
 
 log "Smoke project '$COMPOSE_PROJECT_NAME' (network $NET, no host ports)"
@@ -295,6 +315,9 @@ ok "minio-init completed — the default bucket is seeded (#919)"
 
 # ── the runtime-neutral last mile, shared with the Kubernetes gate ─────────────
 smoke_assert
+
+# ── the opt-in agent host: an echo session end to end (#1016) ─────────────────
+smoke_assert_hermarchus
 
 # ── sign-in on, last: the web door closes, module <-> core stays open (#969) ───
 smoke_assert_sign_in

@@ -73,3 +73,17 @@ qdrant:
 openbao:
   persistence:
     size: 1Gi
+
+# Hermarchus, the agent host (#1016) — off in the chart's defaults, ON here so the gate boots
+# it and runs an echo session through it (infra/ci/smoke-assert.sh `smoke_assert_hermarchus`).
+# The token is left to the chart to generate, which is the path an operator takes; the gate
+# reads it back from the `hermarchus` Secret and checks a `helm upgrade` keeps it.
+hermarchus:
+  enabled: true
+  persistence:
+    workspace:
+      size: 1Gi
+    home:
+      size: 1Gi
+    state:
+      size: 1Gi

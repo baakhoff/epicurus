@@ -12,6 +12,28 @@ images to GHCR.
 
 ## [Unreleased]
 
+- **A desktop app for macOS, Windows and Linux** (#1015) — the first step of the client (#1014):
+  `apps/desktop`, an Electron window around the web UI of the server you connect to. The first
+  run asks for the server's address, normalises it (a bare host means `https://`, `http://` for
+  `localhost`; any deep link is cut back to the origin), checks it through
+  `GET /platform/v1/info` — or, when sign-in is on and `/info` answers 401, through
+  `GET /platform/v1/auth/session` — and explains a failure as not reachable, not an epicurus
+  server, or an untrusted certificate; plain `http://` to another machine needs an explicit
+  confirmation. The window keeps the server, the session (a persistent partition, cookies
+  encrypted at rest), its size and position; sign-in and account-connect round trips run in the
+  window, a bar names the host whenever the page is not the server, new-window links open in the
+  system browser, and any non-web navigation is refused. A server that cannot be reached shows a
+  local page with Retry and Change server instead of a blank window. The engine is hardened:
+  context isolation, a sandboxed renderer, no Node in the page, a minimal preload, permissions
+  denied except clipboard writes and fullscreen for the server's own pages, and Electron's
+  production fuses. Installers — macOS dmg and zip for arm64 and x64 (ad-hoc signed, not
+  notarised), a Windows installer, a Linux AppImage and deb — come from a new `Desktop` workflow
+  that also launches the packaged app on all three runners and screenshots it; `ci.yml` gains a
+  `desktop` job (lint, types, unit tests, the launch smoke under xvfb). Web push cannot work in
+  Electron (no push service), so the app marks its window with a read-only
+  `window.epicurusDesktop` and the web UI's push card says so there instead of offering a
+  Subscribe button that fails. Install guide: `docs/user/desktop-app.md`. `desktop` 0.1.0 (new)
+  · `web` 0.153.0→0.154.0 (MINOR).
 - **Web search through OpenRouter, once an OpenRouter key is stored** (#984) — web search ran
   only through the bundled SearXNG, whose engines are blocked or rate-limited on many home-lab
   IPs (#920, #936). The websearch module's settings on the Modules page now have a **Search

@@ -442,6 +442,14 @@ the browser's own `.unsubscribe()`; the matching backend row is left for the sen
 existing prune-on-Gone (404/410) cleanup rather than deleted eagerly (the browser object
 carries no backend row id, only the endpoint).
 
+**In the desktop app** (#1015): the [desktop shell](../apps/desktop.md) marks its window with a
+read-only `window.epicurusDesktop` whose `capabilities.webPush` is `false` — Electron exposes
+`PushManager` but has no push service (`subscribe()` rejects "push service not available") and the
+app refuses the notification permission. `isDesktopAppWithoutPush()` reads it; `isPushSupported()`
+then answers `false`, and the card's this-device control says push is not available in the desktop
+app (subscribe from a browser or phone) instead of offering a Subscribe button. Any other value, or
+no marker, leaves the browser checks in charge.
+
 **Settings → Push notifications** (`PushNotificationsCard.tsx`): this-device subscribe/
 unsubscribe, a list of every subscribed device (any row removable), one Switch per
 [known category](../reference/notifications.md#pushprefs), a quiet-hours editor (`<input

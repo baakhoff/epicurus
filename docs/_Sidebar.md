@@ -8,6 +8,7 @@
 - [Configuration](user/configuration.md)
 - [Running without Google](user/running-without-google.md)
 - [Export & import](user/export-import.md)
+- [The desktop app](user/desktop-app.md)
 
 **Services & Modules**
 
@@ -23,6 +24,10 @@
 - [notes](services/notes.md)
 - [messaging](services/messaging.md)
 - [echo](services/echo.md)
+
+**Apps**
+
+- [desktop — the app shell](apps/desktop.md)
 
 **API Reference**
 

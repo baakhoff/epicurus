@@ -5,6 +5,12 @@ conventions: register tools, declare the events the module emits/consumes, gener
 the module manifest, and expose the HTTP (streamable-http) app to serve over the
 internal Docker network. The contract is local-only.
 
+Every tool runs with the caller's tenant bound (#917): the core names it in the
+``x-epicurus-tenant`` header of each MCP request, and the server binds it with
+:func:`~epicurus_core.tenancy.set_current_tenant` around the tool, so a tool (and the
+``PlatformClient`` it calls) resolves the tenant with
+:func:`~epicurus_core.tenancy.current_tenant` and never has to parse a header itself.
+
 Modules should reach the SDK **through this wrapper** — :meth:`EpicurusModule.tool`
 to register, :meth:`EpicurusModule.call_tool` to invoke in-process (tests), and the
 re-exported :class:`ToolError` for failure assertions — so an SDK API move lands
@@ -20,11 +26,11 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
-from mcp.types import CallToolResult, ContentBlock
+from mcp.types import CallToolResult, ContentBlock, InputRequiredResult
 from starlette.applications import Starlette
 
 from epicurus_core.logging import get_logger
@@ -42,6 +48,13 @@ from epicurus_core.manifest import (
     WritesDocument,
 )
 from epicurus_core.platform_client import PlatformError
+from epicurus_core.tenancy import (
+    TENANT_HEADER,
+    TenantError,
+    reset_current_tenant,
+    set_current_tenant,
+    validate_tenant_id,
+)
 
 __all__ = ["EpicurusModule", "ToolError", "add_manifest_route"]
 
@@ -150,6 +163,71 @@ def _carry_tool_errors_to_the_model(fn: Callable[..., Any]) -> Callable[..., Any
     return sync_wrapper
 
 
+def _requested_tenant(context: Context[Any, Any] | None) -> str | None:
+    """The tenant the core named for this tool call, or ``None`` when it named none (#917).
+
+    Read from the **HTTP request that carried this very call** — the SDK attaches each
+    message's own Starlette request to its ``ServerRequestContext`` — never from a ContextVar a
+    middleware set. On a stateful streamable-HTTP session the tool runs in the session's
+    long-lived task, which a request-scoped ContextVar does not reach; the per-message request
+    does, on the legacy handshake and the stateless 2026 protocol alike.
+
+    ``None`` for an in-process call (:meth:`EpicurusModule.call_tool`, no request), for a
+    request without the header (a core older than #917), and for an empty header value — the
+    same "unnamed → default" rule the core's own routes apply to ``tenant_id``.
+
+    Raises:
+        ToolError: the header is present but not a well-formed tenant id. Refused rather than
+            defaulted: a malformed name must never become a silent read of the default
+            tenant's data (the #836 / ADR-0137 rule).
+    """
+    if context is None:
+        return None
+    try:
+        request = context.request_context.request
+    except ValueError:  # a Context built outside a request
+        return None
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return None
+    value = headers.get(TENANT_HEADER)
+    if not value:
+        return None
+    try:
+        return validate_tenant_id(value)
+    except TenantError as exc:
+        logger.warning("tool call refused: malformed tenant header", header=TENANT_HEADER)
+        raise ToolError(f"refused: {exc}") from exc
+
+
+class _TenantBindingServer(MCPServer[Any]):
+    """``MCPServer`` that binds the caller's tenant around every tool it runs (#917).
+
+    ``call_tool`` is the one funnel every dispatch passes through — the wire handler
+    (``_handle_call_tool``, legacy and 2026 protocol alike) and the in-process
+    :meth:`EpicurusModule.call_tool` — so binding here covers every tool of every module with
+    nothing for a module to write. The binding is reset when the tool returns or raises, so it
+    never outlives the call: the next call on the same session starts from whatever it names.
+    """
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[Any, Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        tenant = _requested_tenant(context)
+        if tenant is None:
+            # Unnamed: leave the context as it is — unbound in a served module, so every tool
+            # falls back to its deployment default exactly as before #917.
+            return await super().call_tool(name, arguments, context)
+        token = set_current_tenant(tenant)
+        try:
+            return await super().call_tool(name, arguments, context)
+        finally:
+            reset_current_tenant(token)
+
+
 class EpicurusModule:
     """A sidecar module: MCP tools exposed to the agent, plus declared events.
 
@@ -208,7 +286,9 @@ class EpicurusModule:
         # mcp 2.0 moved every transport parameter off the server constructor and onto the
         # app/run methods, so only the identity lives here — see ``http_app()`` for the
         # path and transport-security settings that used to be constructor arguments.
-        self._mcp = MCPServer(name, instructions=instructions)
+        # The tenant-binding subclass (#917): every tool call runs with the tenant the core
+        # named in the ``x-epicurus-tenant`` header bound via ``set_current_tenant``.
+        self._mcp = _TenantBindingServer(name, instructions=instructions)
         self._events_emitted: list[EventSpec] = []
         self._events_consumed: list[EventSpec] = []
         # Document-pane annotations by tool name (#541, ADR-0100) — folded into the ToolSpecs
@@ -348,7 +428,7 @@ class EpicurusModule:
         )
 
     async def call_tool(
-        self, name: str, arguments: dict[str, Any]
+        self, name: str, arguments: dict[str, Any], *, tenant: str | None = None
     ) -> tuple[list[ContentBlock], Any]:
         """Invoke a registered tool in-process and return ``(content, structured_content)``.
 
@@ -358,12 +438,23 @@ class EpicurusModule:
         this wrapper keeps the pair so an SDK reshape lands here once, not in every
         module's tests.
 
+        ``tenant`` binds a tenant around the call exactly as the ``x-epicurus-tenant`` header
+        does over the wire (#917); omitted, the call runs in the caller's context unchanged.
+
         Raises:
             ToolError: the tool does not exist, or its function raised — exactly the
                 SDK's own in-process behavior (over the wire the same failure travels
                 as an ``is_error`` result instead).
+            TenantError: ``tenant`` is not a well-formed tenant id.
         """
-        result = await self._mcp.call_tool(name, arguments)
+        if tenant is not None:
+            token = set_current_tenant(tenant)
+            try:
+                result = await self._mcp.call_tool(name, arguments)
+            finally:
+                reset_current_tenant(token)
+        else:
+            result = await self._mcp.call_tool(name, arguments)
         if not isinstance(result, CallToolResult):
             # ``InputRequiredResult`` — a tool with SDK-resolved parameters asking the
             # client for input mid-call. No epicurus tool declares those (the agent is
@@ -373,6 +464,10 @@ class EpicurusModule:
 
     def http_app(self) -> Starlette:
         """ASGI app serving MCP over streamable HTTP (internal Docker network only).
+
+        Every ``tools/call`` it serves binds the tenant named by the request's
+        ``x-epicurus-tenant`` header for the duration of the tool (#917) — see
+        :class:`_TenantBindingServer`.
 
         Also the point where the session manager is created: a service's lifespan runs
         ``module.mcp.session_manager.run()``, which requires this to have been called

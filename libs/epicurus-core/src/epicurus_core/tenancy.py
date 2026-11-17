@@ -12,7 +12,9 @@ import re
 from contextvars import ContextVar, Token
 
 __all__ = [
+    "TENANT_HEADER",
     "TenantError",
+    "bound_tenant",
     "current_tenant",
     "is_valid_tenant_id",
     "reset_current_tenant",
@@ -28,6 +30,13 @@ __all__ = [
 # Deliberately strict so one id is safe across NATS subjects, Qdrant collection
 # names, object-store buckets, and OpenBao secret paths without escaping.
 _TENANT_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+#: The HTTP header that names the tenant a core → module request acts for. The core stamps it
+#: on every module MCP call (``McpHost.call``) and on the chat-upload sink; ``EpicurusModule``
+#: binds it with :func:`set_current_tenant` around the tool it dispatches. The module↔core
+#: contract runs on the internal network only (constraint #7), so a module trusts the core's
+#: header the way it trusts every other byte the core sends it.
+TENANT_HEADER = "x-epicurus-tenant"
 
 _current_tenant: ContextVar[str | None] = ContextVar("epicurus_current_tenant", default=None)
 
@@ -67,6 +76,16 @@ def current_tenant() -> str:
     if tenant is None:
         raise TenantError("no current tenant is set in this context")
     return tenant
+
+
+def bound_tenant() -> str | None:
+    """Return the tenant bound to this context, or ``None`` when none is bound.
+
+    The non-raising twin of :func:`current_tenant`, for a caller with a fallback of its own —
+    :class:`~epicurus_core.platform_client.PlatformClient` falls back to the tenant it was
+    built with, a module's tool to its deployment default.
+    """
+    return _current_tenant.get()
 
 
 def _resolve(tenant_id: str | None) -> str:

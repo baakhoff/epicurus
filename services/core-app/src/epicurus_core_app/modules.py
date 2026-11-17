@@ -28,8 +28,10 @@ from epicurus_core import (
     SecretError,
     SecretStore,
     SideEffect,
+    TenantError,
     WritesDocument,
     get_logger,
+    validate_tenant_id,
 )
 from epicurus_core_app.agent.mcp_host import McpHost, ModuleUnreachableError, ToolCallError
 from epicurus_core_app.container_control import (
@@ -680,26 +682,30 @@ class ModuleRegistry:
             raise HTTPException(status_code=400, detail=f"unknown model slot(s): {sorted(unknown)}")
         await self._prefs.set_models(self._tenant, name, chosen)
 
-    async def model_for_slot(self, name: str, slot: str) -> str | None:
+    async def model_for_slot(
+        self, name: str, slot: str, *, tenant: str | None = None
+    ) -> str | None:
         """The chosen model for *name*'s *slot*, or ``None`` to use the core default (#128).
 
         Reads the stored choice directly (no manifest round-trip) so a module can resolve
         its own slot cheaply; an unset slot or unknown module yields ``None`` → core default.
+        *tenant* is the tenant the calling module acts for (#917); ``None`` → this registry's.
         """
-        models = await self._prefs.get_models(self._tenant, name)
+        models = await self._prefs.get_models(tenant or self._tenant, name)
         return models.get(slot)
 
-    async def get_suggestions_enabled(self, name: str) -> bool:
+    async def get_suggestions_enabled(self, name: str, *, tenant: str | None = None) -> bool:
         """Whether agent changes to *name* go through review (default True) (#KB-refactor).
 
         Read directly from Postgres (no manifest round-trip, like ``model_for_slot``) so a
         module can resolve its own setting cheaply via ``PlatformClient`` to decide whether to
         stage a suggestion or apply the change directly. 403 for the reserved pseudo-module,
         symmetric with :meth:`set_suggestions_enabled` — there is no toggle state to report
-        when review can never be turned off.
+        when review can never be turned off. *tenant* is the tenant the calling module acts
+        for (#917); ``None`` → this registry's.
         """
         self._reject_core_management(name, "queried for its review-enabled status")
-        return await self._prefs.get_suggestions_enabled(self._tenant, name)
+        return await self._prefs.get_suggestions_enabled(tenant or self._tenant, name)
 
     async def set_suggestions_enabled(self, name: str, enabled: bool) -> None:
         """Persist whether *name*'s agent changes go through review. 404 if unknown (operator).
@@ -759,14 +765,15 @@ class ModuleRegistry:
                 )
         await self._prefs.set_collections(self._tenant, name, prefs)
 
-    async def collection_prefs(self, name: str) -> CollectionPrefs:
+    async def collection_prefs(self, name: str, *, tenant: str | None = None) -> CollectionPrefs:
         """The stored ``{enabled, active}`` a module reads to route its own ops (ADR-0030).
 
         Read directly from Postgres (no manifest round-trip, like ``model_for_slot``) so a
         module can resolve its selection cheaply via ``PlatformClient.get_collections``; an
         unset module yields empty prefs → the module falls back to its local default.
+        *tenant* is the tenant the calling module acts for (#917); ``None`` → this registry's.
         """
-        return await self._prefs.get_collections(self._tenant, name)
+        return await self._prefs.get_collections(tenant or self._tenant, name)
 
     async def autoconnect_collections(self, provider: str) -> list[str]:
         """Seed empty collection selections for modules using *provider*, on connect (#209).
@@ -897,10 +904,14 @@ class ModuleRegistry:
                 status_code=502, detail=f"{name} action failed: module unreachable"
             ) from exc
 
-    async def get_config(self, name: str) -> dict[str, Any]:
-        """The module's stored config values (empty if never saved)."""
+    async def get_config(self, name: str, *, tenant: str | None = None) -> dict[str, Any]:
+        """The module's stored config values (empty if never saved).
+
+        *tenant* is the tenant the caller acts for (#917) — a module reading its own settings
+        through ``PlatformClient.get_module_config`` names it; ``None`` → this registry's.
+        """
         try:
-            return await self._secrets.get(f"modules/{name}/config", self._tenant)
+            return await self._secrets.get(f"modules/{name}/config", tenant or self._tenant)
         except SecretError:
             return {}
 
@@ -1699,6 +1710,21 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
     """The module surface the web shell renders (list, config, actions)."""
     router = APIRouter(prefix="/platform/v1/modules", tags=["modules"])
 
+    def _tenant(tenant_id: str | None) -> str | None:
+        """The caller-named tenant for a module-facing read (#917), validated; ``None`` if unnamed.
+
+        The four reads a module makes through ``PlatformClient`` (config, a model slot, the
+        review switch, collection prefs) answer for the tenant the module names — the one the
+        core bound around the tool call that is asking. Unnamed falls back to the registry's
+        tenant; malformed is a **400**, the rule ``files_routes._tenant`` applies.
+        """
+        if not tenant_id:
+            return None
+        try:
+            return validate_tenant_id(tenant_id)
+        except TenantError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @router.get("", response_model=list[ModuleSnapshot])
     async def list_modules(refresh: bool = Query(False)) -> list[ModuleSnapshot]:
         # Drop tombstoned modules — a removed module is gone, not merely disabled (#127).
@@ -1731,8 +1757,8 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         return registry.docker_status()
 
     @router.get("/{name}/config")
-    async def get_config(name: str) -> dict[str, Any]:
-        return await registry.get_config(name)
+    async def get_config(name: str, tenant_id: str | None = Query(None)) -> dict[str, Any]:
+        return await registry.get_config(name, tenant=_tenant(tenant_id))
 
     @router.put("/{name}/config")
     async def set_config(name: str, values: dict[str, Any]) -> dict[str, str]:
@@ -1771,14 +1797,18 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         return {"status": "ok"}
 
     @router.get("/{name}/models/{slot}")
-    async def get_module_model_slot(name: str, slot: str) -> dict[str, str | None]:
+    async def get_module_model_slot(
+        name: str, slot: str, tenant_id: str | None = Query(None)
+    ) -> dict[str, str | None]:
         """Resolve one slot to its chosen model, or ``null`` for the core default (#128)."""
-        return {"model": await registry.model_for_slot(name, slot)}
+        return {"model": await registry.model_for_slot(name, slot, tenant=_tenant(tenant_id))}
 
     @router.get("/{name}/suggestions-enabled")
-    async def get_module_suggestions_enabled(name: str) -> dict[str, bool]:
+    async def get_module_suggestions_enabled(
+        name: str, tenant_id: str | None = Query(None)
+    ) -> dict[str, bool]:
         """Whether agent changes to the module go through review (default on, #KB-refactor)."""
-        return {"enabled": await registry.get_suggestions_enabled(name)}
+        return {"enabled": await registry.get_suggestions_enabled(name, tenant=_tenant(tenant_id))}
 
     @router.put("/{name}/suggestions-enabled")
     async def set_module_suggestions_enabled(
@@ -1800,9 +1830,11 @@ def create_modules_router(registry: ModuleRegistry) -> APIRouter:
         return {"status": "ok"}
 
     @router.get("/{name}/collections/prefs", response_model=CollectionPrefs)
-    async def get_module_collection_prefs(name: str) -> CollectionPrefs:
+    async def get_module_collection_prefs(
+        name: str, tenant_id: str | None = Query(None)
+    ) -> CollectionPrefs:
         """The stored {enabled, active} a module reads to route its own ops (ADR-0030)."""
-        return await registry.collection_prefs(name)
+        return await registry.collection_prefs(name, tenant=_tenant(tenant_id))
 
     @router.post("/{name}/tools/{tool}/enabled")
     async def set_tool_enabled(name: str, tool: str, body: ToolEnabledUpdate) -> dict[str, str]:

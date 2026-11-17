@@ -122,6 +122,7 @@ runs alongside the pods that are waiting for it.
 | `minio` | StatefulSet + PVC | On by default (as under Compose) — the `storage` module's object store. Plus a bucket-seeding Job. |
 | `ollama` | StatefulSet + PVC | Optional (on by default), CPU by default, GPU hooks. |
 | `searxng` | Deployment | Its `settings.yml` as a ConfigMap. |
+| `hermarchus` | Deployment (`replicas: 1`, `Recreate`) + 3 PVCs + token Secret | **Off by default** (`hermarchus.enabled`). The agent host (#1016); talks to nothing in the release. |
 
 Every workload carries `app.kubernetes.io/part-of: epicurus` and
 `app.kubernetes.io/component: <name>`. That pair is a contract, not decoration:
@@ -389,7 +390,8 @@ belongs. If you swap the controller, port these four settings to its dialect.
 Four ingress-only policies: default-deny for everything labelled
 `part-of=epicurus`, then `web` from anywhere (an ingress controller lives in its
 own namespace), `core-app` from the release's own pods, each module from
-`core-app` alone, and the data plane from the release's own pods. Egress is
+`core-app` alone, the data plane from the release's own pods, and — when it is
+enabled — `hermarchus` from `hermarchus.ingressFrom` (default: the release's own pods). Egress is
 deliberately unrestricted — websearch, Ollama model pulls and hosted LLM providers
 all need it, and a default-deny egress is a footgun that would also take DNS with
 it.
@@ -408,6 +410,45 @@ Only `core-app` and the modules serve `/metrics`; they carry
 `epicurus.io/metrics: "true"` and the PodMonitor selects on it. The web shell is
 nginx and the data plane speaks its own protocols. The chart re-ships no
 Prometheus, no rules and no dashboards — that is phase 2 (#896).
+
+### `hermarchus` — the agent host
+
+[Hermarchus](../services/hermarchus.md) (#1016) runs agent sessions in its own pod, bound to one
+profile, driven over HTTP by whoever holds its bearer token. **Off by default**; it owns nothing
+in the release and talks to nothing in it, and the release talks to nothing in it.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `hermarchus.enabled` | `false` | Render the Deployment, Service, PVCs and token Secret. |
+| `hermarchus.profile` | `""` | Bound profile; blank = `defaultTenantId`. |
+| `hermarchus.token` | `""` | Bearer token (≥ 16 characters, refused at render time otherwise — pass it with `--set-string`). Blank = keep the one in the live `hermarchus` Secret, else generate 48 random characters. |
+| `hermarchus.existingSecret` | `""` | Use your own Secret (key `token`) instead; the chart then renders none. |
+| `hermarchus.maxSessions` | `10` | `HERMARCHUS_MAX_SESSIONS`. |
+| `hermarchus.unattended` | `false` | Default for new sessions: reject unanswered permission requests after 60 s. |
+| `hermarchus.installKinds` | `""` | Agent kinds to install into the home volume at start (e.g. `claude-code,codex`). |
+| `hermarchus.extraEnv` | `{}` | More `HERMARCHUS_*` settings (see the [reference](../reference/hermarchus.md#configuration)). |
+| `hermarchus.persistence.{workspace,home,state}` | `20Gi` / `10Gi` / `1Gi` | One ReadWriteOnce claim each (`size`, `storageClass`, `existingClaim`). |
+| `hermarchus.resources` | `100m`/`256Mi` requests, `4Gi` memory limit | Agent programs run inside this pod — size it for them. |
+| `hermarchus.podSecurityContext` | non-root uid/gid/fsGroup `10001`, `RuntimeDefault` seccomp | `fsGroup` is what makes fresh claims writable by the service user. |
+| `hermarchus.securityContext` | no privilege escalation, all capabilities dropped | |
+| `hermarchus.ingressFrom` | `[]` | With `networkPolicy.enabled`: who may reach port 8080; empty = the release's own pods. |
+| `hermarchus.image`, `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | — | As for the other workloads. |
+
+The pod mounts **no service-account token** (`automountServiceAccountToken: false`) — it needs no
+Kubernetes API — and is a ClusterIP Service only; no Ingress ever points at it. Reach it with a
+port-forward, and read the generated token back from its Secret:
+
+```bash
+helm upgrade --install epicurus oci://ghcr.io/baakhoff/charts/epicurus -n epicurus \
+  --reuse-values --set hermarchus.enabled=true
+kubectl -n epicurus get secret hermarchus -o jsonpath='{.data.token}' | base64 -d; echo
+kubectl -n epicurus port-forward svc/hermarchus 8094:8080
+```
+
+Install an agent program and sign in to it inside the pod (`kubectl exec -it deploy/hermarchus --
+bash`); both land on the `hermarchus-home` claim and survive restarts and upgrades. The
+`k8s-smoke` gate boots this block (`infra/ci/values-ci.yaml`) and runs an `echo` session through
+it, and checks a `helm upgrade` keeps the token.
 
 ### Data plane
 

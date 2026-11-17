@@ -232,6 +232,9 @@ function createWindow(): void {
   if (bounds.maximized) win.maximize();
   win.show();
   page.webContents.focus();
+  // Record the opening bounds too: a window that is never moved or resized, and is closed by a
+  // path that skips the close event, still comes back where it opened.
+  scheduleSaveWindow();
 
   win.on("resize", () => {
     layout();

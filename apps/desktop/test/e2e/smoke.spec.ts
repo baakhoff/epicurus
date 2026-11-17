@@ -175,8 +175,11 @@ test("after a restart the app is still connected, with its session", async () =>
   app = await launchApp(userDataDir);
   const page = await app.page((u) => u.startsWith(server.origin));
   await expect(page.locator("#session")).toHaveText("session: restored");
+  // The window state is recorded (the restore logic itself is unit-tested in windowState.test.ts;
+  // the DevTools protocol cannot resize an Electron window to prove a round trip here).
   const settings = readSettings(userDataDir);
   expect(settings?.window).toMatchObject({ maximized: false });
+  expect((settings?.window as { width: number }).width).toBeGreaterThanOrEqual(480);
 });
 
 test("an unreachable server shows Retry and Change server, and Retry recovers", async () => {

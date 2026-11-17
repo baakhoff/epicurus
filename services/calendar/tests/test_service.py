@@ -2195,7 +2195,16 @@ async def test_calendar_find_free_slots_reflect_operator_timezone(
     result = _extract(structured)
     assert isinstance(result, list)
     assert len(result) >= 1
-    assert all("+02:00" in slot["start"] and "+02:00" in slot["end"] for slot in result)
+    # The expected offset is the zone's own at each slot's instant (it is +01:00 in winter,
+    # +02:00 in summer), so the test does not depend on the date it runs. A UTC answer
+    # would carry +00:00, which Belgrade never has, and fail this.
+    belgrade = ZoneInfo("Europe/Belgrade")
+    for slot in result:
+        for key in ("start", "end"):
+            moment = datetime.fromisoformat(slot[key])
+            expected = moment.astimezone(belgrade).utcoffset()
+            assert expected is not None and expected != timedelta(0)
+            assert moment.utcoffset() == expected, slot
 
 
 # ── Recurring series timezone anchor threaded through the tools (#446) ─────────

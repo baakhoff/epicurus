@@ -39,6 +39,7 @@ from epicurus_core.contracts import (
 )
 from epicurus_core.files import FileEntry
 from epicurus_core.logging import get_logger
+from epicurus_core.tenancy import bound_tenant, validate_tenant_id
 
 __all__ = [
     "ModuleConfigCache",
@@ -93,22 +94,58 @@ def _platform_error(resp: httpx.Response) -> PlatformError:
 class PlatformClient:
     """Typed HTTP client for the module → core platform API (``/platform/v1``).
 
-    Modules instantiate one client per service, scoped to their tenant.  The
-    client never holds provider credentials — all inference requests are
-    proxied through the core's LLM gateway.
+    Modules instantiate one client per service.  The client never holds provider
+    credentials — all inference requests are proxied through the core's LLM gateway.
+
+    **Which tenant a call acts for is resolved per call** (#917), in this order:
+
+    1. the tenant the client was **pinned** to with :meth:`for_tenant`;
+    2. else the tenant **bound to the calling context** — inside a tool call that is the tenant
+       the core named for the call (``EpicurusModule`` binds it), so a module acting for
+       tenant X reaches tenant X's data in the core with no code of its own;
+    3. else the ``tenant_id`` the client was built with — the deployment default, which is what
+       a background job (an indexer, a sync loop) with no call in flight acts for.
 
     Args:
         base_url: Internal base URL of the core service, e.g.
             ``http://core:8080``.
-        tenant_id: The tenant this module acts on behalf of.
+        tenant_id: The fallback tenant — the one a call acts for when neither a pin nor a
+            bound context names another.
     """
 
     def __init__(self, base_url: str, tenant_id: str, *, module: str | None = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._tenant_id = tenant_id
+        # Set only by ``for_tenant``: a pinned client ignores the calling context.
+        self._pinned: str | None = None
         # The module's own name — needed only by ``get_module_model`` (#128). Callers that
         # use embed / chat / oauth need not set it.
         self._module = module
+
+    @property
+    def tenant_id(self) -> str:
+        """The tenant the next call acts for: the pin, else the bound context, else the default.
+
+        Resolved on every read, so the same client serves two concurrent tool calls for two
+        tenants, each under its own (each runs in its own context).
+        """
+        if self._pinned is not None:
+            return self._pinned
+        bound = bound_tenant()
+        return bound if bound is not None else self._tenant_id
+
+    def for_tenant(self, tenant_id: str) -> PlatformClient:
+        """A copy of this client pinned to *tenant_id*, whatever the calling context binds.
+
+        For code that acts for a tenant it holds explicitly rather than through the context —
+        a fan-out over several tenants, say. The original client is unchanged.
+
+        Raises:
+            TenantError: *tenant_id* is not a well-formed tenant id.
+        """
+        pinned = PlatformClient(self._base_url, self._tenant_id, module=self._module)
+        pinned._pinned = validate_tenant_id(tenant_id)
+        return pinned
 
     async def embed(
         self,
@@ -124,7 +161,7 @@ class PlatformClient:
         Raises:
             httpx.HTTPStatusError: if the core returns a non-2xx status.
         """
-        payload: dict[str, Any] = {"texts": texts, "tenant_id": self._tenant_id}
+        payload: dict[str, Any] = {"texts": texts, "tenant_id": self.tenant_id}
         if model is not None:
             payload["model"] = model
         async with httpx.AsyncClient(base_url=self._base_url, timeout=60.0) as http:
@@ -155,7 +192,7 @@ class PlatformClient:
         """
         payload: dict[str, Any] = {
             "messages": [m.model_dump(exclude_none=True) for m in messages],
-            "tenant_id": self._tenant_id,
+            "tenant_id": self.tenant_id,
         }
         if model is not None:
             payload["model"] = model
@@ -182,7 +219,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 f"/platform/v1/oauth/{provider}/token",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             return str(resp.json()["access_token"])
@@ -205,7 +242,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 f"/platform/v1/modules/{self._module}/models/{slot}",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             model = resp.json().get("model")
@@ -223,7 +260,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 f"/platform/v1/modules/{self._module}/suggestions-enabled",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             return bool(resp.json().get("enabled", True))
@@ -239,7 +276,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 "/platform/v1/timezone",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             return str(resp.json()["timezone"])
@@ -257,7 +294,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 f"/platform/v1/modules/{self._module}/collections/prefs",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             return CollectionPrefs.model_validate(resp.json())
@@ -279,7 +316,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=10.0) as http:
             resp = await http.get(
                 f"/platform/v1/modules/{self._module}/config",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             body = resp.json()
@@ -302,7 +339,7 @@ class PlatformClient:
         payload: dict[str, Any] = {
             "query": query,
             "max_results": max_results,
-            "tenant_id": self._tenant_id,
+            "tenant_id": self.tenant_id,
         }
         # A hosted search is a model call plus a search round trip; give it the chat budget.
         async with httpx.AsyncClient(base_url=self._base_url, timeout=120.0) as http:
@@ -320,7 +357,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 "/platform/v1/modules",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             return resp.json()  # type: ignore[no-any-return]
@@ -341,7 +378,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 f"/platform/v1/modules/{name}/docs",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             return resp.json()["documents"]  # type: ignore[no-any-return]
@@ -351,7 +388,7 @@ class PlatformClient:
     # doing their own I/O. The core owns the backend (local-FS ↔ S3) and tenant scoping.
 
     def _files_params(self, path: str) -> dict[str, str]:
-        return {"path": path, "tenant_id": self._tenant_id}
+        return {"path": path, "tenant_id": self.tenant_id}
 
     async def files_list(self, path: str = "") -> list[FileEntry]:
         """List the direct children of *path* in the tenant file space (empty = root)."""
@@ -369,7 +406,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.get(
                 "/platform/v1/files/search",
-                params={"q": query, "limit": str(limit), "tenant_id": self._tenant_id},
+                params={"q": query, "limit": str(limit), "tenant_id": self.tenant_id},
             )
             resp.raise_for_status()
             return [FileEntry.model_validate(e) for e in resp.json()["entries"]]
@@ -429,7 +466,7 @@ class PlatformClient:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as http:
             resp = await http.post(
                 "/platform/v1/files/move",
-                params={"tenant_id": self._tenant_id},
+                params={"tenant_id": self.tenant_id},
                 json={"src": src, "dst": dst},
             )
             resp.raise_for_status()
@@ -445,6 +482,11 @@ class ModuleConfigCache:
     reached the last good answer is kept (or ``{}`` if there has never been one) and the
     failure is logged once per outage, so a core restart never turns into a failing tool — the
     module falls back to its env defaults, which is what ``{}`` means to every caller.
+
+    Settings are stored per tenant, so the cache is **kept per tenant** (#917): each read is
+    answered from the entry of the tenant the client resolves for this call
+    (:attr:`PlatformClient.tenant_id`), and one tenant's settings — or its last-known-good
+    fallback — are never served to another.
     """
 
     def __init__(
@@ -457,15 +499,17 @@ class ModuleConfigCache:
         self._client = client
         self._ttl_s = ttl_s
         self._clock = clock
-        self._values: dict[str, Any] = {}
-        self._fetched_at: float | None = None
+        # tenant -> (values, fetched_at); a tenant never fetched has no entry.
+        self._entries: dict[str, tuple[dict[str, Any], float]] = {}
         self._failing = False
 
     async def get(self) -> dict[str, Any]:
-        """The stored settings — fresh within ``ttl_s``, else re-read (last-good on failure)."""
+        """The calling tenant's settings — fresh within ``ttl_s``, else re-read (last-good)."""
+        tenant = self._client.tenant_id
         now = self._clock()
-        if self._fetched_at is not None and now - self._fetched_at < self._ttl_s:
-            return dict(self._values)
+        entry = self._entries.get(tenant)
+        if entry is not None and now - entry[1] < self._ttl_s:
+            return dict(entry[0])
         try:
             values = await self._client.get_module_config()
         except httpx.HTTPError as exc:
@@ -473,15 +517,14 @@ class ModuleConfigCache:
                 get_logger(__name__).warning(
                     "could not read the module's stored settings; using the last known",
                     error=str(exc),
-                    have_last_known=self._fetched_at is not None,
+                    have_last_known=entry is not None,
                 )
             self._failing = True
-            return dict(self._values)
+            return dict(entry[0]) if entry is not None else {}
         self._failing = False
-        self._values = values
-        self._fetched_at = now
+        self._entries[tenant] = (values, now)
         return dict(values)
 
     def invalidate(self) -> None:
-        """Forget the cached answer so the next :meth:`get` asks the core."""
-        self._fetched_at = None
+        """Forget every cached answer so the next :meth:`get` asks the core."""
+        self._entries.clear()

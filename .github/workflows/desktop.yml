@@ -120,6 +120,8 @@ jobs:
         run: |
           # Ubuntu 24.04 forbids the unprivileged user namespaces Chromium's sandbox needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # ImageMagick's `import` takes the whole-screen screenshot of the xvfb display.
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends imagemagick
           image="$(ls "$PWD"/release/Epicurus-*-linux-x86_64.AppImage)"
           chmod +x "$image"
           npx @electron/fuses read --app release/linux-unpacked/epicurus

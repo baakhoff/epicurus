@@ -1,0 +1,17 @@
+# Smoke / CI override for the Hermarchus overlay (#1016) — layered after compose.yaml,
+# infra/ci/compose.ci.yaml and services/hermarchus/compose.yaml by infra/ci/smoke.sh.
+#
+# It lives apart from compose.ci.yaml because Hermarchus is not in the default stack: a
+# `hermarchus:` entry there would define a half-service (ports only, no image) every time the
+# gate runs without the overlay. Same job as compose.ci.yaml for this one service: no host
+# port, so the gate cannot collide with a dev stack.
+#
+# Its network gets a fixed name so the gate's curl container can join it (the gate has no host
+# port to go through), and so the gate can prove the agent host cannot reach the stack.
+services:
+  hermarchus:
+    ports: !reset []
+
+networks:
+  hermarchus:
+    name: ${COMPOSE_PROJECT_NAME:-epicurus-ci}-hermarchus

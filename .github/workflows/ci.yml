@@ -194,6 +194,32 @@ jobs:
           fi
           echo "the hosted-only overlay resolves with no local runtime"
 
+      # Hermarchus, the agent host (#1016), is an opt-in overlay. Three things must hold:
+      # the default stack never contains it (wave 23's profile mistake, inverted), the
+      # overlay resolves with a token and binds loopback on named volumes, and it refuses to
+      # resolve at all without one — the same refusal the service makes at startup.
+      - name: Validate the Hermarchus overlay (opt-in, token required, loopback)
+        run: |
+          if docker compose -f compose.yaml config | grep -qE '^  hermarchus:'; then
+            echo "the default stack starts hermarchus — it must stay an opt-in overlay"; exit 1
+          fi
+          set -- -f compose.yaml -f services/hermarchus/compose.yaml
+          if docker compose "$@" config -q 2>err.txt; then
+            echo "the overlay resolved without HERMARCHUS_TOKEN"; exit 1
+          fi
+          grep -q 'HERMARCHUS_TOKEN' err.txt || { echo "refusal did not name the token:"; cat err.txt; exit 1; }
+          rendered="$(HERMARCHUS_TOKEN=ci-token-0123456789abcdef docker compose "$@" config)"
+          printf '%s' "$rendered" | grep -qE '^  hermarchus:' || { echo "no hermarchus service"; exit 1; }
+          printf '%s' "$rendered" | grep -q 'host_ip: 127.0.0.1' || { echo "not loopback-bound"; exit 1; }
+          printf '%s' "$rendered" | grep -qE 'published: "?8094"?$' || { echo "not on 8094"; exit 1; }
+          for v in hermarchus-workspace hermarchus-home hermarchus-state; do
+            printf '%s' "$rendered" | grep -q "source: $v" || { echo "volume $v missing"; exit 1; }
+          done
+          HERMARCHUS_TOKEN=ci-token-0123456789abcdef docker compose "$@" config --format json \
+            | jq -e '.services.hermarchus.networks | keys == ["hermarchus"]' >/dev/null \
+            || { echo "hermarchus must sit on its own network, not the stack's"; exit 1; }
+          echo "the Hermarchus overlay is opt-in, needs a token, binds loopback, and is off the stack's network"
+
   # The Helm chart gets the same treatment the compose stack does: rendered, then
   # checked. `helm lint` catches template errors, `helm template` proves the branches
   # render at all, and `kubeconform -strict` validates the result against the real
@@ -330,6 +356,31 @@ jobs:
           grep -q 'no admission rule' err.txt \
             || { echo "the refusal did not name the missing rule:"; cat err.txt; exit 1; }
           echo "the guard refuses a sign-in with no admission rule"
+
+      # Hermarchus (#1016): off by default, so the renders above never reach its template.
+      # On — with the network policy, so its NetworkPolicy renders too — it must validate and
+      # carry the hardening it promises; a token too short for the service is refused at
+      # render time, as the service would refuse it at start.
+      - name: Render and validate — Hermarchus on (agent host)
+        run: |
+          if helm template epicurus "$CHART" | grep -q 'component: hermarchus'; then
+            echo "Hermarchus rendered with the chart's defaults — it must be off by default"; exit 1
+          fi
+          rendered="$(helm template epicurus "$CHART" \
+            --set hermarchus.enabled=true,networkPolicy.enabled=true)"
+          printf '%s' "$rendered" | kubeconform -strict -summary -kubernetes-version "$KUBE_VERSION" -
+          printf '%s' "$rendered" | grep -q 'automountServiceAccountToken: false' \
+            || { echo "hermarchus mounts a service-account token"; exit 1; }
+          printf '%s' "$rendered" | grep -q 'name: epicurus-hermarchus' \
+            || { echo "no NetworkPolicy for hermarchus"; exit 1; }
+          printf '%s' "$rendered" | grep -q 'policyTypes: \["Ingress", "Egress"\]' \
+            || { echo "the hermarchus NetworkPolicy does not restrict egress"; exit 1; }
+          if helm template epicurus "$CHART" --set hermarchus.enabled=true \
+              --set-string hermarchus.token=short >/dev/null 2>err.txt; then
+            echo "the chart rendered a token Hermarchus would refuse"; exit 1
+          fi
+          grep -q 'at least 16 characters' err.txt || { cat err.txt; exit 1; }
+          echo "the Hermarchus block renders, validates, and refuses a weak token"
 
   # Validates Prometheus and Alertmanager configs without booting the
   # observability stack. The runtime-smoke gate skips that stack, so a bad rule

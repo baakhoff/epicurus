@@ -53,7 +53,11 @@ mkdir -p "$SMOKE_MOUNT_DIR"
 chmod 0777 "$SMOKE_MOUNT_DIR"
 printf 'seed\n' > "$SMOKE_MOUNT_DIR/seed.txt"
 BOOT_LOG="$(mktemp)"
-DC="docker compose -f compose.yaml -f infra/ci/compose.ci.yaml --env-file $ENV_FILE"
+# The Hermarchus overlay (#1016) and its CI override ride along on every invocation: the
+# overlay only *adds* a service nothing below starts by name until `enable_hermarchus`, and
+# having it in the project means `down --remove-orphans` and the diagnostics cover it too.
+DC="docker compose -f compose.yaml -f infra/ci/compose.ci.yaml"
+DC="$DC -f services/hermarchus/compose.yaml -f infra/ci/compose.hermarchus.yaml --env-file $ENV_FILE"
 CURL_IMG="curlimages/curl:8.11.1"
 
 DATA_PLANE="openbao postgres valkey nats qdrant minio minio-init"
@@ -76,6 +80,10 @@ die() { printf '\n\033[1;31mSMOKE FAILED: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # HTTP against the internal network — no host ports needed.
 http() { docker run --rm --network "$NET" "$CURL_IMG" -s --max-time 25 "$@"; }
+# Hermarchus (#1016) sits on a network of its own (services/hermarchus/compose.yaml; the name
+# is fixed by infra/ci/compose.hermarchus.yaml), so its controller's curl joins that one.
+HNET="${COMPOSE_PROJECT_NAME}-hermarchus"
+hermarchus_http() { docker run --rm --network "$HNET" "$CURL_IMG" -s --max-time 25 "$@"; }
 
 wait_state() { # <service> — block until healthy (or running, if it has no healthcheck)
   svc="$1"
@@ -127,10 +135,35 @@ enable_sign_in() {
   wait_state core-app
 }
 
+# Hermarchus (#1016) is an opt-in overlay, so the gate brings it up the way an operator does:
+# the overlay file, a token, `up -d hermarchus`. HERMARCHUS_TOKEN is already in the env file.
+enable_hermarchus() {
+  if [ "${SMOKE_SKIP_BUILD:-0}" != "1" ]; then
+    $DC build hermarchus || die "building the hermarchus image failed"
+  fi
+  $DC up -d --no-deps hermarchus >/dev/null 2>&1 \
+    || die "could not start hermarchus from services/hermarchus/compose.yaml"
+  wait_state hermarchus
+  uid="$($DC exec -T hermarchus id -u 2>/dev/null | tr -d '\r' || true)"
+  [ "$uid" = "10001" ] || die "hermarchus runs as uid '$uid' (expected the non-root 10001)"
+  # Agents run arbitrary code: from inside the agent host, nothing in the stack may answer —
+  # not the core's platform API, not a module's MCP endpoint, not the data plane.
+  probe='import socket,sys; h,p=sys.argv[1].split(":"); socket.create_connection((h,int(p)),timeout=3)'
+  # The probe itself works (so a failure below is the network, not a broken probe).
+  $DC exec -T hermarchus python -c "$probe" 127.0.0.1:8080 >/dev/null 2>&1 \
+    || die "the reachability probe cannot even reach hermarchus itself"
+  for target in core-app:8080 echo:8080 postgres:5432 qdrant:6333; do
+    if $DC exec -T hermarchus python -c "$probe" "$target" >/dev/null 2>&1; then
+      die "hermarchus can reach $target — it must not be on the stack's network"
+    fi
+  done
+  ok "hermarchus cannot reach the stack (core-app, a module, the data plane)"
+}
+
 dump_diagnostics() {
   log "Diagnostics (smoke failed)"
   $DC ps || true
-  for s in openbao openbao-unseal core-app web $EXPECT_MODULES searxng; do
+  for s in openbao openbao-unseal core-app web $EXPECT_MODULES searxng hermarchus; do
     printf '\n--- logs: %s ---\n' "$s"
     $DC logs --tail 40 "$s" 2>&1 || true
   done
@@ -152,11 +185,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ── minimal env (everything else comes from the compose `:-` defaults) ─────────
+# A throwaway bearer token for the Hermarchus phase; the overlay refuses to resolve without one.
+HERMARCHUS_TOKEN="smoke-$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')"
 cat > "$ENV_FILE" <<EOF
 APP_ENV=ci
 LOG_LEVEL=warning
 DEFAULT_TENANT_ID=local
 SMOKE_MOUNT_DIR=$SMOKE_MOUNT_DIR
+HERMARCHUS_TOKEN=$HERMARCHUS_TOKEN
 EOF
 
 log "Smoke project '$COMPOSE_PROJECT_NAME' (network $NET, no host ports)"
@@ -295,6 +331,9 @@ ok "minio-init completed — the default bucket is seeded (#919)"
 
 # ── the runtime-neutral last mile, shared with the Kubernetes gate ─────────────
 smoke_assert
+
+# ── the opt-in agent host: an echo session end to end (#1016) ─────────────────
+smoke_assert_hermarchus
 
 # ── sign-in on, last: the web door closes, module <-> core stays open (#969) ───
 smoke_assert_sign_in

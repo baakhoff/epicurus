@@ -48,7 +48,14 @@ _SHARED_ONLY = (
 # Every hook smoke-assert.sh calls back into. Named here *and* required to still be
 # present in the shared file, so dropping one from the contract fails loudly instead
 # of quietly shrinking what this test checks.
-_HOOKS = ("restart_openbao", "restart_core_app", "settle_llm_runtime", "enable_sign_in")
+_HOOKS = (
+    "restart_openbao",
+    "restart_core_app",
+    "settle_llm_runtime",
+    "enable_sign_in",
+    "enable_hermarchus",
+    "hermarchus_http",
+)
 
 # The label pair KubernetesController._workloads selects on and _owns re-reads before
 # it patches anything (services/core-app/src/epicurus_core_app/kubernetes_control.py).
@@ -257,3 +264,30 @@ def test_the_sign_in_phase_turns_oidc_on_without_colliding_with_the_chart_or_com
     # The removal assertion scaled echo to zero; the upgrade must not quietly restore it.
     assert "modules.echo.replicas=0" in enable
     assert "extraEnv.AUTH_MODE" not in k8s and "set env" not in k8s
+
+
+def test_both_gates_run_an_echo_session_on_hermarchus_before_sign_in() -> None:
+    """#1016's "done when": an echo session end to end on Compose *and* on Kubernetes."""
+    shared = SHARED.read_text(encoding="utf-8")
+    assert re.search(r"^smoke_assert_hermarchus\(\) \{", shared, re.MULTILINE)
+    for needle in (
+        '"agent":"echo"',
+        "/permissions/$REQ",
+        "events?after=2",
+        "follow=true",
+        "/stop",
+        "-X DELETE",
+    ):
+        assert needle in shared, f"the Hermarchus phase no longer asserts {needle!r}"
+    for gate in GATES:
+        lines = [line.strip() for line in gate.read_text(encoding="utf-8").splitlines()]
+        assert "smoke_assert_hermarchus" in lines, f"{gate.name} never runs the Hermarchus phase"
+        at = lines.index("smoke_assert_hermarchus")
+        assert lines.index("smoke_assert") < at < lines.index("smoke_assert_sign_in")
+    compose = (CI / "smoke.sh").read_text(encoding="utf-8")
+    assert "-f services/hermarchus/compose.yaml -f infra/ci/compose.hermarchus.yaml" in compose
+    assert "HERMARCHUS_TOKEN=$HERMARCHUS_TOKEN" in compose
+    values = _load(CI / "values-ci.yaml")
+    assert values["hermarchus"]["enabled"] is True
+    k8s = (CI / "k8s-smoke.sh").read_text(encoding="utf-8")
+    assert "secret hermarchus" in k8s and "rotated the hermarchus token" in k8s

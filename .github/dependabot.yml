@@ -32,3 +32,16 @@ updates:
       npm-dependencies:
         patterns: ["*"]
         update-types: [minor, patch]
+
+  # Keep npm dependencies in the desktop app up to date. Electron majors arrive as their own
+  # PRs (a new Chromium is a behaviour change worth its own review).
+  - package-ecosystem: npm
+    directory: /apps/desktop
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [area:web, type:chore] # no area:desktop label exists yet
+    groups:
+      desktop-npm-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]

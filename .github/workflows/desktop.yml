@@ -1,0 +1,153 @@
+name: Desktop
+
+# Packages the desktop app (apps/desktop, #1015) on macOS, Windows and Linux, then launches the
+# *packaged* app — installed from the Windows installer, unpacked from the macOS zip, run from
+# the Linux AppImage — and runs the same launch smoke as ci.yml against it. Installers and
+# screenshots are uploaded as artifacts. Nothing is published, signed with a certificate, or
+# notarised: macOS builds are ad-hoc signed (docs/apps/desktop.md § Packaging).
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - ".github/workflows/desktop.yml"
+  push:
+    branches: [main, testing]
+    paths:
+      - "apps/desktop/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            builder: --mac
+          - os: windows-latest
+            builder: --win
+          - os: ubuntu-latest
+            builder: --linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      EPICURUS_WEB_DIST: ${{ github.workspace }}/services/web/dist
+      EPICURUS_SMOKE_SCREENSHOTS: ${{ github.workspace }}/apps/desktop/test-results/screenshots
+      EPICURUS_SMOKE_DESKTOP_SCREENSHOT: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            services/web/package-lock.json
+
+      - name: Runner
+        run: echo "$RUNNER_OS $(uname -m) — $(node --version)"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the web UI the smoke's last test shows
+        working-directory: services/web
+        run: npm ci && npm run build
+
+      - name: Package
+        run: npm run build && npx electron-builder ${{ matrix.builder }} --publish never
+
+      - name: List the packages
+        run: ls -la release
+
+      # ── macOS: ad-hoc signed, both architectures; launch the arm64 build from its zip ───────
+      - name: Verify the macOS signatures and fuses
+        if: runner.os == 'macOS'
+        run: |
+          for app in release/mac-arm64/Epicurus.app release/mac/Epicurus.app; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv "$app" 2>&1 | grep -E 'Signature=adhoc|Identifier='
+            lipo -archs "$app/Contents/MacOS/Epicurus"
+          done
+          npx @electron/fuses read --app release/mac-arm64/Epicurus.app
+
+      - name: Unpack the macOS arm64 zip
+        if: runner.os == 'macOS'
+        run: |
+          test "$(uname -m)" = arm64
+          mkdir -p "$RUNNER_TEMP/unpacked"
+          ditto -x -k release/Epicurus-*-mac-arm64.zip "$RUNNER_TEMP/unpacked"
+          app="$RUNNER_TEMP/unpacked/Epicurus.app"
+          codesign --verify --deep --strict "$app"
+          spctl --assess --type execute -vv "$app" || echo "Gatekeeper rejects it, as expected for an unnotarised build (docs/user/desktop-app.md)"
+          echo "EPICURUS_DESKTOP_EXECUTABLE=$app/Contents/MacOS/Epicurus" >> "$GITHUB_ENV"
+
+      # ── Windows: run the installer silently, launch what it installed ─────────────────────
+      - name: Install with the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem release\Epicurus-*-windows-x64-setup.exe | Select-Object -First 1
+          Start-Process -Wait -FilePath $setup.FullName -ArgumentList '/S'
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\Epicurus\Epicurus.exe'
+          if (-not (Test-Path $exe)) { Get-ChildItem -Recurse "$env:LOCALAPPDATA\Programs" | Select-Object -First 40; throw "not installed at $exe" }
+          npx @electron/fuses read --app $exe
+          "EPICURUS_DESKTOP_EXECUTABLE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # ── Linux: the AppImage, extracted and run (runners have no FUSE) ─────────────────────
+      - name: Prepare the Linux AppImage
+        if: runner.os == 'Linux'
+        run: |
+          # Ubuntu 24.04 forbids the unprivileged user namespaces Chromium's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          image="$(ls "$PWD"/release/Epicurus-*-linux-x86_64.AppImage)"
+          chmod +x "$image"
+          npx @electron/fuses read --app release/linux-unpacked/epicurus
+          echo "EPICURUS_DESKTOP_EXECUTABLE=$image" >> "$GITHUB_ENV"
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
+
+      - name: Launch smoke on the packaged app
+        run: |
+          echo "launching $EPICURUS_DESKTOP_EXECUTABLE"
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a --server-args="-screen 0 1440x900x24" npm run smoke
+          else
+            npm run smoke
+          fi
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-screenshots-${{ runner.os }}
+          path: apps/desktop/test-results/
+          if-no-files-found: warn
+
+      - name: Upload installers
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-installers-${{ runner.os }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.exe
+            apps/desktop/release/*.AppImage
+            apps/desktop/release/*.deb

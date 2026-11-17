@@ -1356,21 +1356,30 @@ its page; and the pending-suggestions feed) compose it in explicitly. The manage
 —`enabled`, `DELETE`, `suggestions-enabled` — all **403** for it: it is this process, it has no
 container, and its review is mandatory (nothing self-applies, ever).
 
+**The four module-facing reads answer for the tenant the module names (#917).** `GET …/config`,
+`GET …/models/{slot}`, `GET …/suggestions-enabled` and `GET …/collections/prefs` take an optional
+`?tenant_id=` — what a module's `PlatformClient` sends, naming the tenant the core bound around
+the tool call that is asking. Unnamed (or empty) → the registry's tenant, so the web shell and
+every pre-#917 module read exactly what they always did; malformed → **400**, the
+`files_routes` rule. Every other route here still acts for the registry's one tenant. Nothing
+checks that the caller may act for the tenant it names — any caller of the platform API can name
+one, as on the file routes; binding the tenant to the signed-in session is profile work.
+
 | Method · Path | Purpose |
 | --- | --- |
 | `GET /platform/v1/modules` | Every configured module: its manifest (tools, events, declared UI), live health, and the operator's `enabled` flag (#126). Disabled modules stay listed so the shell can re-enable them. Served from the probe cache by default; `?refresh=true` forces a fresh fleet-wide re-probe (the Modules page's manual refresh, #478). Also carries the reserved **`core`** pseudo-module (always healthy + enabled — it is this process), so the shell discovers its `review` page like any module's; the Modules screen filters it back out, since it manages what the operator *installed*. |
 | `POST /platform/v1/modules/reembed` | Re-embed everything (#332, ADR-0054) — the action behind the Models page's "Re-embed everything" after the embedding model changes. Fans out `POST {base}/reindex` to every healthy, enabled module whose manifest declares `reindexable` (knowledge, notes); returns `{modules: [{module, status, reason?}]}` (`started`/`error`, or the module's own answer). Best-effort — one module's failure never aborts the rest. A module that **refuses** the rebuild because the source it would rebuild from reads empty reports `refused` with its `reason` (#848), rather than the fan-out assuming a rebuild it never started. |
 | `GET /platform/v1/modules/docker-status` | Whether the core can reach its **container runtime** right now (#622, ADR-0099; #891 widened it beyond Docker — the path and shape are unchanged): `{available: bool, reason: str \| null}` — `reason` is the selection/probe's own text (an unreachable socket, an unknown namespace, or `CONTAINER_RUNTIME=none`), surfaced so the Modules page states plainly what's deferred (never "removal disabled" — see the callout below) and how to enable it, without the operator attempting a removal or reading the logs. |
-| `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`). Modules read their own through `PlatformClient.get_module_config` / `ModuleConfigCache` (#984). `PUT` refuses — **409** `{code: "provider_key_required", provider, message}` — a value the module's `config_schema` marks with `enumRequiresProviderKey` when that provider's key is not stored for the tenant (**503** `key_store_unavailable` when OpenBao cannot be asked); the key state comes from `LlmGateway.provider_key_state`, asked for the registry's tenant; an alias the gateway does not know is refused with the same 409. |
+| `GET` · `PUT /platform/v1/modules/{name}/config` | The module's config values (stored tenant-scoped in OpenBao at `modules/<name>/config`; `GET` takes `?tenant_id=`, #917). Modules read their own through `PlatformClient.get_module_config` / `ModuleConfigCache` (#984). `PUT` refuses — **409** `{code: "provider_key_required", provider, message}` — a value the module's `config_schema` marks with `enumRequiresProviderKey` when that provider's key is not stored for the tenant (**503** `key_store_unavailable` when OpenBao cannot be asked); the key state comes from `LlmGateway.provider_key_state`, asked for the registry's tenant; an alias the gateway does not know is refused with the same 409. |
 | `POST /platform/v1/modules/{name}/enabled` | Enable/disable a module (#126): `{enabled: bool}`. Hides its tools, pages, and actions from the agent and shell while the container keeps running. Persisted in Postgres (`module_prefs`). |
 | `DELETE /platform/v1/modules/{name}` | **Privileged** confirmed removal (#127, #382, ADR-0028): tombstone the module — which hides it everywhere and stops routing its tools at once — and tear its container down. **Decoupled from the live container runtime** (#382, #891): soft-removes with **200** even when the core has no runtime access — or has one that refuses (a Kubernetes RBAC 403) — deferring the container teardown to the next startup reconcile; the response carries `container_teardown_deferred` (true whenever the workload was left running). With a socket present it also stops + removes the container now, scoped to the core's own Compose project and refusing core-app / web / data-plane. **403** protected (enforced regardless of the socket) · **404** unknown. |
 | `GET` · `PUT /platform/v1/modules/{name}/models` | Per-module model-slot selections (#128, ADR-0029): `{slot_key: model_id}`. `PUT` validates each key against the manifest's `required_models` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
-| `GET /platform/v1/modules/{name}/models/{slot}` | Resolve one slot to its chosen model (`null` = core default) — backs `PlatformClient.get_module_model` (#128). |
+| `GET /platform/v1/modules/{name}/models/{slot}` | Resolve one slot to its chosen model (`null` = core default) — backs `PlatformClient.get_module_model` (#128). Takes `?tenant_id=` (#917). |
 | `GET /platform/v1/modules/{name}/collections` | The module's connected accounts + collections (ADR-0030), proxied from its `GET /accounts` and **merged** with the operator's stored selection (each collection annotated `enabled`/`active`). **404** if the module declares no `collections`. |
 | `PUT /platform/v1/modules/{name}/collections` | Persist the selection: `{enabled: [CollectionRef], active: CollectionRef \| null}`. Store-through (refs are not live-validated); `active` must be in `enabled` (**400** otherwise). Persisted in Postgres (`module_prefs`). |
-| `GET /platform/v1/modules/{name}/collections/prefs` | The raw stored `{enabled, active}` (Postgres only, no module round-trip) — backs `PlatformClient.get_collections` so a module resolves its own routing (ADR-0030). |
+| `GET /platform/v1/modules/{name}/collections/prefs` | The raw stored `{enabled, active}` (Postgres only, no module round-trip) — backs `PlatformClient.get_collections` so a module resolves its own routing (ADR-0030). Takes `?tenant_id=` (#917). |
 | `POST /platform/v1/modules/{name}/tools/{tool}/enabled` | Enable or disable one tool (#213): `{enabled: bool}`. Hides the named tool from the agent while the module keeps running and other tools remain unaffected. **404** unknown module or undeclared tool. Persisted in Postgres (`module_prefs`). |
-| `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled` | The per-module **review on/off** toggle (#KB-refactor): `{enabled: bool}`. When **on** (the default — a missing/NULL pref reads as `true`) the module stages agent changes for approval on its `review` page; when **off** the module applies them directly. The module reads this through `PlatformClient.get_suggestions_enabled()`; the shell's review-page header writes it. `PUT` **404**s an unknown module. Persisted in Postgres (`module_prefs`). |
+| `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled` | The per-module **review on/off** toggle (#KB-refactor): `{enabled: bool}`. When **on** (the default — a missing/NULL pref reads as `true`) the module stages agent changes for approval on its `review` page; when **off** the module applies them directly. The module reads this through `PlatformClient.get_suggestions_enabled()` (`GET` takes `?tenant_id=`, #917); the shell's review-page header writes it. `PUT` **404**s an unknown module. Persisted in Postgres (`module_prefs`). |
 | `POST /platform/v1/modules/{name}/tools/{tool}` | Invoke a manifest-declared UI action (runs the module's MCP tool through the host). **403** if the module is disabled. **400** when the tool runs but reports failure — the response `detail` is the tool's own error message, so the shell can show it instead of closing the form as a success (#435). **502** `{name} action failed: module unreachable` when the module refuses the connection or does not answer within the call timeout (30s) — the MCP dispatch is bounded and its transport failure mapped to a controlled status, so a down/restarting module no longer surfaces as a raw `NetworkError` (#472). |
 | `GET /platform/v1/modules/{name}/status` | Proxy the module's `ui.status_url` endpoint (returns the module's live status JSON as-is). 404 if the module is unreachable or has no `status_url`. |
 | `GET /platform/v1/modules/{name}/read?path=…` | Proxy an **editor** module's `GET /read` text-file endpoint for its split-screen reader (knowledge, notes): `{path, name, content}`. Upstream 4xx pass through (415 binary, 413 too large, 404 missing); an unreachable module is a controlled **502**. (The unified **Files** read is core-owned at `GET /platform/v1/files/read` — ADR-0063; see [file space](../reference/files.md).) |
@@ -1464,6 +1473,20 @@ timeout (which the client's anyio task group can raise **wrapped in an
 that to the **502** above; a tool that *ran* and reported failure stays a **400** with its
 own message (`ToolCallError`, #435). The two are kept distinct on purpose — "the module
 never answered" vs. "the tool rejected the request".
+
+**The tenant crosses the hop (#917).** `McpHost.call(name, arguments, url, *, tenant, …)` sends
+`tenant` — the agent turn's, or the registry's for a UI action — in the **`x-epicurus-tenant`**
+header of every request of the call (the handshake and the `tools/call` alike), on an HTTP
+client the call brings and closes itself (the SDK's own timeouts restated: 30s connect / write /
+pool, 300s read). `EpicurusModule` binds it around the tool, so the tool and every
+`PlatformClient` call it makes back into the core act for that tenant (see
+[modules § The tenant on a tool call](../reference/modules.md#the-tenant-on-a-tool-call-917)).
+A malformed tenant is refused by the module and arrives here as a `ToolCallError`; a module on
+an `epicurus-core` older than 0.43.0 ignores the header and keeps its default. Discovery
+(`McpHost.discover`) names no tenant — a tool list is the same for every tenant. The module trusts
+the header because the module↔core contract is internal (constraint #7); a module's port is also
+reachable from the host and through the edge gateway, so see the
+[trust note](../reference/modules.md#the-tenant-on-a-tool-call-917) before a second tenant holds data.
 
 ### Tenant data portability (#867)
 

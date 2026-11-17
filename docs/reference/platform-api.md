@@ -1185,6 +1185,10 @@ calendar-feed-specific UI contract, reusing ADR-0019 end to end.
 
 ### `GET` · `PUT /platform/v1/modules/{name}/suggestions-enabled`
 
+`GET` takes an optional `?tenant_id=` — like `GET …/config`, `GET …/models/{slot}` and
+`GET …/collections/prefs`, the reads a module makes through `PlatformClient` (#917): unnamed or
+empty → the core's configured tenant, malformed → **400**.
+
 The per-module **review on/off** toggle (#KB-refactor) — `{ "enabled": true }`. When **on**
 (the default; a missing or NULL pref reads as `true`) the module stages agent changes on its
 `review` page for approval. When **off**, the module applies them directly (it reads this via
@@ -1313,7 +1317,7 @@ client = PlatformClient(
 | Param | Type | Meaning |
 | --- | --- | --- |
 | `base_url` | `str` | Internal base URL of the core service. |
-| `tenant_id` | `str` | Tenant this module acts on behalf of. |
+| `tenant_id` | `str` | The **fallback** tenant. Each call resolves its own: a `for_tenant()` pin, else the tenant bound to the calling context (inside a tool call, the one the core named — #917), else this. See [`PlatformClient` § Which tenant a call acts for](platform-client.md#which-tenant-a-call-acts-for-917). |
 
 ### `await client.embed(texts, *, model=None) → list[list[float]]`
 

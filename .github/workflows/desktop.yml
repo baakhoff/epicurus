@@ -46,6 +46,9 @@ jobs:
         working-directory: apps/desktop
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      # electron-builder skips *all* signing on pull-request builds unless told otherwise, and an
+      # unsigned arm64 app does not start. The signature here is ad-hoc — no certificate, no secret.
+      CSC_FOR_PULL_REQUEST: "true"
       EPICURUS_WEB_DIST: ${{ github.workspace }}/services/web/dist
       EPICURUS_SMOKE_SCREENSHOTS: ${{ github.workspace }}/apps/desktop/test-results/screenshots
       EPICURUS_SMOKE_DESKTOP_SCREENSHOT: "1"
@@ -105,7 +108,8 @@ jobs:
         run: |
           $setup = Get-ChildItem release\Epicurus-*-windows-x64-setup.exe | Select-Object -First 1
           Start-Process -Wait -FilePath $setup.FullName -ArgumentList '/S'
-          $exe = Join-Path $env:LOCALAPPDATA 'Programs\Epicurus\Epicurus.exe'
+          # A per-user NSIS install lands in %LOCALAPPDATA%\Programs\<package name>.
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\epicurus-desktop\Epicurus.exe'
           if (-not (Test-Path $exe)) { Get-ChildItem -Recurse "$env:LOCALAPPDATA\Programs" | Select-Object -First 40; throw "not installed at $exe" }
           npx @electron/fuses read --app $exe
           "EPICURUS_DESKTOP_EXECUTABLE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

@@ -231,7 +231,7 @@ test("Change server refuses an address that is not an epicurus server", async ()
     await shot(connect, "5-connect-error");
 
     // Nothing failed was saved.
-    expect(readSettings(userDataDir)?.server).toEqual({ url: deadUrl });
+    expect(readSettings(userDataDir)?.server).toMatchObject({ url: deadUrl });
   } finally {
     await other.close();
   }

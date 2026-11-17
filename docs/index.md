@@ -19,10 +19,13 @@ however you expose your own server).
 - **[User Guide](user/index.md)** — install, configure, and run epicurus. Includes
   [Running without Google](user/running-without-google.md) — turning a provider off per
   module or platform-wide, and what keeps working after — and
-  [Export & import](user/export-import.md), moving a whole tenant to another installation.
+  [Export & import](user/export-import.md), moving a whole tenant to another installation —
+  and [the desktop app](user/desktop-app.md) for macOS, Windows and Linux.
 - **[Services & Modules](services/index.md)** — a page per running block: the core
   runtime, the web shell, and each module — what it does, its tools/endpoints, config,
   and data.
+- **Apps** — clients that connect to a server: [desktop](apps/desktop.md), the Electron app
+  shell around the web UI.
 - **[API Reference](reference/index.md)** — the `epicurus-core` library and the
   module↔core contracts (platform API, MCP, NATS, manifest).
 - **[Infrastructure](../infra/README.md)** — the data plane (Postgres, Valkey, NATS,

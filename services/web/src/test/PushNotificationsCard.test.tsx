@@ -37,12 +37,14 @@ vi.mock("@/lib/api", () => ({
 }));
 
 const mockIsSupported = vi.fn();
+const mockIsDesktopApp = vi.fn();
 const mockGetExisting = vi.fn();
 const mockSubscribeDevice = vi.fn();
 const mockUnsubscribeDevice = vi.fn();
 const mockGuessLabel = vi.fn();
 vi.mock("@/lib/push", () => ({
   isPushSupported: (...a: unknown[]) => mockIsSupported(...a),
+  isDesktopAppWithoutPush: (...a: unknown[]) => mockIsDesktopApp(...a),
   getExistingSubscription: (...a: unknown[]) => mockGetExisting(...a),
   subscribeThisDevice: (...a: unknown[]) => mockSubscribeDevice(...a),
   unsubscribeThisDevice: (...a: unknown[]) => mockUnsubscribeDevice(...a),
@@ -120,6 +122,7 @@ beforeEach(() => {
   mockStatus.mockReset().mockResolvedValue(status());
   mockEventSubscriptions.mockReset().mockResolvedValue([]);
   mockIsSupported.mockReset().mockReturnValue(true);
+  mockIsDesktopApp.mockReset().mockReturnValue(false);
   mockGetExisting.mockReset().mockResolvedValue(null);
   mockSubscribeDevice.mockReset();
   mockUnsubscribeDevice.mockReset().mockResolvedValue(true);
@@ -132,6 +135,19 @@ describe("PushNotificationsCard (#670, ADR-0102)", () => {
     render(<PushNotificationsCard />, { wrapper });
     expect(await screen.findByText(/doesn't support push notifications/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^subscribe$/i })).not.toBeInTheDocument();
+  });
+
+  it("in the desktop app, says push isn't available there and offers no subscribe (#1015)", async () => {
+    mockIsDesktopApp.mockReturnValue(true);
+    mockIsSupported.mockReturnValue(false);
+    render(<PushNotificationsCard />, { wrapper });
+    expect(
+      await screen.findByText(/aren't available in the desktop app/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/doesn't support push notifications/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^subscribe$/i })).not.toBeInTheDocument();
+    // The rest of the card — categories, quiet hours, other devices — still works from here.
+    expect(screen.getByText("Subscribed devices")).toBeInTheDocument();
   });
 
   it("shows Subscribe when this device has no existing subscription", async () => {

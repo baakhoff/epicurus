@@ -1,0 +1,109 @@
+/* The app's own local pages (connect, offline, host bar) — the web UI's palette (dark default,
+   light when the operating system asks for it), no web fonts, nothing loaded from elsewhere. */
+:root {
+  color-scheme: dark light;
+  --ep-canvas: #121411;
+  --ep-surface: #1a1d17;
+  --ep-border: #2e3227;
+  --ep-text: #e8e6dd;
+  --ep-text-dim: #9a9b8f;
+  --ep-accent: #c9a961;
+  --ep-accent-hover: #e0be78;
+  --ep-on-accent: #121411;
+  --ep-ok: #7fa66a;
+  --ep-warn: #d4a93f;
+  --ep-danger: #c97767;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --ep-canvas: #f6f5ef;
+    --ep-surface: #fdfcf8;
+    --ep-border: #e0ded0;
+    --ep-text: #26281f;
+    --ep-text-dim: #636555;
+    --ep-accent: #a8833b;
+    --ep-accent-hover: #9c7a37;
+    --ep-ok: #527540;
+    --ep-warn: #84681d;
+    --ep-danger: #9d4736;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--ep-canvas);
+  color: var(--ep-text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main.page {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+.card {
+  width: 100%;
+  max-width: 440px;
+  background: var(--ep-surface);
+  border: 1px solid var(--ep-border);
+  border-radius: 12px;
+  padding: 28px;
+}
+h1 { font-family: Georgia, "Times New Roman", serif; font-weight: 500; font-size: 22px; margin: 0 0 6px; }
+p { margin: 0 0 16px; color: var(--ep-text-dim); }
+label { display: block; font-size: 13px; color: var(--ep-text-dim); margin-bottom: 6px; }
+input[type="text"] {
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--ep-border);
+  background: var(--ep-canvas);
+  color: var(--ep-text);
+  font: inherit;
+}
+input[type="text"]:focus { outline: 2px solid var(--ep-accent); outline-offset: 1px; }
+.row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
+button {
+  font: inherit;
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--ep-border);
+  background: transparent;
+  color: var(--ep-text);
+  cursor: pointer;
+}
+button.primary { background: var(--ep-accent); border-color: var(--ep-accent); color: var(--ep-on-accent); }
+button.primary:hover { background: var(--ep-accent-hover); }
+button:disabled { opacity: 0.6; cursor: default; }
+.status { margin-top: 14px; font-size: 14px; min-height: 1.5em; }
+.status.error { color: var(--ep-danger); }
+.status.ok { color: var(--ep-ok); }
+.warning {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--ep-warn);
+  border-radius: 8px;
+  color: var(--ep-text);
+  font-size: 14px;
+}
+.warning[hidden] { display: none; }
+.host { font-family: ui-monospace, Menlo, Consolas, monospace; color: var(--ep-text); }
+
+/* The host bar: one line above a page that is not the server. */
+body.bar {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--ep-surface);
+  border-bottom: 1px solid var(--ep-border);
+  font-size: 13px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+body.bar .where { flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--ep-text-dim); }
+body.bar .lock { color: var(--ep-ok); }
+body.bar .lock.insecure { color: var(--ep-danger); }
+body.bar button { padding: 3px 10px; font-size: 13px; }

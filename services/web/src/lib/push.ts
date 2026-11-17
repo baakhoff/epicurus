@@ -8,7 +8,23 @@
 import { api } from "@/lib/api";
 
 export function isPushSupported(): boolean {
+  if (isDesktopAppWithoutPush()) return false;
   return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+
+/** The read-only marker the epicurus desktop app (`apps/desktop`, #1015) puts on its window. */
+type DesktopMarker = { capabilities?: { webPush?: unknown } };
+
+/**
+ * Whether this page runs inside the epicurus desktop app, which cannot receive web push: its
+ * Electron engine exposes `PushManager`, but has no push service behind it (subscribing fails
+ * with "push service not available") and the app refuses the notification permission. The app
+ * says so with `window.epicurusDesktop.capabilities.webPush === false`; any other value — or no
+ * marker at all — leaves the browser checks above in charge.
+ */
+export function isDesktopAppWithoutPush(): boolean {
+  const marker = (window as unknown as { epicurusDesktop?: DesktopMarker }).epicurusDesktop;
+  return marker?.capabilities?.webPush === false;
 }
 
 /** Base64url (RFC 4648 §5) -> raw bytes — the shape `PushManager.subscribe` needs for

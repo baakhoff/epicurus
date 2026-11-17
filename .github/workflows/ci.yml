@@ -129,6 +129,64 @@ jobs:
       - name: Tests
         run: npm test
 
+  # The desktop app (apps/desktop, #1015): lint, types, unit tests, and the launch smoke — the real
+  # Electron app under a virtual display, against a stand-in server, with the real web UI built
+  # from services/web for its last test. desktop.yml packages it and runs the same smoke on the
+  # packaged app on macOS, Windows and Linux.
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            apps/desktop/package-lock.json
+            services/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Build the web UI for the smoke's last test
+        working-directory: services/web
+        run: npm ci && npm run build
+
+      # Ubuntu 24.04 forbids unprivileged user namespaces to unconfined programs, which Chromium's
+      # sandbox needs; allow them on this throwaway runner rather than run with --no-sandbox.
+      - name: Allow the Chromium sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Launch smoke (xvfb)
+        env:
+          EPICURUS_WEB_DIST: ${{ github.workspace }}/services/web/dist
+        run: xvfb-run -a --server-args="-screen 0 1440x900x24" npm run smoke
+
+      - name: Upload smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-smoke-linux-dev
+          path: apps/desktop/test-results/
+          if-no-files-found: warn
+
   secret-scan:
     runs-on: ubuntu-latest
     steps:

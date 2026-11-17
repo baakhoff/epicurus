@@ -36,6 +36,10 @@ images to GHCR.
   default; non-root, no service-account token, a token Secret kept across upgrades, a
   NetworkPolicy). `runtime-smoke` and `k8s-smoke` both run an `echo` session end to end.
   `hermarchus` 0.1.0 (new) · chart 0.4.0→0.5.0 (MINOR).
+- **Calendar test no longer fails every winter** (#1019) — the operator-timezone free-slot test
+  hardcoded Belgrade's summer offset (`+02:00`), so `quality` went red on every pull request from
+  the end of October to the end of March. It now expects the zone's own offset at each slot's
+  instant. Test-only; no product change, no version bump.
 - **Web search through OpenRouter, once an OpenRouter key is stored** (#984) — web search ran
   only through the bundled SearXNG, whose engines are blocked or rate-limited on many home-lab
   IPs (#920, #936). The websearch module's settings on the Modules page now have a **Search

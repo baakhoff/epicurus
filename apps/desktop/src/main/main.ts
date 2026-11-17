@@ -42,6 +42,7 @@ import {
   offOriginHost,
 } from "./navigation";
 import { decidePermission } from "./permissions";
+import { mustRefuseRemoteDebugging } from "./debugging";
 import { checkServer, describeLoadFailure, type FetchLike } from "./serverCheck";
 import { SettingsStore } from "./settings";
 import { restoreBounds } from "./windowState";
@@ -55,6 +56,21 @@ const UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
 
 // ── test and portable-install seams (documented in docs/apps/desktop.md) ─────────────────────
 const userDataOverride = process.env.EPICURUS_DESKTOP_USER_DATA_DIR;
+// Before anything else: no DevTools port onto the user's real profile (src/main/debugging.ts).
+if (
+  mustRefuseRemoteDebugging(
+    (name) => app.commandLine.hasSwitch(name),
+    userDataOverride,
+    app.getPath("userData"),
+  )
+) {
+  console.error(
+    "Epicurus refuses --remote-debugging-port / --remote-debugging-pipe on its default profile; " +
+      "set EPICURUS_DESKTOP_USER_DATA_DIR to a separate directory to debug.",
+  );
+  app.exit(1);
+  process.exit(1);
+}
 if (userDataOverride) app.setPath("userData", path.resolve(userDataOverride));
 const externalLog = process.env.EPICURUS_DESKTOP_OPEN_EXTERNAL_LOG;
 

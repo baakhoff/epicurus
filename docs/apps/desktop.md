@@ -117,8 +117,15 @@ host that is not this machine only with the user's explicit confirmation.
 | Untrusted certificates are refused | Chromium default | there is no "continue anyway"; a private certificate authority goes in the operating system's trust store. |
 | Production fuses | `electron-builder.yml` | `RunAsNode` off, `EnableCookieEncryption` on (the session cookie is encrypted at rest with the OS keychain / DPAPI / libsecret), `EnableNodeOptionsEnvironmentVariable` off, `EnableNodeCliInspectArguments` off, `EnableEmbeddedAsarIntegrityValidation` on, `OnlyLoadAppFromAsar` on, `LoadBrowserProcessSpecificV8Snapshot` off, `GrantFileProtocolExtraPrivileges` off. The packaging workflow prints them back from each packaged binary. |
 
-Chromium's `--remote-debugging-port` switch still works on a packaged build (the launch smoke
-drives the app through it); it is opt-in on the command line of a process the user already runs.
+Chromium's `--remote-debugging-port` and `--remote-debugging-pipe` switches are not fuses, so the
+app checks for them itself (`src/main/debugging.ts`), before anything else runs: with either switch
+it **refuses to start** unless `EPICURUS_DESKTOP_USER_DATA_DIR` points at a directory other than the
+default profile (symlinks and, on macOS and Windows, case resolved) — the rule Chrome applies to its
+own default profile. A DevTools port would hand whoever opened it the signed-in session, decrypted
+with the app's own keychain access. The launch smoke runs on a throwaway profile, so it can still
+drive the packaged app this way, and it asserts the refusal. What this does not stop: a process
+running as the user that copies the profile to another directory first; such a process already has
+the user's files.
 
 ## Configuration
 
@@ -127,7 +134,7 @@ kept by the app (below). Two environment variables exist for tests and portable 
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `EPICURUS_DESKTOP_USER_DATA_DIR` | unset (the OS default below) | keep settings, cookies and cache in this directory instead. |
+| `EPICURUS_DESKTOP_USER_DATA_DIR` | unset (the OS default below) | keep settings, cookies and cache in this directory instead; also the only way to start the app with a remote-debugging switch (above). |
 | `EPICURUS_DESKTOP_OPEN_EXTERNAL_LOG` | unset | append each URL that would open in the system browser to this file **instead of** opening it — what the launch smoke uses to prove a new-window link left the app. |
 
 ## Data model
@@ -202,8 +209,9 @@ new-window link goes to the system browser and opens nothing in the app; a `file
 refused; leaving for another host shows the bar and Back returns; a restart is still connected
 with its cookie; a stopped server shows the offline page and Retry recovers; Change server refuses
 a non-epicurus server, an `ftp:` address and a closed port, saving nothing. With
-`EPICURUS_WEB_DIST` set (CI sets it), a last test serves the real built web UI from the fixture
-and screenshots it and its push card.
+`EPICURUS_WEB_DIST` set (CI sets it), a test serves the real built web UI from the fixture
+and screenshots it and its push card. The last test starts the app with `--remote-debugging-port`
+on its default profile and asserts it exits without opening the port.
 
 ## Run & extend
 

@@ -32,7 +32,7 @@ export function newUserDataDir(): string {
   return mkdtempSync(join(tmpdir(), "epicurus-desktop-smoke-"));
 }
 
-function command(): { file: string; args: string[] } {
+export function command(): { file: string; args: string[] } {
   const executable = process.env.EPICURUS_DESKTOP_EXECUTABLE;
   const extra = (process.env.EPICURUS_SMOKE_EXTRA_ARGS ?? "").split(" ").filter(Boolean);
   if (executable) return { file: executable, args: extra };

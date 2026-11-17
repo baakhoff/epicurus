@@ -4,14 +4,21 @@
  * keep new windows out of the app, show which host it is on, and never be blank when the server
  * is down.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 
 import { startFixture, type Fixture } from "./fixture-server";
-import { launchApp, newUserDataDir, readSettings, screenshotDir, type RunningApp } from "./launch";
+import {
+  command,
+  launchApp,
+  newUserDataDir,
+  readSettings,
+  screenshotDir,
+  type RunningApp,
+} from "./launch";
 
 const isConnect = (url: string) => url.startsWith("epicurus-app://local/connect.html");
 const isOffline = (url: string) => url.startsWith("epicurus-app://local/offline.html");
@@ -279,3 +286,31 @@ declare global {
     epicurusShell: unknown;
   }
 }
+
+test("the app refuses a DevTools port onto its default profile", async () => {
+  // Without EPICURUS_DESKTOP_USER_DATA_DIR the profile is the user's real one: the app must exit
+  // before Chromium opens the port (src/main/debugging.ts).
+  const { file, args } = command();
+  const env = { ...process.env };
+  delete env.EPICURUS_DESKTOP_USER_DATA_DIR;
+  const child = spawn(file, [...args, "--remote-debugging-port=0"], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout?.on("data", (c: Buffer) => (output += c.toString()));
+  child.stderr?.on("data", (c: Buffer) => (output += c.toString()));
+  const code = await new Promise<number | null>((resolveExit) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      resolveExit(null);
+    }, 30_000);
+    child.once("exit", (exitCode) => {
+      clearTimeout(timer);
+      resolveExit(exitCode);
+    });
+  });
+  expect(output).not.toContain("DevTools listening");
+  expect(output).toContain("refuses --remote-debugging-port");
+  expect(code).toBe(1);
+});

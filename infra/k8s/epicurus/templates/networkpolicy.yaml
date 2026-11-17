@@ -105,6 +105,35 @@ spec:
         - protocol: TCP
           port: 8080
 {{- end }}
+{{- if .Values.hermarchus.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: epicurus-hermarchus
+  labels:
+    {{- include "epicurus.labels" (dict "ctx" $ "component" "networkpolicy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "epicurus.selectorLabels" (dict "ctx" $ "component" "hermarchus") | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    # The agent host answers its controller and nobody else. Ingress-only like the rest of
+    # this file: its agents call their vendors (and npm, for an install) outbound.
+    - from:
+        {{- if .Values.hermarchus.ingressFrom }}
+        {{- toYaml .Values.hermarchus.ingressFrom | nindent 8 }}
+        {{- else }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: epicurus
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

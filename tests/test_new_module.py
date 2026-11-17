@@ -50,9 +50,11 @@ def test_name_derivation_matches_template(new_module: ModuleType) -> None:
 
 
 def test_next_free_port_in_repo(new_module: ModuleType) -> None:
-    # 8082-8093 are taken in the real tree (messaging took 8093, #364); next free is 8094.
-    assert new_module.next_free_port(REPO) == 8094
-    assert 8094 not in new_module.published_ports(REPO)
+    # 8082-8094 are taken in the real tree (messaging took 8093, #364; the hermarchus overlay
+    # took 8094, #1016); next free is 8095.
+    assert new_module.next_free_port(REPO) == 8095
+    assert 8095 not in new_module.published_ports(REPO)
+    assert new_module.published_ports(REPO)[8094] == "services/hermarchus/compose.yaml"
 
 
 def test_run_scaffolds_and_wires(new_module: ModuleType, tmp_path: Path) -> None:

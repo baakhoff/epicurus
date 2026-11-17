@@ -1,0 +1,65 @@
+# Packaging for macOS, Windows and Linux (docs/apps/desktop.md § Packaging).
+# No auto-update, no notarisation, no signing certificate: macOS builds are ad-hoc signed
+# (an unsigned arm64 app does not start at all), Windows builds are unsigned.
+appId: com.baakhoff.epicurus
+productName: Epicurus
+copyright: Copyright © the epicurus authors
+directories:
+  output: release
+  buildResources: resources
+files:
+  - dist/**/*
+  - package.json
+  - "!**/*.map"
+asar: true
+# Production fuses (https://www.electronjs.org/docs/latest/tutorial/fuses), flipped before
+# signing. The CI packaging workflow prints them back from each packaged binary.
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: false
+publish: null
+mac:
+  category: public.app-category.productivity
+  icon: resources/icon.png
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+  identity: "-"
+  hardenedRuntime: false
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+dmg:
+  writeUpdateInfo: false
+win:
+  icon: resources/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+nsis:
+  artifactName: ${productName}-${version}-windows-${arch}-setup.${ext}
+  oneClick: true
+  perMachine: false
+  differentialPackage: false
+linux:
+  icon: resources/icon.png
+  executableName: epicurus
+  syncDesktopName: true
+  category: Office
+  synopsis: Desktop app for an epicurus server
+  maintainer: NikolaI Baakh <a@baakhoff.com>
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+appImage:
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}
+deb:
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}

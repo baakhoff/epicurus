@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true, "rootDir": ".", "lib": ["ES2023", "DOM", "DOM.Iterable"] },
+  "include": ["src/main", "src/preload", "test", "vitest.config.mts", "playwright.config.ts"]
+}

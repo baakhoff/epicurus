@@ -82,6 +82,22 @@ class _FakePlatform:
         self.list_calls: list[str] = []
         self.search_calls: list[tuple[str, int]] = []
         self.read_calls: list[str] = []
+        # Every ``for_tenant`` pin the tools asked for (#917), and the calls made under a pin
+        # other than the owner's — which see an empty file space of their own.
+        self.pins: list[str] = []
+        self.foreign_calls: list[tuple[str, str, str]] = []
+
+    def for_tenant(self, tenant_id: str) -> _FakePlatform | _ForeignFileSpace:
+        """The file space *tenant_id* sees: the seeded one for the owner, an empty one else.
+
+        Mirrors the core honouring the ``tenant_id`` a pinned ``PlatformClient`` sends: the
+        seeded entries belong to :data:`TENANT`; any other tenant's file space is empty and a
+        read in it is a 404, so a test can tell which tenant the tool actually asked as.
+        """
+        self.pins.append(tenant_id)
+        if tenant_id == TENANT:
+            return self
+        return _ForeignFileSpace(self, tenant_id)
 
     async def files_list(self, path: str = "") -> list[FileEntry]:
         self.list_calls.append(path)
@@ -106,6 +122,30 @@ class _FakePlatform:
                 response=httpx.Response(self._read_errors[path]),
             )
         return self._reads[path]
+
+
+class _ForeignFileSpace:
+    """Another tenant's (empty) core file space, as seen through a pinned client (#917)."""
+
+    def __init__(self, owner: _FakePlatform, tenant: str) -> None:
+        self._owner = owner
+        self._tenant = tenant
+
+    async def files_list(self, path: str = "") -> list[FileEntry]:
+        self._owner.foreign_calls.append((self._tenant, "list", path))
+        return []
+
+    async def files_search(self, query: str, *, limit: int = 50) -> list[FileEntry]:
+        self._owner.foreign_calls.append((self._tenant, "search", query))
+        return []
+
+    async def files_read(self, path: str) -> str:
+        self._owner.foreign_calls.append((self._tenant, "read", path))
+        raise httpx.HTTPStatusError(
+            "not found",
+            request=httpx.Request("GET", "http://core/files/read"),
+            response=httpx.Response(404),
+        )
 
 
 class _FakeObjectStore(ObjectStore):
@@ -596,9 +636,9 @@ async def test_tools_act_on_the_default_tenant_when_no_context_is_bound(
 ) -> None:
     """The single-tenant v1 path: nothing binds a tenant, so every tool uses the default.
 
-    This is the no-regression assertion for the whole change — the core does not carry a
-    tenant across the MCP hop today, so an unbound call must still land exactly where it
-    always did.
+    This is the no-regression assertion for the whole change — a call that names no tenant
+    (a core older than #917, or an in-process call) must still land exactly where it always
+    did.
     """
     module = _build(tmp_index, fake_objects, platform=_FakePlatform(), default_tenant=TENANT)
     await module.call_tool("storage_object_put", {"key": "memo.md", "content": "default"})
@@ -635,8 +675,8 @@ async def test_two_tenants_never_see_each_others_objects_through_the_tools(
         _c, listing = await module.call_tool("storage_list", {})
         assert _names(listing) == {"theirs.md"}
         _c, read = await module.call_tool("storage_read", {"path": "ours.md"})
-        # Not their object and — with no client for another tenant's file space — not a
-        # file-space read either: a clean miss, never the default tenant's bytes.
+        # Not their object, and the file-space read is asked as *their* tenant (#917): a
+        # clean miss, never the default tenant's bytes.
         assert _result(read) == "Error: file not found"
         _c, got = await module.call_tool("storage_object_get", {"key": "ours.md"})
         assert _result(got) == {"key": "ours.md", "content": None}
@@ -651,14 +691,16 @@ async def test_two_tenants_never_see_each_others_objects_through_the_tools(
     assert _names(found) == set()
 
 
-async def test_the_file_space_is_not_read_for_a_foreign_tenant(
+async def test_the_file_space_follows_the_bound_tenant(
     tmp_index: FileIndex, fake_objects: _FakeObjectStore
 ) -> None:
-    """The platform client carries one identity, so a foreign tenant gets no file space.
+    """The file-space half asks the core as the call's own tenant (#917, ADR-0137's limit).
 
-    Serving it anyway would leak the default tenant's files under another tenant's name —
-    the file-space half is the core's to scope, and this module cannot ask for it as anyone
-    but itself.
+    Before #917 the platform client carried one identity, so a foreign tenant got no file
+    space at all. Now the tools pin the client to the resolved tenant: the default tenant
+    still sees its own files, and a call bound to another tenant asks the core *as that
+    tenant* — reaching that tenant's (here empty) file space, never the default tenant's files
+    under the other tenant's name.
     """
     platform = _FakePlatform(
         listing={"": [_entry("core.md")]},
@@ -679,7 +721,29 @@ async def test_the_file_space_is_not_read_for_a_foreign_tenant(
         assert _result(read) == "Error: file not found"
     finally:
         reset_current_tenant(token)
-    # The core was asked exactly once — by the module's own tenant, never for the other one.
+    # The owner's file space was asked exactly once, by the owner; the other tenant was asked
+    # for in its own name, three times — the core decides what it may see.
     assert platform.list_calls == [""]
     assert platform.search_calls == []
     assert platform.read_calls == []
+    assert platform.foreign_calls == [
+        (OTHER_TENANT, "list", ""),
+        (OTHER_TENANT, "search", "core"),
+        (OTHER_TENANT, "read", "core.md"),
+    ]
+    assert platform.pins == [TENANT, OTHER_TENANT, OTHER_TENANT, OTHER_TENANT]
+
+
+async def test_in_process_call_with_a_tenant_binds_it(
+    tmp_index: FileIndex, fake_objects: _FakeObjectStore
+) -> None:
+    """``call_tool(..., tenant=)`` binds exactly as the core's header does over the wire."""
+    platform = _FakePlatform()
+    module = _build(tmp_index, fake_objects, platform=platform, default_tenant=TENANT)
+    await module.call_tool(
+        "storage_object_put", {"key": "memo.md", "content": "theirs"}, tenant=OTHER_TENANT
+    )
+    assert await fake_objects.get(tenant=OTHER_TENANT, key="memo.md") == "theirs"
+    assert await fake_objects.get(tenant=TENANT, key="memo.md") is None
+    await module.call_tool("storage_list", {}, tenant=OTHER_TENANT)
+    assert platform.pins == [OTHER_TENANT]

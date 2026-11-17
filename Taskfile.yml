@@ -76,6 +76,16 @@ tasks:
     cmds:
       - docker compose -f compose.yaml -f infra/ollama/compose.hosted-only.yaml down {{.CLI_ARGS}}
 
+  hermarchus-up:
+    desc: 'Start Hermarchus, the agent host (#1016), beside the stack — an opt-in overlay. Needs HERMARCHUS_TOKEN set (openssl rand -hex 32); listens on 127.0.0.1:8094'
+    cmds:
+      - docker compose -f compose.yaml -f services/hermarchus/compose.yaml up -d hermarchus
+
+  hermarchus-down:
+    desc: 'Stop and remove the Hermarchus container. Its workspace, home (installed agents, sign-ins) and state volumes are kept; drop them with `docker volume rm epicurus_hermarchus-workspace epicurus_hermarchus-home epicurus_hermarchus-state`'
+    cmds:
+      - docker compose -f compose.yaml -f services/hermarchus/compose.yaml rm -s -f hermarchus
+
   down:
     desc: Stop the full stack (append `-- -v` to also drop volumes)
     cmds:

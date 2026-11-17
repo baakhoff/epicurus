@@ -176,14 +176,16 @@ the MCP tools closed over one tenant fixed at build time. They now resolve per c
   file routes use, so a single-tenant self-host is byte-for-byte unchanged. Malformed → **400**,
   never a silent read of another tenant's catalogue.
 - **MCP tools.** The tenant bound to `epicurus_core.tenancy.current_tenant`, else
-  `DEFAULT_TENANT_ID`. Nothing binds that context on a module tool call today — the core
-  dispatches a tool by name and URL (`McpHost.call`) and does not carry a tenant across the MCP
-  hop — so every tool call still resolves to the default. Making the *contract* carry it is a
-  core-side change; this module is ready for it.
-- **The file-space half is the core's.** `storage_list` / `storage_search` / `storage_read`
-  merge in the core file space through a `PlatformClient` built with one identity (this
-  deployment's default tenant). A call resolving to any other tenant therefore answers from the
-  object store alone rather than serving the default tenant's files under another tenant's name.
+  `DEFAULT_TENANT_ID`. Since #917 the core names the tenant on every module tool call (the
+  `x-epicurus-tenant` header) and `EpicurusModule` binds it around the tool, so a tool call
+  resolves to the tenant the agent turn belongs to; a call that names none (a core older than
+  #917, an in-process call with nothing bound) resolves to the default, as before.
+- **The file-space half follows the same tenant (#917).** `storage_list` / `storage_search` /
+  `storage_read` merge in the core file space through `platform.for_tenant(tenant)` — the
+  `PlatformClient` pinned to the tenant the call resolved — so the core answers from *that*
+  tenant's file space. Before #917 the client carried one identity and a call for any other
+  tenant answered from the object store alone (ADR-0137's second accepted limit); that limit is
+  gone.
 - **No backfill was needed.** Every row and object ever written by this module was written under
   the default tenant and stays exactly where it is; the change is which tenant a *request*
   resolves to.

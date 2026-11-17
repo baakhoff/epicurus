@@ -12,9 +12,10 @@ from typing import Any
 
 import httpx2
 from mcp import Client, MCPError
+from mcp.client.streamable_http import streamable_http_client
 from mcp.types import ContentBlock, TextContent
 
-from epicurus_core import SideEffect, get_logger
+from epicurus_core import TENANT_HEADER, SideEffect, get_logger
 
 log = get_logger("epicurus_core_app.agent.mcp")
 
@@ -30,6 +31,11 @@ _BUILTIN_URL = "__builtin__"
 # default HTTP client. 30s is generous — a tool may make an external round-trip (a Google
 # write) — but finite, matching the ``_post_json`` write bound in ``modules.py``.
 _CALL_TIMEOUT_S = 30.0
+
+# The HTTP-level timeouts for a module tool call's own client — the SDK's defaults
+# (``create_mcp_http_client``: 30s connect/write/pool, 300s read for a held-open stream),
+# restated because the call now brings its own client to carry the tenant header (#917).
+_HTTP_TIMEOUT = httpx2.Timeout(30.0, read=300.0)
 
 #: A built-in tool: its OpenAI function spec + an async handler
 #: ``(arguments, tenant, session_id) -> text``. ``tenant`` lets a built-in read or write
@@ -239,10 +245,15 @@ class McpHost:
     ) -> str:
         """Call ``name`` on the module at ``url`` (or a core built-in) and return its text.
 
-        ``tenant`` scopes a core built-in's access to per-tenant state; ``session_id`` (#707)
-        is the calling turn's session, for a built-in that persists a per-session choice
-        (``set_chat_model``). Neither is used for a module call (the module resolves identity
-        through the platform API, and has no notion of the core's session ids).
+        ``tenant`` is the tenant the call acts for. A core built-in receives it as an
+        argument; a **module** receives it in the ``x-epicurus-tenant`` header of the MCP
+        request (#917), and ``EpicurusModule`` binds it around the tool, so the tool — and every
+        ``PlatformClient`` call it makes back into the core — acts for this tenant rather than
+        the module's deployment default. The module trusts the header because the module↔core
+        contract runs on the internal network only (constraint #7). ``session_id`` (#707) is
+        the calling turn's session, for a built-in that persists a per-session choice
+        (``set_chat_model``); a module has no notion of the core's session ids and never
+        receives it.
 
         Every hop is bounded so an unresponsive module can never hang the caller (#472):
         the RPC rounds (handshake + tool call) by :data:`_CALL_TIMEOUT_S` at the session
@@ -260,7 +271,16 @@ class McpHost:
             # ``Client`` (mcp 2.0) owns transport + session + handshake in one object; the
             # session-level read timeout applies to every request it sends, the tool RPC
             # included, replacing 1.x's per-piece transport/session/initialize wiring.
-            async with Client(url, read_timeout_seconds=_CALL_TIMEOUT_S) as client:
+            # The call brings its own HTTP client so every request it sends — the handshake
+            # and the ``tools/call`` alike — carries the tenant header (#917). The transport
+            # does not own a client it was handed, so this block closes it.
+            async with (
+                httpx2.AsyncClient(headers={TENANT_HEADER: tenant}, timeout=_HTTP_TIMEOUT) as http,
+                Client(
+                    streamable_http_client(url, http_client=http),
+                    read_timeout_seconds=_CALL_TIMEOUT_S,
+                ) as client,
+            ):
                 result = await client.call_tool(name, arguments)
         except (MCPError, httpx2.HTTPError, OSError, ExceptionGroup) as exc:
             # The client runs its streamable-HTTP transport in an anyio task group, so a

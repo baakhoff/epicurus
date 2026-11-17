@@ -642,3 +642,76 @@ searxng:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+# ── Hermarchus, the agent host (#1016) ───────────────────────────────────────
+# OFF by default. One instance bound to one profile, running agent sessions over the Agent
+# Client Protocol in its own pod, driven over HTTP by whoever holds its bearer token. It owns
+# nothing in the stack and talks to nothing in it; it is a ClusterIP Service only — reach it
+# with `kubectl port-forward svc/hermarchus 8094:8080`. See docs/services/hermarchus.md.
+hermarchus:
+  enabled: false
+  image:
+    repository: ""
+    tag: ""
+  # The profile (tenant id) the instance is bound to. Blank = `defaultTenantId`.
+  profile: ""
+  # The bearer token. Precedence: `existingSecret` (key `token`) > this value > the value
+  # already in the release's `hermarchus` Secret > a fresh random one, so a `helm upgrade`
+  # never rotates it. Read it back with:
+  #   kubectl get secret hermarchus -o jsonpath='{.data.token}' | base64 -d
+  token: ""
+  existingSecret: ""
+  maxSessions: 10
+  # Unattended: permission requests nobody answers are rejected after 60s (instead of 30m).
+  unattended: false
+  # Agent kinds whose `install` command runs into the home volume at start, comma-separated
+  # (e.g. "claude-code,codex"). Failures are reported in /v1/info, never fatal.
+  installKinds: ""
+  # Extra environment, NAME: value. HERMARCHUS_TOKEN/PROFILE are set by the chart.
+  extraEnv: {}
+  persistence:
+    # The agents' workspace, the home directory (installed agent programs + their
+    # sign-ins), and the session spool. One ReadWriteOnce claim each.
+    workspace:
+      size: 20Gi
+      storageClass: ""
+      existingClaim: ""
+    home:
+      size: 10Gi
+      storageClass: ""
+      existingClaim: ""
+    state:
+      size: 1Gi
+      storageClass: ""
+      existingClaim: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 4Gi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  # With networkPolicy.enabled: who may reach port 8080. Empty = pods of this release only
+  # (never another hermarchus pod).
+  ingressFrom: []
+  # With networkPolicy.enabled the pod may send only to cluster DNS (k8s-app=kube-dns) and to
+  # public addresses — nothing in the release, the cluster or the LAN. Extra NetworkPolicy
+  # egress rules, appended as given (e.g. a node-local DNS cache or an HTTP proxy):
+  #   egressExtra:
+  #     - to: [{ipBlock: {cidr: 169.254.20.10/32}}]
+  #       ports: [{protocol: UDP, port: 53}]
+  egressExtra: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

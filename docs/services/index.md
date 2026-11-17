@@ -19,6 +19,7 @@ contract. This is the map of every running block — each row links its full ref
 | **notes** | module | author Obsidian-style notes into a private collection — the agent can list titles and propose changes (reviewed) but never reads a body | `8092` | [notes](notes.md) |
 | **messaging** | module | chat bridges — external channels (Telegram, Discord, …) drive a turn and replies route back out; provider-pluggable, loopback built in (ADR-0058) | `8093` | [messaging](messaging.md) |
 | **echo** | module | the reference module — proves the MCP tool + NATS event contract end to end | `8080` | [echo](echo.md) |
+| **hermarchus** | agent host | runs agent sessions (Agent Client Protocol programs, the built-in `echo` agent) for one profile, driven over HTTP by a controller with its token — **opt-in**, not in the default stack, not a module | `8094` | [hermarchus](hermarchus.md) |
 
 Ports are loopback-bound by default; the [edge gateway](../infrastructure/index.md#edge-gateway)
 is the front door at `http://<host>:8088/`. The full allocation (and how a new

@@ -1,0 +1,67 @@
+# Hermarchus — the agent host (#1016). An OPT-IN overlay: it is deliberately NOT in the root
+# compose.yaml `include:` list, so a plain `docker compose up` is unchanged by it. Layer it
+# on explicitly, with a token:
+#
+#   export HERMARCHUS_TOKEN="$(openssl rand -hex 32)"
+#   docker compose -f compose.yaml -f services/hermarchus/compose.yaml up -d hermarchus
+#   # or: task hermarchus-up
+#
+# Paths below are relative to the project directory (the repo root), as for every overlay
+# merged onto compose.yaml. It needs nothing else from the stack — Hermarchus owns nothing,
+# sits on a network of its own and cannot reach the stack's services; a controller drives it
+# with the token through the published port. See docs/services/hermarchus.md.
+services:
+  hermarchus:
+    build:
+      context: .
+      dockerfile: services/hermarchus/Dockerfile
+    image: ghcr.io/baakhoff/epicurus-hermarchus:${EPICURUS_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      # Refuses to start without one — and so does `docker compose` with this file.
+      HERMARCHUS_TOKEN: ${HERMARCHUS_TOKEN:?set HERMARCHUS_TOKEN (openssl rand -hex 32) to run Hermarchus}
+      HERMARCHUS_PROFILE: ${HERMARCHUS_PROFILE:-local}
+      HERMARCHUS_MAX_SESSIONS: ${HERMARCHUS_MAX_SESSIONS:-10}
+      HERMARCHUS_UNATTENDED: ${HERMARCHUS_UNATTENDED:-false}
+      HERMARCHUS_INSTALL_KINDS: ${HERMARCHUS_INSTALL_KINDS:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Loopback-bound by default; the controller is expected on this machine or behind a
+    # tunnel you set up. Set BIND_ADDRESS to expose it — the token is then all that guards it.
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HERMARCHUS_PORT:-8094}:8080"
+    volumes:
+      # The agents' workspace, the home directory (installed agent programs + their
+      # sign-ins), and the session spool. Named volumes — never a host home directory.
+      - hermarchus-workspace:/workspace
+      - hermarchus-home:/home/hermarchus
+      - hermarchus-state:/state
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Its children are terminated and their sessions marked interrupted on SIGTERM; give
+    # that (and each agent's own grace) time before Docker kills the container.
+    stop_grace_period: 30s
+    labels:
+      - epicurus.metrics.port=8080
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Its OWN network, never the stack's `epicurus` one: agents run arbitrary code, and on
+    # `epicurus` they could reach every module's MCP endpoint, the core's platform API and
+    # model gateway (sign-in guards only requests that came through the web proxy) and the
+    # data plane. On `hermarchus` it reaches the internet (vendors, npm) and nothing in the
+    # stack; the controller comes in through the published port.
+    networks: [hermarchus]
+
+networks:
+  hermarchus: {}
+
+volumes:
+  hermarchus-workspace:
+  hermarchus-home:
+  hermarchus-state:

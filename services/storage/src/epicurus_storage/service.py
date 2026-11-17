@@ -55,10 +55,11 @@ def resolve_tenant(default_tenant: str) -> str:
     platform's one tenant-carrying mechanism, so a call made on another tenant's behalf reaches
     that tenant's catalogue and bucket with nothing else to change here.
 
-    Nothing binds that context on a module tool call today — the core dispatches a tool by name
-    and URL only (``McpHost.call``) — so every tool call resolves to this deployment's default
-    tenant and the single-tenant v1 behaves exactly as it did. Making the core *carry* the
-    tenant across the MCP hop is a core-side change to the contract, not a storage one.
+    Since #917 the core names the tenant on every module tool call (the ``x-epicurus-tenant``
+    header) and ``EpicurusModule`` binds it around the tool, so a call resolves to the tenant
+    the agent turn belongs to. A call that names none — from a core older than #917, or an
+    in-process call with nothing bound — resolves to this deployment's default tenant, exactly
+    as before.
     """
     try:
         return current_tenant()
@@ -335,7 +336,12 @@ def build_module(
 
     *default_tenant* is the **fallback**, not the tenant: every tool resolves its own through
     :func:`resolve_tenant` and falls back to this one when the call carries no tenant context
-    (which, today, is always — see that function).
+    (see that function).
+
+    Both halves of a file tool act for the **same** resolved tenant (#917): the object half
+    scopes its catalogue and bucket by it, and the file-space half asks the core through
+    ``platform.for_tenant(tenant)``, so a call for tenant X reads tenant X's file space — never
+    the default tenant's under X's name, and never nothing.
     """
     hidden = tuple(p.strip("/") for p in hidden_prefixes if p.strip("/"))
 
@@ -343,23 +349,9 @@ def build_module(
         clean = path.replace("\\", "/").strip("/")
         return any(clean == h or clean.startswith(h + "/") for h in hidden)
 
-    def _file_space_readable(tenant: str) -> bool:
-        """Whether the **core** file space may be read on *tenant*'s behalf.
-
-        The object half of every file tool follows the resolved tenant, but the file-space half
-        goes through a :class:`PlatformClient` built with one identity — this deployment's
-        default tenant. A call bound to a different tenant therefore has no client that could
-        read *that* tenant's file space, so the tools answer from the object store alone rather
-        than quietly serving the default tenant's files to someone else (constraint #1). Giving
-        the platform client a per-call tenant is a core-side change (its tenant is baked into
-        the client), so this stays a guard rather than a fallback. Nothing binds a non-default
-        tenant on a tool call today, so this is always true in v1.
-        """
-        return tenant == default_tenant
-
     module = EpicurusModule(
         MODULE_NAME,
-        version="0.12.0",
+        version="0.12.1",
         description=(
             "Agent file tools over the core-owned file space (list, search, read), plus "
             "app-managed object storage via MinIO and durable chat-upload ingest. The Files "
@@ -398,12 +390,10 @@ def build_module(
 
     async def _fs_nodes(path: str, tenant: str) -> list[FileNode]:
         """File-space children of *path*, via the platform API; empty if the core is down."""
-        if not _file_space_readable(tenant):
-            return []
         try:
             return [
                 FileNode(path=e.path, name=e.name, kind=e.kind, size=e.size)
-                for e in await platform.files_list(path)
+                for e in await platform.for_tenant(tenant).files_list(path)
                 if not _is_hidden(e.path)
             ]
         except httpx.HTTPError as exc:
@@ -445,15 +435,14 @@ def build_module(
         tenant = resolve_tenant(default_tenant)
         capped = max(1, min(limit, 200))
         nodes: list[FileNode] = []
-        if _file_space_readable(tenant):
-            try:
-                nodes.extend(
-                    FileNode(path=e.path, name=e.name, kind=e.kind, size=e.size)
-                    for e in await platform.files_search(query, limit=capped)
-                    if not _is_hidden(e.path)
-                )
-            except httpx.HTTPError as exc:
-                log.warning("file-space search failed; returning objects only", error=str(exc))
+        try:
+            nodes.extend(
+                FileNode(path=e.path, name=e.name, kind=e.kind, size=e.size)
+                for e in await platform.for_tenant(tenant).files_search(query, limit=capped)
+                if not _is_hidden(e.path)
+            )
+        except httpx.HTTPError as exc:
+            log.warning("file-space search failed; returning objects only", error=str(exc))
         nodes.extend(
             FileNode(path=o.path, name=o.name, kind=o.kind, size=o.size)
             for o in await index.search(tenant=tenant, query=query, limit=capped)
@@ -488,12 +477,10 @@ def build_module(
                 return obj.data.decode("utf-8")
             except UnicodeDecodeError:
                 return "Error: file is not valid UTF-8 (binary file)"
-        # Otherwise it is a file-space file — read it through the core file API, which this
-        # module can only address as its own tenant.
-        if not _file_space_readable(tenant):
-            return "Error: file not found"
+        # Otherwise it is a file-space file — read it through the core file API, as the same
+        # tenant the object half just looked under (#917).
         try:
-            return await platform.files_read(path)
+            return await platform.for_tenant(tenant).files_read(path)
         except httpx.HTTPStatusError as exc:
             code = exc.response.status_code
             if code == 404:

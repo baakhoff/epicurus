@@ -243,6 +243,28 @@ hit `PermissionError` and the choice would save but never apply (#392). `ollama-
 only**: the core's write is lazy — it happens when the operator changes the KV-cache type, long
 after boot — so there is no startup race regardless.
 
+### Hermarchus: the agent host (opt-in overlay)
+
+[Hermarchus](../services/hermarchus.md) (#1016) runs agent sessions for one profile and is
+driven over HTTP with a bearer token. It is an **opt-in overlay**,
+[`services/hermarchus/compose.yaml`](../../services/hermarchus/compose.yaml), deliberately not in
+the root `include:` list — a plain `docker compose up` is unchanged by it:
+
+```bash
+export HERMARCHUS_TOKEN="$(openssl rand -hex 32)"   # required: compose refuses without it
+task hermarchus-up
+# == docker compose -f compose.yaml -f services/hermarchus/compose.yaml up -d hermarchus
+```
+
+It publishes `${BIND_ADDRESS:-127.0.0.1}:${HERMARCHUS_PORT:-8094}`, runs as uid 10001, and keeps
+three named volumes — `hermarchus-workspace`, `hermarchus-home` (installed agent programs and
+their sign-ins) and `hermarchus-state` (its session spool) — which `task hermarchus-down` keeps.
+Back them up like any other state. It sits on a **network of its own** (`hermarchus`), not the
+stack's `epicurus` network: its agents run arbitrary code and reach the internet, but no module,
+not the core and not the data plane. The `runtime-smoke` gate brings it up the same way, runs an
+`echo` session through it, and proves from inside the container that `core-app`, a module,
+Postgres and Qdrant do not answer.
+
 ### Hosted-only: no local LLM runtime
 
 A deployment can run **no local runtime at all** — hosted chat and hosted embeddings, nothing

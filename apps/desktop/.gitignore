@@ -1,0 +1,4 @@
+# electron-builder output, and the launch smoke's screenshots and reports
+release/
+test-results/
+playwright-report/

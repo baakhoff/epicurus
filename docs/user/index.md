@@ -21,6 +21,8 @@ expose your own server).
   module, and platform-wide), what stops working, and what carries on.
 - **[Export & import](export-import.md)** — take your whole tenant to another
   epicurus, and bring one in.
+- **[The desktop app](desktop-app.md)** — install Epicurus for macOS, Windows or Linux
+  (unsigned builds: what to do about the first-open warning) and connect it to your server.
 
 ## How it's meant to run
 

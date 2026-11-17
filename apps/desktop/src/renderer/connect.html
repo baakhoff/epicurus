@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Connect to a server — Epicurus</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="connect.js" defer></script>
+  </head>
+  <body>
+    <main class="page">
+      <form class="card" id="connect-form" novalidate>
+        <h1>Connect to a server</h1>
+        <p>Epicurus shows the web app of your own epicurus server. Enter its address.</p>
+        <label for="address">Server address</label>
+        <input
+          type="text"
+          id="address"
+          name="address"
+          placeholder="https://epicurus.example.com"
+          autocomplete="url"
+          spellcheck="false"
+          autofocus
+        />
+        <div class="status" id="status" role="status" aria-live="polite"></div>
+        <div class="warning" id="insecure-warning" hidden>
+          <strong>This connection is not encrypted.</strong>
+          <span id="insecure-text"></span>
+          <div class="row">
+            <button type="button" id="insecure-cancel">Cancel</button>
+            <button type="button" class="primary" id="insecure-confirm">Connect anyway</button>
+          </div>
+        </div>
+        <div class="row" id="actions">
+          <button type="button" id="cancel" hidden>Cancel</button>
+          <button type="submit" class="primary" id="submit">Connect</button>
+        </div>
+      </form>
+    </main>
+  </body>
+</html>

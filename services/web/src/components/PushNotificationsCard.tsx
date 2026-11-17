@@ -14,6 +14,7 @@ import type { PushDeviceRecord, PushStatus } from "@/lib/contracts";
 import {
   getExistingSubscription,
   guessDeviceLabel,
+  isDesktopAppWithoutPush,
   isPushSupported,
   subscribeThisDevice,
   unsubscribeThisDevice,
@@ -156,6 +157,16 @@ function ThisDeviceControl() {
   });
 
   const error = subscribe.error ?? unsubscribe.error;
+
+  if (isDesktopAppWithoutPush()) {
+    return (
+      <p className="text-xs text-ink-dim">
+        Push notifications aren&apos;t available in the desktop app. Subscribe from a browser or
+        your phone to be notified there — everything still appears in the notification center
+        here.
+      </p>
+    );
+  }
 
   if (!isPushSupported()) {
     return (

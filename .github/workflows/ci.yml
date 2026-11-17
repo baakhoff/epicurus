@@ -215,7 +215,10 @@ jobs:
           for v in hermarchus-workspace hermarchus-home hermarchus-state; do
             printf '%s' "$rendered" | grep -q "source: $v" || { echo "volume $v missing"; exit 1; }
           done
-          echo "the Hermarchus overlay is opt-in, needs a token, and binds loopback"
+          HERMARCHUS_TOKEN=ci-token-0123456789abcdef docker compose "$@" config --format json \
+            | jq -e '.services.hermarchus.networks | keys == ["hermarchus"]' >/dev/null \
+            || { echo "hermarchus must sit on its own network, not the stack's"; exit 1; }
+          echo "the Hermarchus overlay is opt-in, needs a token, binds loopback, and is off the stack's network"
 
   # The Helm chart gets the same treatment the compose stack does: rendered, then
   # checked. `helm lint` catches template errors, `helm template` proves the branches
@@ -370,6 +373,8 @@ jobs:
             || { echo "hermarchus mounts a service-account token"; exit 1; }
           printf '%s' "$rendered" | grep -q 'name: epicurus-hermarchus' \
             || { echo "no NetworkPolicy for hermarchus"; exit 1; }
+          printf '%s' "$rendered" | grep -q 'policyTypes: \["Ingress", "Egress"\]' \
+            || { echo "the hermarchus NetworkPolicy does not restrict egress"; exit 1; }
           if helm template epicurus "$CHART" --set hermarchus.enabled=true \
               --set-string hermarchus.token=short >/dev/null 2>err.txt; then
             echo "the chart rendered a token Hermarchus would refuse"; exit 1

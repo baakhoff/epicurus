@@ -12,29 +12,33 @@ images to GHCR.
 
 ## [Unreleased]
 
-- **Hermarchus, the agent host** (#1016) — a new service, `services/hermarchus`, the first
-  version of the third part of the split in #1014. One instance is bound to one profile and runs
-  agent sessions side by side on one workspace, driven over HTTP by a controller holding its
-  bearer token (it refuses to start without one; `/health` and `/metrics` stay open). A session
-  is an agent program spoken to over the **Agent Client Protocol** (v1, JSON-RPC over stdio, one
-  process per session): input goes through a durable inbox and is delivered after the running
-  turn (`queue`) or at the next step boundary by cancelling it (`steer`); every session has an
-  ordered, durable event log read as server-sent events with replay (`?after=`) and `follow`,
-  with a bounded queue per connection so a slow reader is dropped with a resume point instead of
-  stalling anyone; permission requests are relayed and answered once / always (remembered for the
-  project directory) / reject, and nothing waits forever — unattended sessions reject after 60s,
-  attended ones after 30 minutes. Agents get the client file methods confined to the workspace,
-  never the service's environment, and are terminated with their sessions marked interrupted on
-  shutdown; a crash's leftovers are reconciled on start. Kinds come from a registry: the built-in
-  `echo` reference agent (a real ACP agent, what the tests and both smoke gates drive) and
-  documented entries for Claude Code, Codex and Grok Build — **not verified by running**, and not
-  in the image; they install into the instance's home volume on request
+- **Hermarchus, the agent host** (#1016) — a new service, `services/hermarchus`, the first version
+  of the third part of the split in #1014. One instance is bound to one tenant id (the profile it
+  will serve once profiles exist) and runs agent sessions side by side on one workspace, driven over
+  HTTP by a controller holding its bearer token (it refuses to start without one; `/health` and
+  `/metrics` stay open). A session is an agent program spoken to over the **Agent Client Protocol**
+  (v1, JSON-RPC over stdio, one process per session): input goes through a durable inbox and is
+  delivered after the running turn (`queue`) or at the next step boundary by cancelling it
+  (`steer`); every session has an ordered, durable event log read as server-sent events with replay
+  (`?after=`) and `follow`, with a bounded queue per connection so a slow reader is dropped with a
+  resume point instead of stalling anyone; permission requests are relayed and answered once /
+  always (remembered for the project directory) / reject, and nothing waits forever — unattended
+  sessions reject after 60s, attended ones after 30 minutes. Agents get the client file methods
+  confined to the workspace, never the service's environment, and are terminated with their sessions
+  marked interrupted on shutdown; a crash's leftovers are reconciled on start. Kinds come from a
+  registry: the built-in `echo` reference agent (a real ACP agent, what the tests and both smoke
+  gates drive) and documented entries for Claude Code, Codex and Grok Build — **not verified by
+  running**, and not in the image; they install into the instance's home volume on request
   (`HERMARCHUS_INSTALL_KINDS`) or by hand, and are signed in to there. Its state is a SQLite spool
   versioned with `PRAGMA user_version`, outside the Postgres migration gate by design. Opt-in on
-  both platforms: a Compose overlay (`task hermarchus-up`, `127.0.0.1:8094`, three named volumes;
-  the default `docker compose up` is unchanged) and a chart block `hermarchus.enabled` (off by
-  default; non-root, no service-account token, a token Secret kept across upgrades, a
-  NetworkPolicy). `runtime-smoke` and `k8s-smoke` both run an `echo` session end to end.
+  both platforms: a Compose overlay (`task hermarchus-up`, `127.0.0.1:8094`, three named volumes, a
+  network of its own so agents cannot reach the stack; the default `docker compose up` is unchanged)
+  and a chart block `hermarchus.enabled` (off by default; non-root, no service-account token, a
+  token Secret kept across upgrades, and with `networkPolicy.enabled` a policy that keeps its egress
+  off the release, the cluster and the LAN). Agents run as the service's own user with no
+  operating-system sandbox inside the container — the container is the wall; the service makes
+  itself non-dumpable so an agent cannot read its token through `/proc`. `runtime-smoke` and
+  `k8s-smoke` both run an `echo` session end to end.
   `hermarchus` 0.1.0 (new) · chart 0.4.0→0.5.0 (MINOR).
 - **Calendar test no longer fails every winter** (#1019) — the operator-timezone free-slot test
   hardcoded Belgrade's summer offset (`+02:00`), so `quality` went red on every pull request from

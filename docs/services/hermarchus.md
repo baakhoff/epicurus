@@ -1,8 +1,9 @@
 # hermarchus — the agent host
 
 **Hermarchus** runs agent sessions inside its own container (or machine) and exposes them to a
-*controller* over HTTP. One instance is bound to exactly **one profile** (a `tenant_id`) and runs
-any number of sessions side by side on **one workspace filesystem**. Agents are programs that
+*controller* over HTTP. One instance is bound to exactly **one profile** — today simply a
+`tenant_id`, since profiles themselves are not built yet
+([architecture](../developer/architecture.md)) — and runs any number of sessions side by side on **one workspace filesystem**. Agents are programs that
 speak the [Agent Client Protocol](https://agentclientprotocol.com) (ACP) over stdio — Claude Code,
 Codex and Grok Build through their ACP entry points, or the built-in **`echo`** reference agent —
 started one process per session. Whoever holds the instance's bearer token is its controller: it

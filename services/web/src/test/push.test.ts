@@ -10,6 +10,7 @@ vi.mock("@/lib/api", () => ({
 import {
   getExistingSubscription,
   guessDeviceLabel,
+  isDesktopAppWithoutPush,
   isPushSupported,
   subscribeThisDevice,
   unsubscribeThisDevice,
@@ -164,5 +165,40 @@ describe("guessDeviceLabel", () => {
       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile Safari/604.1",
     );
     expect(guessDeviceLabel()).toBe("Safari on iOS");
+  });
+});
+
+describe("the desktop app marker (#1015)", () => {
+  function setMarker(value: unknown) {
+    Object.defineProperty(window, "epicurusDesktop", { configurable: true, value });
+  }
+  afterEach(() => {
+    delete (window as { epicurusDesktop?: unknown }).epicurusDesktop;
+  });
+
+  it("is absent in a plain browser, which keeps the browser checks in charge", () => {
+    stubServiceWorker({});
+    expect(isDesktopAppWithoutPush()).toBe(false);
+    expect(isPushSupported()).toBe(true);
+  });
+
+  it("reports push unsupported when the desktop app says webPush is false", async () => {
+    stubServiceWorker({ getSubscription: vi.fn() });
+    setMarker({ shell: "electron", platform: "darwin", capabilities: { webPush: false } });
+    expect(isDesktopAppWithoutPush()).toBe(true);
+    expect(isPushSupported()).toBe(false);
+    expect(await getExistingSubscription()).toBeNull();
+    expect(await subscribeThisDevice()).toBeNull();
+  });
+
+  it("ignores a marker that does not say webPush is false", () => {
+    stubServiceWorker({});
+    setMarker({ capabilities: { webPush: true } });
+    expect(isDesktopAppWithoutPush()).toBe(false);
+    setMarker({ capabilities: { webPush: "false" } });
+    expect(isDesktopAppWithoutPush()).toBe(false);
+    setMarker("electron");
+    expect(isDesktopAppWithoutPush()).toBe(false);
+    expect(isPushSupported()).toBe(true);
   });
 });

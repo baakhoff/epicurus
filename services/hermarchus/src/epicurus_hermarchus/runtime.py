@@ -52,6 +52,9 @@ log = structlog.get_logger("hermarchus.runtime")
 INPUT_MODES = ("queue", "steer")
 DECISIONS = ("once", "always", "reject")
 # After one of these a session's log is complete; a following stream ends.
+# How long a failing session waits for the agent's exit status before recording it.
+EXIT_CODE_WAIT_S = 2.0
+
 TERMINAL_EVENTS = ("session.stopped", "session.failed", "session.interrupted")
 
 _UPDATE_EVENTS = {
@@ -253,6 +256,10 @@ class LiveSession:
         if self._ending:
             return
         self._ending = True
+        # The agent's stdout can close (AgentExited) before its exit status has been reaped;
+        # give the exit watch a moment so the event carries the real exit code, not null.
+        if self._exit_watch is not None and not self._exit_watch.done():
+            await asyncio.wait({self._exit_watch}, timeout=EXIT_CODE_WAIT_S)
         tail = self.adapter.stderr_tail() if self.adapter else []
         code = self.adapter.returncode if self.adapter else None
         await self._release_pending("session_failed")
